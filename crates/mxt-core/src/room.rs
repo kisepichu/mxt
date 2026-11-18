@@ -146,8 +146,12 @@ pub struct BridgeInfo {
 /// bridge network, bridge protocol, canonical parent space name, the name of the
 /// parent space when the user has joined exactly one, none.
 ///
-/// Empty and whitespace-only values count as missing. A winning value is
-/// returned unchanged.
+/// Empty and whitespace-only values count as missing. The winning value is
+/// returned trimmed.
+///
+/// `joined_parents` has one entry per parent space the user has joined,
+/// including unnamed ones (pass `""`): the joined-parent step counts the
+/// spaces, not their names.
 pub fn network_name(
     bridge: Option<&BridgeInfo>,
     canonical_parent: Option<&str>,
@@ -165,7 +169,8 @@ pub fn network_name(
     ]
     .into_iter()
     .flatten()
-    .find(|name| !name.trim().is_empty())
+    .map(str::trim)
+    .find(|name| !name.is_empty())
     .map(str::to_owned)
 }
 
@@ -264,6 +269,19 @@ mod tests {
         assert_eq!(
             network_name(Some(&b), Some("Space"), &[]).as_deref(),
             Some("Space")
+        );
+        assert_eq!(
+            network_name(None, Some(" "), &["Only"]).as_deref(),
+            Some("Only")
+        );
+    }
+
+    #[test]
+    fn network_name_trims_the_winning_value() {
+        let b = bridge(Some(" Discord "), None);
+        assert_eq!(
+            network_name(Some(&b), None, &[]).as_deref(),
+            Some("Discord")
         );
     }
 

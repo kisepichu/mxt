@@ -376,21 +376,25 @@ mod tests {
     }
 
     #[test]
-    fn pick_first_and_no_current() {
+    fn pick_without_a_current_room_in_the_list() {
         let l = three_unread();
         let id = |s: &str| Some(RoomId::new(s));
         assert_eq!(
             resolve_room(&l, None, &pick(RoomFilter::Unread, Pick::First)),
             id("!c:example.org")
         );
-        assert_eq!(
-            resolve_room(&l, None, &pick(RoomFilter::Unread, Pick::Next)),
-            id("!c:example.org")
-        );
-        assert_eq!(
-            resolve_room(&l, None, &pick(RoomFilter::Unread, Pick::Prev)),
-            id("!a:example.org")
-        );
+        // A stale open room, for example after the room was removed.
+        let gone = RoomId::new("!gone:example.org");
+        for current in [None, Some(&gone)] {
+            assert_eq!(
+                resolve_room(&l, current, &pick(RoomFilter::Unread, Pick::Next)),
+                id("!c:example.org")
+            );
+            assert_eq!(
+                resolve_room(&l, current, &pick(RoomFilter::Unread, Pick::Prev)),
+                id("!a:example.org")
+            );
+        }
     }
 
     #[test]
@@ -492,5 +496,56 @@ mod tests {
             query: "zzzz".into(),
         };
         assert_eq!(resolve_room(&l, None, &none), None);
+    }
+
+    #[test]
+    fn every_displayed_name_resolves_to_its_own_room() {
+        let l = list(
+            RoomSort::Recent,
+            vec![
+                room(
+                    "!alerts:example.org",
+                    Some("Telegram"),
+                    "!alerts",
+                    Some(10),
+                    unread(0),
+                ),
+                room(
+                    "!general:example.org",
+                    Some("Telegram"),
+                    "general",
+                    Some(20),
+                    unread(0),
+                ),
+                room(
+                    "!club:example.org",
+                    Some("Telegram"),
+                    "^_^ club",
+                    Some(30),
+                    unread(0),
+                ),
+                room("!dev:example.org", Some("Work"), "dev", Some(40), unread(0)),
+                // Newer, so it comes before `Work / dev` in the list.
+                room(
+                    "!devops:example.org",
+                    Some("Work"),
+                    "devops",
+                    Some(50),
+                    unread(0),
+                ),
+            ],
+        );
+        for r in l.rooms() {
+            let target = RoomTarget::Fuzzy {
+                filter: RoomFilter::All,
+                query: r.name.to_string(),
+            };
+            assert_eq!(
+                resolve_room(&l, None, &target).as_ref(),
+                Some(&r.id),
+                "{}",
+                r.name
+            );
+        }
     }
 }
