@@ -1,12 +1,13 @@
-//! The error type of the adapter's startup calls.
+//! The error type of the adapter.
 
 use std::{fmt, path::PathBuf};
 
 use matrix_sdk::{
-    ClientBuildError, HttpError,
+    ClientBuildError, HttpError, StoreError,
     encryption::{recovery::RecoveryError, secret_storage::SecretStorageError},
-    ruma::api::error::ErrorKind,
+    ruma::api::error::{Error as ServerError, ErrorKind},
 };
+use matrix_sdk_ui::{encryption_sync_service, room_list_service, sync_service};
 
 /// Every variant that wraps another error displays its message (the session
 /// file errors after the path) and forwards its source, so printing the
@@ -35,6 +36,12 @@ pub enum Error {
     PasswordLoginUnsupported { offered: Vec<String> },
     /// The homeserver no longer accepts the access token (`M_UNKNOWN_TOKEN`).
     UnknownToken,
+    /// Building the sync service, or its room list.
+    Sync(sync_service::Error),
+    /// An effect names a room this client does not know.
+    UnknownRoom,
+    /// An effect names an event with an ID that is not a Matrix event ID.
+    InvalidEventId,
 }
 
 impl Error {
@@ -42,6 +49,53 @@ impl Error {
     /// and the data directory has to be set aside.
     pub fn is_unknown_token(&self) -> bool {
         matches!(self, Error::UnknownToken)
+    }
+
+    /// The error for the status line and `warn` logs, see `Brief`.
+    pub(crate) fn brief(&self) -> Brief<'_> {
+        let response = match self {
+            Error::Sdk(error)
+            | Error::Recovery(
+                RecoveryError::Sdk(error)
+                | RecoveryError::SecretStorage(SecretStorageError::Sdk(error)),
+            ) => sdk_response(error),
+            Error::Sync(error) => sync_response(error),
+            _ => None,
+        };
+        Brief {
+            error: self,
+            response,
+        }
+    }
+}
+
+/// The sync service's error for the status line and `warn` logs, see `Brief`.
+pub(crate) fn brief_sync(error: &sync_service::Error) -> Brief<'_> {
+    Brief {
+        error,
+        response: sync_response(error),
+    }
+}
+
+/// An error for the status line and `warn` logs. A homeserver's error
+/// response shows only its status code and error code, because its message
+/// can name rooms (Synapse: "User … not in room !…"). The full error belongs
+/// at `debug`.
+pub(crate) struct Brief<'a> {
+    error: &'a dyn fmt::Display,
+    response: Option<&'a ServerError>,
+}
+
+impl fmt::Display for Brief<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Some(response) = self.response else {
+            return self.error.fmt(f);
+        };
+        let status = response.status_code.as_u16();
+        match response.error_kind() {
+            Some(kind) => write!(f, "the homeserver answered {status} {}", kind.errcode()),
+            None => write!(f, "the homeserver answered {status}"),
+        }
     }
 }
 
@@ -66,6 +120,9 @@ impl fmt::Display for Error {
             Error::UnknownToken => {
                 f.write_str("the homeserver no longer accepts this session (M_UNKNOWN_TOKEN)")
             }
+            Error::Sync(error) => error.fmt(f),
+            Error::UnknownRoom => f.write_str("the room is not known to this client"),
+            Error::InvalidEventId => f.write_str("the event ID is not valid"),
         }
     }
 }
@@ -78,7 +135,11 @@ impl std::error::Error for Error {
             Error::Recovery(error) => error.source(),
             Error::Io { error, .. } => error.source(),
             Error::Json { error, .. } => error.source(),
-            Error::PasswordLoginUnsupported { .. } | Error::UnknownToken => None,
+            Error::Sync(error) => error.source(),
+            Error::PasswordLoginUnsupported { .. }
+            | Error::UnknownToken
+            | Error::UnknownRoom
+            | Error::InvalidEventId => None,
         }
     }
 }
@@ -102,6 +163,24 @@ impl From<matrix_sdk::Error> for Error {
 impl From<HttpError> for Error {
     fn from(error: HttpError) -> Self {
         matrix_sdk::Error::from(error).into()
+    }
+}
+
+impl From<StoreError> for Error {
+    fn from(error: StoreError) -> Self {
+        matrix_sdk::Error::from(error).into()
+    }
+}
+
+impl From<sync_service::Error> for Error {
+    fn from(error: sync_service::Error) -> Self {
+        Error::Sync(error)
+    }
+}
+
+impl From<room_list_service::Error> for Error {
+    fn from(error: room_list_service::Error) -> Self {
+        Error::Sync(error.into())
     }
 }
 
@@ -138,6 +217,32 @@ fn is_unknown_token_http(error: &HttpError) -> bool {
     }
 }
 
+fn sdk_response(error: &matrix_sdk::Error) -> Option<&ServerError> {
+    match error {
+        matrix_sdk::Error::Http(error) => http_response(error),
+        _ => None,
+    }
+}
+
+fn http_response(error: &HttpError) -> Option<&ServerError> {
+    match error {
+        HttpError::Cached(error) => http_response(error),
+        error => error.as_client_api_error(),
+    }
+}
+
+fn sync_response(error: &sync_service::Error) -> Option<&ServerError> {
+    match error {
+        sync_service::Error::RoomList(room_list_service::Error::SlidingSync(error))
+        | sync_service::Error::EncryptionSync(
+            encryption_sync_service::Error::SlidingSync(error)
+            | encryption_sync_service::Error::LockError(error)
+            | encryption_sync_service::Error::ClientError(error),
+        ) => sdk_response(error),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -153,11 +258,13 @@ mod tests {
     use super::*;
 
     fn server_error(errcode: &str) -> HttpError {
-        let body: StandardErrorBody =
-            serde_json::from_value(serde_json::json!({ "errcode": errcode, "error": "made up" }))
-                .unwrap();
+        let body: StandardErrorBody = serde_json::from_value(serde_json::json!({
+            "errcode": errcode,
+            "error": "made up, in !room:example.org",
+        }))
+        .unwrap();
         let error = matrix_sdk::ruma::api::error::Error::new(
-            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
             ErrorBody::Standard(body),
         );
         FromHttpResponseError::Server(UiaaResponse::MatrixError(error)).into()
@@ -181,5 +288,33 @@ mod tests {
         let error = Error::from(server_error("M_FORBIDDEN"));
         assert!(!error.is_unknown_token());
         assert!(error.to_string().contains("made up"), "{error}");
+    }
+
+    #[test]
+    fn brief_server_errors_show_only_the_status_and_the_error_code() {
+        let expected = "the homeserver answered 403 M_FORBIDDEN";
+        let error = Error::from(server_error("M_FORBIDDEN"));
+        assert_eq!(error.brief().to_string(), expected);
+        let cached = Error::from(HttpError::Cached(Arc::new(server_error("M_FORBIDDEN"))));
+        assert_eq!(cached.brief().to_string(), expected);
+        let sync = sync_service::Error::RoomList(room_list_service::Error::SlidingSync(
+            server_error("M_FORBIDDEN").into(),
+        ));
+        assert_eq!(brief_sync(&sync).to_string(), expected);
+        assert_eq!(
+            Error::from(sync).brief().to_string(),
+            expected,
+            "the same error as Error::Sync"
+        );
+    }
+
+    #[test]
+    fn brief_other_errors_show_their_message() {
+        assert_eq!(
+            Error::UnknownRoom.brief().to_string(),
+            Error::UnknownRoom.to_string()
+        );
+        let error = sync_service::Error::Supervisor;
+        assert_eq!(brief_sync(&error).to_string(), error.to_string());
     }
 }
