@@ -48,6 +48,8 @@ pub enum Inline {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Block {
     Paragraph(Vec<Inline>),
+    /// `text` has no trailing newline: a renderer trims the one that HTML
+    /// `<pre><code>` content usually ends with.
     Code {
         language: Option<String>,
         text: String,
