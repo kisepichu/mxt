@@ -6,6 +6,7 @@ mod rooms;
 mod search;
 #[cfg(test)]
 mod tests;
+mod timeline;
 
 use crate::action::{Action, Binding};
 use crate::effect::{Effect, UiEffect};
@@ -16,12 +17,13 @@ use crate::msg::{EditorMode, Msg, Pane, SyncState};
 use crate::resolver::{Resolved, Resolver, TimerId};
 use crate::rooms::RoomList;
 use crate::settings::Settings;
+use crate::timeline::TimelineEntry;
 
 pub use command_line::{CommandLine, LineKind};
 
 use command_line::OpenLine;
-use rooms::Motion;
 use search::Direction;
+use timeline::Timeline;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
@@ -50,6 +52,17 @@ struct Viewport {
     last: usize,
 }
 
+/// A cursor movement of `cursor.*`, with its count.
+enum Motion {
+    Down(u32),
+    Up(u32),
+    /// Half pages of the pane's last viewport.
+    HalfPageDown(u32),
+    HalfPageUp(u32),
+    First,
+    Last,
+}
+
 /// The UI state (design, "Domain model"), changed only by [`App::update`].
 pub struct App {
     keymap: Keymap,
@@ -65,6 +78,10 @@ pub struct App {
     /// arrive in any order at startup leave it at the top.
     room_cursor: Option<usize>,
     open_room: Option<RoomId>,
+    /// The open room's timeline; empty while no room is open.
+    timeline: Timeline,
+    /// Whether the full-screen message view is open.
+    view_open: bool,
     focus: Focus,
     sidebar_visible: bool,
     sync_state: SyncState,
@@ -91,6 +108,8 @@ impl App {
             rooms: RoomList::new(settings.room_sort),
             room_cursor: None,
             open_room: None,
+            timeline: Timeline::default(),
+            view_open: false,
             focus,
             sidebar_visible: settings.room_list_visible,
             sync_state: SyncState::default(),
@@ -113,14 +132,26 @@ impl App {
             Msg::RoomUpserted(summary) => self.upsert_room(summary),
             Msg::RoomRemoved(id) => self.remove_room(id, &mut effects),
             Msg::SyncState(state) => self.sync_state = state,
+            Msg::Timeline { room, diffs } => self.timeline_diffs(room, diffs, &mut effects),
+            Msg::PaginationDone {
+                room,
+                reached_start,
+            } => self.pagination_done(room, reached_start, &mut effects),
+            Msg::PaginationFailed { room, error } => self.pagination_failed(room, error),
             Msg::Viewport { pane, first, last } => {
                 let viewport = Some(Viewport { first, last });
                 match pane {
                     Pane::RoomList => self.room_list_viewport = viewport,
-                    Pane::Timeline => self.timeline_viewport = viewport,
+                    Pane::Timeline => {
+                        self.timeline_viewport = viewport;
+                        self.check_receipt(&mut effects);
+                    }
                 }
             }
-            Msg::TerminalFocus(focused) => self.terminal_focused = focused,
+            Msg::TerminalFocus(focused) => {
+                self.terminal_focused = focused;
+                self.check_receipt(&mut effects);
+            }
             Msg::EffectFailed { error } => self.set_status(StatusKind::Error, error),
         }
         effects
@@ -138,6 +169,25 @@ impl App {
 
     pub fn open_room(&self) -> Option<&RoomId> {
         self.open_room.as_ref()
+    }
+
+    /// The open room's entries, oldest first (empty when no room is open).
+    pub fn timeline(&self) -> &[TimelineEntry] {
+        self.timeline.entries()
+    }
+
+    /// Index of the timeline cursor in `timeline()`, always on an `Item`.
+    pub fn timeline_cursor(&self) -> Option<usize> {
+        self.timeline.cursor()
+    }
+
+    /// Whether the timeline follows the newest item.
+    pub fn timeline_follows(&self) -> bool {
+        self.timeline.follows()
+    }
+
+    pub fn view_open(&self) -> bool {
+        self.view_open
     }
 
     pub fn focus(&self) -> Focus {
@@ -170,11 +220,15 @@ impl App {
         self.resolver.count()
     }
 
-    /// "COMMAND" while a command or search line is open, "NORMAL", or for
-    /// the composer's editor "INSERT", "NORMAL", "VISUAL" or "SEARCH".
+    /// "COMMAND" while a command or search line is open, "VIEW" while the
+    /// message view is open, "NORMAL", or for the composer's editor
+    /// "INSERT", "NORMAL", "VISUAL" or "SEARCH".
     pub fn mode_label(&self, editor: Option<EditorMode>) -> &'static str {
         if self.command_line.is_some() {
             return "COMMAND";
+        }
+        if self.view_open {
+            return "VIEW";
         }
         match (self.focus, editor) {
             (Focus::Composer, Some(EditorMode::Insert)) => "INSERT",
@@ -196,6 +250,12 @@ impl App {
     fn input_context(&self, editor: Option<EditorMode>) -> InputContext {
         if self.command_line.is_some() {
             return InputContext::CommandLine;
+        }
+        if self.view_open {
+            return match editor {
+                None | Some(EditorMode::Normal | EditorMode::Visual) => InputContext::MessageView,
+                Some(EditorMode::Insert | EditorMode::Search) => InputContext::EditorPassthrough,
+            };
         }
         match self.focus {
             Focus::RoomList => InputContext::RoomList,
@@ -299,22 +359,26 @@ impl App {
 
     fn run(&mut self, action: &Action, count: u32, effects: &mut Vec<Effect>) {
         match action {
-            Action::CursorDown => self.move_cursor(Motion::Down(count)),
-            Action::CursorUp => self.move_cursor(Motion::Up(count)),
-            Action::CursorFirst => self.move_cursor(Motion::First),
-            Action::CursorLast => self.move_cursor(Motion::Last),
-            Action::CursorHalfPageDown => self.move_cursor(Motion::HalfPageDown(count)),
-            Action::CursorHalfPageUp => self.move_cursor(Motion::HalfPageUp(count)),
+            Action::CursorDown => self.move_cursor(Motion::Down(count), effects),
+            Action::CursorUp => self.move_cursor(Motion::Up(count), effects),
+            Action::CursorFirst => self.move_cursor(Motion::First, effects),
+            Action::CursorLast => self.move_cursor(Motion::Last, effects),
+            Action::CursorHalfPageDown => self.move_cursor(Motion::HalfPageDown(count), effects),
+            Action::CursorHalfPageUp => self.move_cursor(Motion::HalfPageUp(count), effects),
             Action::RoomOpen(target) => self.open_target(target, effects),
             Action::RoomOpenSelected => self.open_selected(effects),
             Action::RoomMarkRead => self.mark_read(effects),
+            Action::MessageView => self.view_message(effects),
+            Action::ViewClose => self.close_view(effects),
+            Action::MessageYank => self.yank_message(effects),
+            Action::MessageGotoReply => self.goto_reply(effects),
             Action::CommandLineOpen => self.open_line(LineKind::Command),
             Action::CommandLineExecute => self.execute_line(effects),
             Action::CommandLineCancel => self.cancel_line(),
             Action::CommandLineComplete => self.complete_line(),
             Action::SearchStart => self.start_search(),
-            Action::SearchNext => self.search_again(Direction::Forward),
-            Action::SearchPrev => self.search_again(Direction::Backward),
+            Action::SearchNext => self.search_again(Direction::Forward, effects),
+            Action::SearchPrev => self.search_again(Direction::Backward, effects),
             Action::SidebarToggle => {
                 self.sidebar_visible = !self.sidebar_visible;
                 if !self.sidebar_visible && self.focus == Focus::RoomList {
@@ -336,6 +400,16 @@ impl App {
         }
     }
 
+    /// Moves the cursor of the focused pane; the composer has no cursor of
+    /// the core.
+    fn move_cursor(&mut self, motion: Motion, effects: &mut Vec<Effect>) {
+        match self.focus {
+            Focus::RoomList => self.move_room_cursor(motion),
+            Focus::Timeline => self.move_timeline_cursor(motion, effects),
+            Focus::Composer => {}
+        }
+    }
+
     fn set_status(&mut self, kind: StatusKind, text: impl Into<String>) {
         self.status = Some(StatusMessage {
             kind,
@@ -348,5 +422,21 @@ impl App {
             Pane::RoomList => self.room_list_viewport,
             Pane::Timeline => self.timeline_viewport,
         }
+    }
+
+    /// Half of the items the pane showed in its last viewport, at least one.
+    /// The timeline's viewport is in entries, of which only items count.
+    fn half_page(&self, pane: Pane) -> usize {
+        let visible = self.viewport(pane).map_or(1, |viewport| match pane {
+            Pane::RoomList => viewport.last.saturating_sub(viewport.first) + 1,
+            Pane::Timeline => self
+                .timeline()
+                .iter()
+                .take(viewport.last.saturating_add(1))
+                .skip(viewport.first)
+                .filter(|entry| matches!(entry, TimelineEntry::Item(_)))
+                .count(),
+        });
+        (visible / 2).max(1)
     }
 }

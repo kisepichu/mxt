@@ -4,6 +4,7 @@ use crate::ids::RoomId;
 use crate::keys::Key;
 use crate::resolver::TimerId;
 use crate::room::RoomSummary;
+use crate::timeline::TimelineDiff;
 
 /// The mode of the edtui editor that has focus, reported with every key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,8 +45,23 @@ pub enum Msg {
     RoomUpserted(RoomSummary),
     RoomRemoved(RoomId),
     SyncState(SyncState),
+    /// Changes of a room's timeline, in order; ignored unless the room is open.
+    Timeline {
+        room: RoomId,
+        diffs: Vec<TimelineDiff>,
+    },
+    /// A `PaginateBackwards` request finished.
+    PaginationDone {
+        room: RoomId,
+        reached_start: bool,
+    },
+    PaginationFailed {
+        room: RoomId,
+        error: String,
+    },
     /// Sent by the tui adapter after a render changed which items are visible;
-    /// `first` and `last` are item indices, inclusive.
+    /// `first` and `last` are inclusive indices of the pane's items, which for
+    /// the timeline are its entries (`App::timeline`).
     Viewport {
         pane: Pane,
         first: usize,

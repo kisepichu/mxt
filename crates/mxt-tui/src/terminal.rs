@@ -103,7 +103,9 @@ impl Tui {
 
     /// Executes a UI effect. `StartTimer` schedules a deadline; `ReplayKeys`
     /// goes to the focused editor (no editors exist before phase 3, so it is
-    /// dropped); `Quit` sets `should_quit`.
+    /// dropped); `OpenView`, `CloseView` and `Yank` are dropped until the
+    /// message view and the clipboard exist (phase 2 Task 5); `Quit` sets
+    /// `should_quit`.
     pub fn execute(&mut self, effect: UiEffect, now: Instant) {
         match effect {
             UiEffect::StartTimer { id, after_ms } => {
@@ -112,7 +114,10 @@ impl Tui {
                     self.timers.start(id, deadline);
                 }
             }
-            UiEffect::ReplayKeys(_) => {}
+            UiEffect::ReplayKeys(_)
+            | UiEffect::OpenView(_)
+            | UiEffect::CloseView
+            | UiEffect::Yank(_) => {}
             UiEffect::Quit => self.should_quit = true,
         }
     }
