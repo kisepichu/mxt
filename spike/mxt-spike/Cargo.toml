@@ -1,0 +1,22 @@
+[package]
+name = "mxt-spike"
+description = "Throwaway phase 0 spike that answers the design's SDK questions against a real account"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+matrix-sdk.workspace = true
+matrix-sdk-ui.workspace = true
+rpassword.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
