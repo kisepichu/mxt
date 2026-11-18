@@ -1774,8 +1774,10 @@ impl App {
   Task 7); `StartTimer` becomes `UiEffect::StartTimer`.
 - `Msg::Timeout`: `Resolver::timeout` with the effective map of the context
   the pending keys started in; handle the outputs as above.
-- `Msg::RoomUpserted`: upsert. The cursor stays on the same room (by id) when
-  the order changes; with no cursor yet it goes to the first room.
+- `Msg::RoomUpserted`: upsert. Until a cursor action, a search or opening a
+  room places the cursor, it stays on whichever room is first (so it stays at
+  the top while rooms arrive at startup); after that it follows its room by
+  id when the order changes.
 - `Msg::RoomRemoved`: remove. A cursor on that room moves to the room now at
   the same index (clamped), or none if the list is empty. If it was the open
   room: no room is open and `UnsubscribeTimeline` is returned.
