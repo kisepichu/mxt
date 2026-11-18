@@ -112,18 +112,21 @@ impl RoomList {
     }
 
     /// Inserts or replaces the room with the same id and restores the order.
-    pub fn upsert(&mut self, summary: RoomSummary) {
-        self.remove(&summary.id);
+    /// Returns the room's old index (`None` for a new room) and its new index.
+    pub fn upsert(&mut self, summary: RoomSummary) -> (Option<usize>, usize) {
+        let old = self.remove(&summary.id).map(|(index, _)| index);
         let sort = self.sort;
-        let index = self
+        let new = self
             .rooms
             .partition_point(|room| sort.compare(room, &summary) == Ordering::Less);
-        self.rooms.insert(index, summary);
+        self.rooms.insert(new, summary);
+        (old, new)
     }
 
-    pub fn remove(&mut self, id: &RoomId) -> Option<RoomSummary> {
+    /// Returns the removed room and the index it had.
+    pub fn remove(&mut self, id: &RoomId) -> Option<(usize, RoomSummary)> {
         let index = self.position(id)?;
-        Some(self.rooms.remove(index))
+        Some((index, self.rooms.remove(index)))
     }
 
     pub fn rooms(&self) -> &[RoomSummary] {
@@ -326,9 +329,32 @@ mod tests {
                 room("!b:example.org", None, "b", Some(20), unread(0)),
             ],
         );
-        l.upsert(room("!a:example.org", None, "a", Some(30), unread(1)));
+        // !a moves from below !b to the top.
+        let moved = l.upsert(room("!a:example.org", None, "a", Some(30), unread(1)));
+        assert_eq!(moved, (Some(1), 0));
         assert_eq!(ids(&l), ["!a:example.org", "!b:example.org"]);
         assert_eq!(l.len(), 2);
+        let added = l.upsert(room("!c:example.org", None, "c", Some(25), unread(0)));
+        assert_eq!(added, (None, 1));
+        assert_eq!(
+            ids(&l),
+            ["!a:example.org", "!c:example.org", "!b:example.org"]
+        );
+    }
+
+    #[test]
+    fn remove_returns_the_index_the_room_had() {
+        let mut l = list(
+            RoomSort::Recent,
+            vec![
+                room("!a:example.org", None, "a", Some(10), unread(0)),
+                room("!b:example.org", None, "b", Some(20), unread(0)),
+            ],
+        );
+        let (index, removed) = l.remove(&RoomId::new("!a:example.org")).unwrap();
+        assert_eq!((index, removed.id.as_str()), (1, "!a:example.org"));
+        assert_eq!(ids(&l), ["!b:example.org"]);
+        assert_eq!(l.remove(&RoomId::new("!a:example.org")), None);
     }
 
     #[test]
