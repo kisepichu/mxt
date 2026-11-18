@@ -3066,6 +3066,22 @@ be pure (for example the server name from a user ID, and the homeserver
 choice from the configuration and the saved session) in small functions with
 unit tests.
 
+**Startup follow-ups** (from the review of Task 10, #18):
+- Restore with the saved homeserver variant of `Homeserver` (no
+  `/versions` request), so mxt starts without network and shows the stored
+  room list with the sync state `offline`.
+- Subscribe to `subscribe_to_session_changes()` after building the client
+  and before `restore`/`login`: the E2EE setup tasks send requests right
+  after `restore_session`.
+- A session file without a store (`data/store` deleted) is invalid: the
+  crypto store would create a new Olm account for an existing device. Treat
+  it like `M_UNKNOWN_TOKEN` before the UI starts (move the data aside, print
+  why, exit 1).
+- `prompt_secret` blocks: once the sync service runs (the recovery prompt
+  after a first login), call it through `tokio::task::spawn_blocking`.
+- `wait_for_device_keys` returning an error other than an unknown token is
+  handled like a timeout (warn that recovery may fail, continue).
+
 **Configuration follow-ups** (from the review of the configuration loader,
 #19; same code, so they land here):
 - `files.download_dir` must be absolute after `~/` expansion; `"~alice/dl"`
