@@ -2,6 +2,13 @@
 
 mod config;
 mod event_loop;
+mod invalidate;
+mod lock;
+mod logging;
+mod paths;
+mod prompt;
+#[cfg(test)]
+mod test_dir;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

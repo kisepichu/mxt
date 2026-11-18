@@ -19,12 +19,19 @@ mxt-tui = { path = "crates/mxt-tui" }
 # The version ratatui 0.30 uses, so there is one crossterm in the tree.
 crossterm = { version = "0.29", features = ["event-stream"] }
 futures-util = "0.3"
+matrix-sdk = { version = "0.19", default-features = false, features = ["e2e-encryption", "sqlite", "rustls-aws-lc-rs"] }
+matrix-sdk-ui = { version = "0.19", default-features = false }
 nucleo-matcher = "0.3"
 ratatui = "0.30"
+rpassword = "7"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 # Reading only: the `display` feature (serialization) is left out.
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # ratatui draws text per grapheme cluster; the view cuts text at the same
 # boundaries.
 unicode-segmentation = "1"

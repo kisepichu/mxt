@@ -3027,10 +3027,11 @@ message and exits with status 1):
    `LockError::Held`: print `another mxt is running (lock: <path>)`.
 3. `init_logging(state, MXT_LOG)`; keep the guard alive until exit.
 4. Session:
-   - `load_session` returns a session: `build_client(Homeserver::Url(saved.homeserver))`,
-     `restore`.
+   - `load_session` returns a session:
+     `build_client(&Homeserver::Saved(saved.homeserver), &paths.store_dirs())`,
+     subscribe to session changes, then `restore`.
    - None: `set_aside_orphaned_store` (log it at `warn`), then
-     `build_client` with `config.homeserver` as `Homeserver::Url`, or
+     `build_client` (with `paths.store_dirs()`) with `config.homeserver` as `Homeserver::Url`, or
      `Homeserver::Discover(<server name of the user ID>)`; print
      `Logging in as <user ID> on <homeserver>`; `prompt_secret("Password: ")`;
      `login`; `save_session` right away, before anything else can fail.
@@ -3065,6 +3066,40 @@ starts (`Error::is_unknown_token`).
 be pure (for example the server name from a user ID, and the homeserver
 choice from the configuration and the saved session) in small functions with
 unit tests.
+
+**Startup follow-ups** (from the review of Task 10, #18):
+- Restore with the saved homeserver variant of `Homeserver` (no
+  `/versions` request), so mxt starts without network and shows the stored
+  room list with the sync state `offline`.
+- Subscribe to `subscribe_to_session_changes()` after building the client
+  and before `restore`/`login`: the E2EE setup tasks send requests right
+  after `restore_session`.
+- A session file without a store (`data/store` deleted) is invalid: the
+  crypto store would create a new Olm account for an existing device. Treat
+  it like `M_UNKNOWN_TOKEN` before the UI starts (move the data aside, print
+  why, exit 1).
+- `prompt_secret` blocks: once the sync service runs (the recovery prompt
+  after a first login), call it through `tokio::task::spawn_blocking`.
+- `wait_for_device_keys` returning an error other than an unknown token is
+  handled like a timeout (warn that recovery may fail, continue).
+
+**Configuration follow-ups** (from the review of the configuration loader,
+#19; same code, so they land here):
+- `files.download_dir` must be absolute after `~/` expansion; `"~alice/dl"`
+  and `"Downloads"` are errors at the value's position
+  (`files.download_dir: "<value>" must be an absolute path or start with ~/`).
+- `ActionError`s point at the offending argument: keep the argument names'
+  spans in the binding DTO and report `UnknownArgument`, `WrongType`,
+  `InvalidValue` and the second argument of `Conflict` at that argument's
+  position (header-form bindings such as `[keymap.normal."]u"]` then point at
+  the right line).
+- Tests for a non-default `account.homeserver` and `ui.time_format`, and for
+  a homeserver value without `https://` or `http://`.
+- Delete `TableId::from_config_name` (unused; the loader maps tables through
+  its DTO) and its test assertion.
+- `main` reads `HOME` and `XDG_CONFIG_HOME` with `std::env::var_os`, like
+  `Paths::from_env`, so a non-UTF-8 value is not silently replaced by the
+  default (`config::default_path` takes `Option<OsString>` too).
 
 - [ ] **Step 1: Write the unit tests for the pure helpers; see them fail.**
 - [ ] **Step 2: Implement the flow.**

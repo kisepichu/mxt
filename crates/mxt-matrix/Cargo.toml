@@ -9,7 +9,11 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+matrix-sdk.workspace = true
 mxt-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true
