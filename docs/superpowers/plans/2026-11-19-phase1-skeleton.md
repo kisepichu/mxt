@@ -1249,8 +1249,10 @@ pub struct Resolver { /* private: pending keys, count, current timer, next timer
 impl Resolver {
     pub fn new() -> Resolver;
     pub fn feed(&mut self, map: &EffectiveMap, counts: bool, timeoutlen_ms: u64, key: Key) -> Vec<Resolved>;
-    /// Stale or unknown ids return nothing.
-    pub fn timeout(&mut self, map: &EffectiveMap, timeoutlen_ms: u64, id: TimerId) -> Vec<Resolved>;
+    /// Stale or unknown ids return `None`. As implemented (following the
+    /// design): the pending keys run only if they are a binding themselves,
+    /// otherwise they are released; nothing is fed again.
+    pub fn timeout(&mut self, map: &EffectiveMap, id: TimerId) -> Option<Resolved>;
     /// Drops pending keys and the count (when the input context changes).
     pub fn reset(&mut self);
     /// Pending keys, for the status line.
@@ -2679,4 +2681,175 @@ request description. Delete the example before committing.
 ```bash
 git add Cargo.toml Cargo.lock crates/mxt-tui crates/mxt
 git commit -m "Add the terminal adapter and the event loop, so the room list, status line and command line are drawn from the core state"
+```
+
+---
+
+### Task 10: Startup building blocks (client, session, recovery, paths, lock, logging)
+
+The pieces of the design's "Startup", "Storage" and "Logging" sections, as
+library code with unit tests. Wiring them into `main` is Task 12, after the
+configuration (Task 8) and the event loop (Task 9) have landed, so this task
+does not touch `crates/mxt/src/main.rs`.
+
+The SDK API details below come from the phase 0 spike (matrix-sdk 0.19.1,
+checked in the crate sources).
+
+**Files:**
+- Modify: root `Cargo.toml` (`[workspace.dependencies]`: `matrix-sdk = {
+  version = "0.19", default-features = false, features = ["e2e-encryption",
+  "sqlite", "rustls-aws-lc-rs"] }`, `matrix-sdk-ui = { version = "0.19",
+  default-features = false }`, `serde_json = "1"`, `rpassword = "7"`,
+  `tracing = "0.1"`, `tracing-subscriber = { version = "0.3", features =
+  ["env-filter", "fmt"] }`, `tracing-appender = "0.2"`, and `tokio` if Task 9
+  has not added it yet), `deny.toml`, `crates/mxt-matrix/Cargo.toml`,
+  `crates/mxt/Cargo.toml`
+- Create: `crates/mxt-matrix/src/client.rs`, `crates/mxt-matrix/src/session.rs`,
+  `crates/mxt-matrix/src/recovery.rs`, `crates/mxt-matrix/src/error.rs`,
+  `crates/mxt/src/paths.rs`, `crates/mxt/src/lock.rs`,
+  `crates/mxt/src/logging.rs`, `crates/mxt/src/invalidate.rs`,
+  `crates/mxt/src/prompt.rs`
+- Modify: `crates/mxt-matrix/src/lib.rs`; declare the new `mxt` modules
+  where `main.rs` already declares modules, or in a `lib.rs`-free way that
+  does not conflict with Task 8 (add `mod paths; mod lock; ...` lines next to
+  the existing `mod` lines, with `#[allow(dead_code)]` on items `main` does
+  not use yet; Task 12 removes the allows)
+
+**Interfaces:**
+
+```rust
+// mxt-matrix
+pub use matrix_sdk::Client;
+
+pub enum Homeserver {
+    /// Discover from the user ID's server name via .well-known.
+    Discover(String),
+    Url(String),
+}
+pub struct StoreDirs { pub data: PathBuf, pub cache: PathBuf }
+
+/// SQLite state and crypto stores in `dirs.data` without a passphrase, the
+/// event cache and media cache in `dirs.cache`
+/// (`ClientBuilder::sqlite_store_with_cache_path`). Encryption settings from
+/// the design: `backup_download_strategy: AfterDecryptionFailure`,
+/// `auto_enable_backups: false`, `auto_enable_cross_signing: false`. Sliding
+/// sync discovered natively (`VersionBuilder::DiscoverNative`). No refresh
+/// tokens.
+pub async fn build_client(homeserver: &Homeserver, dirs: &StoreDirs) -> Result<Client, Error>;
+
+/// What `session.json` holds: the homeserver URL after login (the login
+/// response's well-known can change it) and the SDK session.
+#[derive(Serialize, Deserialize)]
+pub struct SavedSession { pub homeserver: String, pub session: matrix_sdk::authentication::matrix::MatrixSession }
+impl std::fmt::Debug for SavedSession;   // never prints tokens
+
+/// `Ok(None)` when the file does not exist.
+pub fn load_session(path: &Path) -> Result<Option<SavedSession>, Error>;
+/// Writes a temporary file with mode 0600 next to `path`, then renames it.
+pub fn save_session(path: &Path, session: &SavedSession) -> Result<(), Error>;
+/// Password login, device display name "mxt", no refresh token. Fails with
+/// `Error::PasswordLoginUnsupported { offered }` when the server does not
+/// offer `m.login.password`.
+pub async fn login(client: &Client, user_id: &str, password: &str) -> Result<SavedSession, Error>;
+pub async fn restore(client: &Client, session: SavedSession) -> Result<(), Error>;
+
+pub enum RecoveryStatus { Enabled, Incomplete, Disabled, Unknown }
+/// Waits for the E2EE initialization tasks first (the state is `Unknown` before).
+pub async fn recovery_status(client: &Client) -> RecoveryStatus;
+pub async fn recover(client: &Client, key: &str) -> Result<(), Error>;
+/// Polls a one-off `/keys/query` for the own device until its keys are on
+/// the server or `timeout` passes. `Recovery::recover` signs the device, and
+/// that upload needs the device keys on the server, so the first start waits
+/// for this before asking for the recovery key (found in phase 0).
+pub async fn wait_for_device_keys(client: &Client, timeout: Duration) -> Result<bool, Error>;
+
+pub enum Error { /* thiserror-free enum with Display; variants for the SDK error, I/O, JSON, PasswordLoginUnsupported { offered: Vec<String> }, UnknownToken */ }
+impl Error { pub fn is_unknown_token(&self) -> bool; }
+
+// mxt
+pub struct Paths { pub data: PathBuf, pub cache: PathBuf, pub state: PathBuf }
+impl Paths {
+    /// `$XDG_DATA_HOME/mxt`, `$XDG_CACHE_HOME/mxt`, `$XDG_STATE_HOME/mxt`, with
+    /// `~/.local/share`, `~/.cache`, `~/.local/state` when a variable is unset
+    /// or empty; the same on macOS. `None` without `HOME`.
+    pub fn from_env(env: &impl Fn(&str) -> Option<String>) -> Option<Paths>;
+    pub fn session_file(&self) -> PathBuf;   // data/session.json
+    pub fn lock_file(&self) -> PathBuf;      // data/lock
+    pub fn store_dir(&self) -> PathBuf;      // data/store
+    /// Creates the three directories with mode 0700 (and tightens an existing
+    /// data directory to 0700).
+    pub fn create_dirs(&self) -> std::io::Result<()>;
+}
+
+pub struct DataLock { /* the open lock file */ }
+pub enum LockError { Held, Io(std::io::Error) }
+impl DataLock {
+    /// `File::try_lock` on `path`; `Held` when another process holds it.
+    pub fn acquire(path: &Path) -> Result<DataLock, LockError>;
+}
+
+/// Daily files `mxt.<date>.log` in `state_dir`, seven kept
+/// (`tracing_appender::rolling::Builder` with `max_log_files(7)`). `filter` is
+/// `MXT_LOG`; the default is `warn,mxt=info,mxt_core=info,mxt_matrix=info,mxt_tui=info`
+/// (info for mxt, warn for matrix-rust-sdk and everything else). Nothing is
+/// written to the terminal.
+pub fn init_logging(state_dir: &Path, filter: Option<&str>) -> Result<tracing_appender::non_blocking::WorkerGuard, Box<dyn std::error::Error>>;
+
+/// `M_UNKNOWN_TOKEN`: renames the data directory to
+/// `<parent>/mxt.invalid-<unix seconds>` and deletes the cache directory.
+/// Returns the new path. The caller has dropped the SDK client before.
+pub fn invalidate(paths: &Paths, unix_seconds: u64) -> std::io::Result<PathBuf>;
+
+/// Moves a store without a session file (left by a device whose session was
+/// lost) to `data/store.invalid-<unix seconds>`, so a new login never reuses
+/// another device's crypto store. No-op when there is no store.
+pub fn set_aside_orphaned_store(paths: &Paths, unix_seconds: u64) -> std::io::Result<Option<PathBuf>>;
+
+/// Reads a secret from the terminal without echo (`rpassword`).
+pub fn prompt_secret(prompt: &str) -> std::io::Result<String>;
+```
+
+**`deny.toml`:** this task brings matrix-sdk to `main`, so add:
+
+```toml
+[advisories]
+ignore = [
+  # libsqlite3-sys 0.38.2 is pinned by matrix-sdk-sqlite 0.19 through rusqlite.
+  # mxt does not enable the bundled SQLite: Nix builds link the flake's
+  # SQLite (3.54.0, which has the fix); other builds link the system SQLite,
+  # which must be 3.54.0 or newer.
+  { id = "RUSTSEC-2026-0459", reason = "system SQLite is linked; the fix is in SQLite 3.54.0" },
+]
+```
+
+**Tests** (unit tests; no homeserver):
+- `paths.rs`: every variable set; empty values treated as unset; no `HOME`
+  gives `None`; the derived file paths.
+- `lock.rs`: a second `acquire` on the same file while the first is held
+  returns `Held`; after dropping the first, `acquire` succeeds (use a unique
+  directory under `std::env::temp_dir()`; clean it up).
+- `invalidate.rs`: a data directory with a file is renamed to
+  `mxt.invalid-<n>` next to it, and the cache directory is gone;
+  `set_aside_orphaned_store` moves `store` only when `session.json` is
+  missing.
+- `session.rs`: `save_session` then `load_session` round-trips a made-up
+  session (`@alice:example.org`, device `ABCDEFGHIJ`, token
+  `not-a-real-token`); the file mode is 0600; a missing file loads as `None`;
+  `format!("{:?}", session)` does not contain the token.
+
+- [ ] **Step 1: Write the failing tests.**
+- [ ] **Step 2: Run them to see them fail.** `mxt` and `mxt-matrix` now
+  compile matrix-sdk: run every cargo command under the shared lock.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run the tests, fmt and clippy.** Check `build_client` by
+  hand with a throwaway test or example (not committed) against a public
+  homeserver's discovery, for example `Homeserver::Discover("matrix.org")`
+  with temporary directories: it must build without logging in. Do not log in
+  anywhere.
+- [ ] **Step 5: Commit.** CI's Nix workflow builds the package because
+  `Cargo.lock` changed; do not run `nix build` locally.
+
+```bash
+git add Cargo.toml Cargo.lock deny.toml crates/mxt-matrix crates/mxt
+git commit -m "Add the startup building blocks: the SDK client with the design's store and encryption settings, session files, recovery, paths, the data directory lock and logging"
 ```
