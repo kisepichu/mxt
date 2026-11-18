@@ -9,6 +9,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+nucleo-matcher.workspace = true
 
 [lints]
 workspace = true
