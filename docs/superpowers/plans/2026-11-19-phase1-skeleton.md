@@ -1650,3 +1650,849 @@ logic, appending outputs in order.
 git add crates/mxt-core/src/keymap.rs crates/mxt-core/src/resolver.rs crates/mxt-core/src/lib.rs
 git commit -m "Add the keymap with its default tables and the deterministic resolver, so fallback chains, nop shadowing, pending keys and counts are defined and tested in the core"
 ```
+
+---
+
+### Task 6: App state, messages, effects and room list browsing
+
+**Files:**
+- Create: `crates/mxt-core/src/settings.rs`, `crates/mxt-core/src/effect.rs`,
+  `crates/mxt-core/src/msg.rs`, `crates/mxt-core/src/app.rs` (state, accessors
+  and `update` dispatch), `crates/mxt-core/src/app/rooms.rs` (room list
+  actions), `crates/mxt-core/src/app/tests.rs`
+- Modify: `crates/mxt-core/src/lib.rs`
+
+**Interfaces:**
+- Consumes: Tasks 2–5.
+- Produces (the adapters build on these; later phases add variants):
+
+```rust
+// settings.rs: settings the core needs, converted from the configuration by `mxt`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ImagePreview { #[default] Auto, Off }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ReceiptKind { #[default] Public, Private }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Settings {
+    pub timeoutlen_ms: u64,        // default 1000
+    pub room_sort: RoomSort,       // default Recent
+    pub room_list_visible: bool,   // default true
+    pub image_preview: ImagePreview,
+    pub read_receipts: ReceiptKind,
+}
+impl Default for Settings;
+
+// effect.rs
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Effect { Matrix(MatrixEffect), Ui(UiEffect) }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MatrixEffect {
+    SubscribeTimeline(RoomId),
+    UnsubscribeTimeline(RoomId),
+    /// `room.mark_read`: a receipt for the room's latest event, and clear its manual unread mark.
+    MarkRoomRead(RoomId),
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UiEffect {
+    StartTimer { id: TimerId, after_ms: u64 },
+    /// Keys for the focused editor (the composer's or the message view's), in order.
+    ReplayKeys(Vec<Key>),
+    Quit,
+}
+
+// msg.rs
+/// The mode of the edtui editor that has focus, reported with every key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditorMode { Normal, Visual, Insert, Search }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pane { RoomList, Timeline }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SyncState { #[default] Starting, Synced, Offline, Retrying }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Msg {
+    /// `editor` is `Some` while an editor (composer or message view) has focus.
+    Key { key: Key, editor: Option<EditorMode> },
+    Timeout { id: TimerId },
+    RoomUpserted(RoomSummary),
+    RoomRemoved(RoomId),
+    SyncState(SyncState),
+    /// Sent by the tui adapter after a render changed which items are visible.
+    Viewport { pane: Pane, first: usize, last: usize },
+    TerminalFocus(bool),
+    EffectFailed { error: String },
+}
+
+// app.rs
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Focus { RoomList, Timeline, Composer }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusKind { Info, Error }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StatusMessage { pub kind: StatusKind, pub text: String }
+
+pub struct App { /* private */ }
+impl App {
+    pub fn new(keymap: Keymap, settings: Settings) -> App;
+    /// Deterministic and free of I/O.
+    pub fn update(&mut self, msg: Msg) -> Vec<Effect>;
+
+    // Read access for rendering.
+    pub fn rooms(&self) -> &RoomList;
+    /// Index of the room list cursor in `rooms().rooms()`.
+    pub fn room_cursor(&self) -> Option<usize>;
+    pub fn open_room(&self) -> Option<&RoomId>;
+    pub fn focus(&self) -> Focus;
+    pub fn sidebar_visible(&self) -> bool;
+    pub fn sync_state(&self) -> SyncState;
+    pub fn terminal_focused(&self) -> bool;
+    pub fn status(&self) -> Option<&StatusMessage>;
+    /// Pending keys and count, for the status line (like nvim's showcmd).
+    pub fn pending_keys(&self) -> &[Key];
+    pub fn pending_count(&self) -> Option<u32>;
+    /// "NORMAL", "COMMAND", or for an editor "INSERT", "NORMAL", "VISUAL", "SEARCH".
+    pub fn mode_label(&self, editor: Option<EditorMode>) -> &'static str;
+}
+```
+
+**Behavior:**
+- Start: focus on the room list when `room_list_visible`, otherwise the
+  timeline; no room open; sync state `Starting`; terminal focused.
+- `Msg::Key`: clear the status message; compute the input context
+  (command line open → `CommandLine`; focus `RoomList` → `RoomList`; focus
+  `Timeline` → `Timeline`; focus `Composer` → by `editor`: `Normal` →
+  `ComposerNormal`, `Visual` → `ComposerVisual`, `Insert` → `ComposerInsert`
+  (`ComposerCompletion` once the mention menu exists, phase 3), `Search` →
+  `EditorPassthrough`, `None` → `ComposerNormal`). If the context differs
+  from the one the resolver's pending keys started in, `reset` the resolver.
+  Feed the key and handle each `Resolved` in order: `Run` runs the binding's
+  actions in order, each against the state the previous one left, passing the
+  count to actions that `takes_count` (count 1 otherwise); `Release` goes to
+  the context's sink (`Drop`: nothing; `Editor`: `UiEffect::ReplayKeys`,
+  consecutive releases merged into one effect; `Text`: the command line,
+  Task 7); `StartTimer` becomes `UiEffect::StartTimer`.
+- `Msg::Timeout`: `Resolver::timeout` with the effective map of the context
+  the pending keys started in; handle the outputs as above.
+- `Msg::RoomUpserted`: upsert. The cursor stays on the same room (by id) when
+  the order changes; with no cursor yet it goes to the first room.
+- `Msg::RoomRemoved`: remove. A cursor on that room moves to the room now at
+  the same index (clamped), or none if the list is empty. If it was the open
+  room: no room is open and `UnsubscribeTimeline` is returned.
+- `Msg::SyncState`, `Msg::TerminalFocus`, `Msg::Viewport`: store.
+- `Msg::EffectFailed { error }`: status message of kind `Error`.
+- Actions in this task:
+  - `cursor.down` / `cursor.up` (count n): move the cursor of the focused
+    pane by n, clamped, no wrapping. `cursor.first` / `cursor.last`.
+    `cursor.half_page_down` / `_up` (count n): move by
+    n × max(1, visible / 2), where visible = `last - first + 1` of the pane's
+    last viewport, or 1 without one. In the timeline these act once the
+    timeline exists (phase 2); until then they do nothing there.
+  - `room.open_selected`: open the room under the cursor.
+  - `room.open(target)`: `resolve_room(rooms, open_room, target)`; no match
+    sets the status `No matching room`.
+  - Opening a room: if it is already open, only focus the timeline.
+    Otherwise return `UnsubscribeTimeline(previous)` (when one was open) then
+    `SubscribeTimeline(new)`, set it open, move the room list cursor to it and
+    focus the timeline.
+  - `room.mark_read`: the target is the room under the cursor when the room
+    list has focus, otherwise the open room. Clear its counts optimistically
+    (`RoomList::clear_unread`) and return `MarkRoomRead(target)`. Without a
+    target, status `No room`.
+  - `sidebar.toggle`: flip the visibility; hiding it while it has focus moves
+    the focus to the timeline.
+  - `focus.room_list`: show the room list if hidden, then focus it.
+    `focus.timeline`: focus the timeline.
+  - `app.quit`: `UiEffect::Quit`. `nop`: nothing.
+  - Every other action sets the status `<action name> is not available yet`
+    (kind `Info`); the phase that implements it replaces this. Task 7 adds the
+    command line and search actions.
+
+- [ ] **Step 1: Write the failing tests** (`app/tests.rs`, declared with
+`#[cfg(test)] mod tests;` in `app.rs`)
+
+```rust
+use super::*;
+use crate::action::{Action, Binding};
+use crate::effect::{Effect, MatrixEffect, UiEffect};
+use crate::ids::{RoomId, Timestamp};
+use crate::keymap::{Keymap, TableId};
+use crate::keys::KeySeq;
+use crate::msg::{EditorMode, Msg, Pane};
+use crate::room::{NotificationMode, RoomKind, RoomName, RoomSummary, UnreadCounts};
+use crate::settings::Settings;
+
+fn space() -> KeySeq {
+    KeySeq::parse("<Space>", &KeySeq::default()).unwrap()
+}
+fn seq(text: &str) -> KeySeq {
+    KeySeq::parse(text, &space()).unwrap()
+}
+fn id(s: &str) -> RoomId {
+    RoomId::new(s)
+}
+fn room(rid: &str, at: u64, messages: u64) -> RoomSummary {
+    RoomSummary {
+        id: id(rid),
+        name: RoomName { network: None, room: rid.trim_start_matches('!').into() },
+        kind: RoomKind::Group,
+        unread: UnreadCounts { messages, ..UnreadCounts::default() },
+        mode: NotificationMode::Default,
+        latest_activity: Some(Timestamp::from_millis(at)),
+    }
+}
+fn app_with(user: Vec<(TableId, KeySeq, Binding)>) -> App {
+    let mut app = App::new(Keymap::new(&space(), user), Settings::default());
+    // Order (newest first): !c, !b, !a. !b is read.
+    for r in [room("!a:example.org", 10, 1), room("!b:example.org", 20, 0), room("!c:example.org", 30, 2)] {
+        app.update(Msg::RoomUpserted(r));
+    }
+    app
+}
+fn app() -> App {
+    app_with(vec![])
+}
+fn keys(app: &mut App, text: &str) -> Vec<Effect> {
+    keys_in(app, text, None)
+}
+fn keys_in(app: &mut App, text: &str, editor: Option<EditorMode>) -> Vec<Effect> {
+    seq(text).keys().iter().flat_map(|&key| app.update(Msg::Key { key, editor })).collect()
+}
+fn cursor_id(app: &App) -> &str {
+    app.rooms().rooms()[app.room_cursor().unwrap()].id.as_str()
+}
+fn no_timers(effects: Vec<Effect>) -> Vec<Effect> {
+    effects.into_iter().filter(|e| !matches!(e, Effect::Ui(UiEffect::StartTimer { .. }))).collect()
+}
+
+#[test]
+fn starts_on_the_room_list_with_the_cursor_on_the_first_room() {
+    let app = app();
+    assert_eq!(app.focus(), Focus::RoomList);
+    assert_eq!(cursor_id(&app), "!c:example.org");
+    assert_eq!(app.mode_label(None), "NORMAL");
+}
+
+#[test]
+fn cursor_moves_with_counts_and_clamps() {
+    let mut app = app();
+    keys(&mut app, "j");
+    assert_eq!(cursor_id(&app), "!b:example.org");
+    keys(&mut app, "5j");
+    assert_eq!(cursor_id(&app), "!a:example.org");
+    keys(&mut app, "gg");
+    assert_eq!(cursor_id(&app), "!c:example.org");
+    keys(&mut app, "G");
+    assert_eq!(cursor_id(&app), "!a:example.org");
+}
+
+#[test]
+fn half_page_uses_the_last_viewport() {
+    let mut app = app();
+    for i in 0..20 {
+        app.update(Msg::RoomUpserted(room(&format!("!r{i:02}:example.org"), 100 + i, 0)));
+    }
+    keys(&mut app, "gg");
+    app.update(Msg::Viewport { pane: Pane::RoomList, first: 0, last: 9 });
+    keys(&mut app, "<C-d>");
+    assert_eq!(app.room_cursor(), Some(5));
+    keys(&mut app, "2<C-d>");
+    assert_eq!(app.room_cursor(), Some(15));
+}
+
+#[test]
+fn cursor_follows_its_room_when_the_order_changes() {
+    let mut app = app();
+    keys(&mut app, "j"); // on !b
+    app.update(Msg::RoomUpserted(room("!b:example.org", 99, 1)));
+    assert_eq!(cursor_id(&app), "!b:example.org");
+    assert_eq!(app.room_cursor(), Some(0));
+}
+
+#[test]
+fn opening_a_room_subscribes_and_focuses_the_timeline() {
+    let mut app = app();
+    let fx = keys(&mut app, "j<CR>");
+    assert_eq!(fx, vec![Effect::Matrix(MatrixEffect::SubscribeTimeline(id("!b:example.org")))]);
+    assert_eq!(app.open_room(), Some(&id("!b:example.org")));
+    assert_eq!(app.focus(), Focus::Timeline);
+    let fx = keys(&mut app, "<C-w>hgg<CR>");
+    assert_eq!(no_timers(fx), vec![
+        Effect::Matrix(MatrixEffect::UnsubscribeTimeline(id("!b:example.org"))),
+        Effect::Matrix(MatrixEffect::SubscribeTimeline(id("!c:example.org"))),
+    ]);
+}
+
+#[test]
+fn reopening_the_open_room_only_moves_focus() {
+    let mut app = app();
+    keys(&mut app, "<CR>");
+    let fx = keys(&mut app, "<C-w>h<CR>");
+    assert_eq!(no_timers(fx), vec![]);
+    assert_eq!(app.focus(), Focus::Timeline);
+}
+
+#[test]
+fn open_next_unread_wraps_and_skips_read_rooms() {
+    let next = Binding::single(Action::from_spec("room.open", &[
+        ("filter".into(), crate::action::ArgValue::String("unread".into())),
+        ("pick".into(), crate::action::ArgValue::String("next".into())),
+    ]).unwrap());
+    let mut app = app_with(vec![(TableId::Normal, seq("]u"), next)]);
+    keys(&mut app, "]u");
+    assert_eq!(app.open_room(), Some(&id("!c:example.org")));
+    keys(&mut app, "]u");
+    assert_eq!(app.open_room(), Some(&id("!a:example.org")));
+    keys(&mut app, "]u");
+    assert_eq!(app.open_room(), Some(&id("!c:example.org")));
+}
+
+#[test]
+fn mark_read_then_next_unread_is_deterministic() {
+    let next = Action::from_spec("room.open", &[
+        ("filter".into(), crate::action::ArgValue::String("unread".into())),
+        ("pick".into(), crate::action::ArgValue::String("next".into())),
+    ]).unwrap();
+    let both = Binding::new(vec![Action::RoomMarkRead, next]).unwrap();
+    let mut app = app_with(vec![(TableId::Normal, seq("<Space>x"), both)]);
+    keys(&mut app, "<CR>"); // open !c (unread 2)
+    let fx = no_timers(keys(&mut app, "<Space>x"));
+    assert_eq!(fx, vec![
+        Effect::Matrix(MatrixEffect::MarkRoomRead(id("!c:example.org"))),
+        Effect::Matrix(MatrixEffect::UnsubscribeTimeline(id("!c:example.org"))),
+        Effect::Matrix(MatrixEffect::SubscribeTimeline(id("!a:example.org"))),
+    ]);
+    assert_eq!(app.rooms().get(&id("!c:example.org")).unwrap().unread, UnreadCounts::default());
+}
+
+#[test]
+fn mark_read_targets_the_cursor_room_in_the_room_list() {
+    let mut app = app_with(vec![(TableId::Normal, seq("<Space>r"), Binding::single(Action::RoomMarkRead))]);
+    keys(&mut app, "<CR><C-w>hG"); // open !c, back to the room list, cursor on !a
+    let fx = no_timers(keys(&mut app, "<Space>r"));
+    assert_eq!(fx, vec![Effect::Matrix(MatrixEffect::MarkRoomRead(id("!a:example.org")))]);
+    keys(&mut app, "<C-w>l");
+    let fx = no_timers(keys(&mut app, "<Space>r"));
+    assert_eq!(fx, vec![Effect::Matrix(MatrixEffect::MarkRoomRead(id("!c:example.org")))]);
+}
+
+#[test]
+fn sidebar_toggle_moves_focus_off_a_hidden_room_list() {
+    let mut app = app();
+    keys(&mut app, "<Space>e");
+    assert!(!app.sidebar_visible());
+    assert_eq!(app.focus(), Focus::Timeline);
+    keys(&mut app, "<C-w>h");
+    assert!(app.sidebar_visible());
+    assert_eq!(app.focus(), Focus::RoomList);
+}
+
+#[test]
+fn removing_the_open_room_unsubscribes_and_keeps_a_cursor() {
+    let mut app = app();
+    keys(&mut app, "<CR>"); // open !c
+    keys(&mut app, "<C-w>h");
+    let fx = app.update(Msg::RoomRemoved(id("!c:example.org")));
+    assert_eq!(fx, vec![Effect::Matrix(MatrixEffect::UnsubscribeTimeline(id("!c:example.org")))]);
+    assert_eq!(app.open_room(), None);
+    assert_eq!(cursor_id(&app), "!b:example.org");
+}
+
+#[test]
+fn quit_and_unavailable_actions() {
+    let mut app = app();
+    assert_eq!(no_timers(keys(&mut app, "<Space><Space>")).len(), 0);
+    assert_eq!(app.status().unwrap().text, "picker.rooms is not available yet");
+    let quit = Binding::single(Action::AppQuit);
+    let mut app = app_with(vec![(TableId::Normal, seq("Q"), quit)]);
+    assert_eq!(keys(&mut app, "Q"), vec![Effect::Ui(UiEffect::Quit)]);
+}
+
+#[test]
+fn status_clears_on_the_next_key() {
+    let mut app = app();
+    app.update(Msg::EffectFailed { error: "boom".into() });
+    assert_eq!(app.status().unwrap().kind, StatusKind::Error);
+    keys(&mut app, "j");
+    assert_eq!(app.status(), None);
+}
+
+#[test]
+fn timeout_releases_through_the_original_context() {
+    let mut app = app();
+    let fx = keys(&mut app, "g");
+    let Some(Effect::Ui(UiEffect::StartTimer { id, .. })) = fx.last().cloned() else { panic!("{fx:?}") };
+    assert_eq!(app.pending_keys(), seq("g").keys());
+    assert_eq!(app.update(Msg::Timeout { id }), vec![]);
+    assert!(app.pending_keys().is_empty());
+}
+
+#[test]
+fn editor_contexts_release_keys_to_the_editor() {
+    let mut app = app();
+    keys(&mut app, "<CR>");
+    app.focus_composer_for_test();
+    // Insert mode: unbound keys go to edtui; releases from one key are merged.
+    let fx = no_timers(keys_in(&mut app, "<C-x>a", Some(EditorMode::Insert)));
+    assert_eq!(fx, vec![Effect::Ui(UiEffect::ReplayKeys(seq("<C-x>a").keys().to_vec()))]);
+    // Normal mode: `x` is unbound in `composer.normal` and `normal`.
+    assert_eq!(keys_in(&mut app, "x", Some(EditorMode::Normal)), vec![
+        Effect::Ui(UiEffect::ReplayKeys(seq("x").keys().to_vec())),
+    ]);
+    // Search mode: every key goes to edtui, even `<Esc>`.
+    assert_eq!(keys_in(&mut app, "<Esc>", Some(EditorMode::Search)), vec![
+        Effect::Ui(UiEffect::ReplayKeys(seq("<Esc>").keys().to_vec())),
+    ]);
+    assert_eq!(app.mode_label(Some(EditorMode::Insert)), "INSERT");
+}
+```
+
+`focus_composer_for_test` is a `#[cfg(test)] pub(crate)` method on `App` that
+sets `Focus::Composer` while a room is open; `composer.focus` (phase 3)
+replaces it. All `Release` outputs of one `feed` or `timeout` call are merged
+into one `ReplayKeys` effect.
+
+- [ ] **Step 2: Run them to see them fail:** `nix develop -c cargo test -p mxt-core app`
+- [ ] **Step 3: Implement.** `app.rs` holds the state, accessors, the key
+dispatch and the action `match`; `app/rooms.rs` holds the room list actions
+as `impl App` methods. Keep `update` a thin `match` over `Msg`.
+- [ ] **Step 4: Run all core tests**, then fmt and clippy.
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/mxt-core/src
+git commit -m "Add the App state and update for room list browsing, so keys resolve to actions and effects without I/O"
+```
+
+---
+
+### Task 7: Command line and search
+
+**Files:**
+- Create: `crates/mxt-core/src/app/command_line.rs`, `crates/mxt-core/src/app/search.rs`
+- Modify: `crates/mxt-core/src/app.rs`, `crates/mxt-core/src/app/tests.rs`
+
+**Interfaces:**
+- Consumes: `parse_command`, `COMMANDS`, `takes_argument` (Task 4), `fuzzy::rank` (Task 2), `App` (Task 6).
+- Produces:
+
+```rust
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineKind { Command, Search(Pane) }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandLine { pub kind: LineKind, pub text: String }
+impl App {
+    /// The open command line, rendered as `:` or `/` followed by `text`.
+    pub fn command_line(&self) -> Option<&CommandLine>;
+}
+```
+
+Both types live in `app/command_line.rs` and are re-exported from `app.rs`
+(`pub use command_line::{CommandLine, LineKind};`).
+
+**Behavior:**
+- `command_line.open`: open an empty `Command` line. `search.start`: open an
+  empty `Search(<focused pane>)` line (room list or timeline; from the
+  composer it does nothing).
+- Keys released to the `Text` sink while a line is open: a key with
+  `Key::text()` appends the character; `<BS>` deletes the last character, or
+  closes the line when it is empty; `<C-u>` clears the text; `<C-w>` deletes
+  the last word (trailing whitespace, then non-whitespace). Other keys are
+  ignored. Every edit resets completion.
+- `command_line.cancel`: close the line.
+- `command_line.execute`: close the line, then for `Command`:
+  `parse_command(text)`: `Ok(Some(action))` runs it (count 1), `Ok(None)` does
+  nothing, `Err(e)` sets an `Error` status with `e`'s message. For
+  `Search(pane)`: search with the text (an empty text reuses the last
+  pattern).
+- `command_line.complete` (`Command` lines only): the first press computes
+  the candidates and remembers the text as typed:
+  - no whitespace in the text: the `COMMANDS` that start with it, each
+    completed as the name plus a space when `takes_argument`;
+  - text `open <query>`: the displayed names of all rooms ranked with
+    `fuzzy::rank(query, names)`, each completed as `open <name>`.
+  Each press replaces the text with the next candidate; after the last one the
+  typed text comes back, then the cycle repeats. No candidates: nothing
+  happens.
+- Search (room list): case-insensitive substring match (`to_lowercase` on
+  both sides) on the displayed name, starting after the cursor and wrapping
+  around (the cursor's own room is checked last). Found: move the cursor.
+  Not found: `Error` status `Pattern not found: <pattern>`. The pattern is
+  remembered as the last search.
+- `search.next` / `search.prev`: repeat the last pattern forward / backward in
+  the focused pane. Without one: `Error` status `No previous search`.
+- Timeline search behaves the same once the timeline exists (phase 2); until
+  then it reports `Pattern not found`.
+- `mode_label` is `COMMAND` while a line is open.
+
+- [ ] **Step 1: Write the failing tests** (append to `app/tests.rs`)
+
+```rust
+fn line(app: &App) -> Option<(LineKind, &str)> {
+    app.command_line().map(|l| (l.kind, l.text.as_str()))
+}
+
+#[test]
+fn command_line_runs_a_command() {
+    let mut app = app();
+    keys(&mut app, ":open b");
+    assert_eq!(line(&app), Some((LineKind::Command, "open b")));
+    assert_eq!(app.mode_label(None), "COMMAND");
+    let fx = keys(&mut app, "<CR>");
+    assert_eq!(fx, vec![Effect::Matrix(MatrixEffect::SubscribeTimeline(id("!b:example.org")))]);
+    assert_eq!(line(&app), None);
+}
+
+#[test]
+fn command_line_keys_do_not_trigger_bindings() {
+    let mut app = app();
+    keys(&mut app, ":jjgg");
+    assert_eq!(line(&app), Some((LineKind::Command, "jjgg")));
+    assert_eq!(cursor_id(&app), "!c:example.org");
+}
+
+#[test]
+fn command_line_editing() {
+    let mut app = app();
+    keys(&mut app, ":open foo bar<C-w>");
+    assert_eq!(line(&app), Some((LineKind::Command, "open foo ")));
+    keys(&mut app, "<C-u>");
+    assert_eq!(line(&app), Some((LineKind::Command, "")));
+    keys(&mut app, "a<BS>");
+    assert_eq!(line(&app), Some((LineKind::Command, "")));
+    keys(&mut app, "<BS>");
+    assert_eq!(line(&app), None);
+}
+
+#[test]
+fn command_errors_go_to_the_status_line() {
+    let mut app = app();
+    keys(&mut app, ":quit<CR>");
+    assert_eq!(app.status().unwrap().kind, StatusKind::Error);
+    // `:q` quits.
+    assert_eq!(keys(&mut app, ":q<CR>"), vec![Effect::Ui(UiEffect::Quit)]);
+}
+
+#[test]
+fn escape_cancels_the_command_line() {
+    let mut app = app();
+    keys(&mut app, ":open b<Esc>");
+    assert_eq!(line(&app), None);
+    assert_eq!(app.open_room(), None);
+}
+
+#[test]
+fn completes_command_names_and_cycles_back() {
+    let mut app = app();
+    keys(&mut app, ":u");
+    keys(&mut app, "<Tab>");
+    assert_eq!(line(&app), Some((LineKind::Command, "unmute")));
+    keys(&mut app, "<Tab>");
+    assert_eq!(line(&app), Some((LineKind::Command, "upload ")));
+    keys(&mut app, "<Tab>");
+    assert_eq!(line(&app), Some((LineKind::Command, "u")));
+}
+
+#[test]
+fn completes_room_names_for_open() {
+    let mut app = app();
+    keys(&mut app, ":open c<Tab>");
+    assert_eq!(line(&app), Some((LineKind::Command, "open c:example.org")));
+}
+
+#[test]
+fn search_moves_the_cursor_and_repeats() {
+    let mut app = app();
+    keys(&mut app, "/A:<CR>");
+    assert_eq!(cursor_id(&app), "!a:example.org");
+    keys(&mut app, "n");
+    assert_eq!(cursor_id(&app), "!a:example.org"); // only match: wraps onto itself
+    keys(&mut app, "/example<CR>");
+    assert_eq!(cursor_id(&app), "!c:example.org"); // after !a, wrapping
+    keys(&mut app, "n");
+    assert_eq!(cursor_id(&app), "!b:example.org");
+    keys(&mut app, "N");
+    assert_eq!(cursor_id(&app), "!c:example.org");
+}
+
+#[test]
+fn search_failures() {
+    let mut app = app();
+    keys(&mut app, "n");
+    assert_eq!(app.status().unwrap().text, "No previous search");
+    keys(&mut app, "/zzz<CR>");
+    assert_eq!(app.status().unwrap().text, "Pattern not found: zzz");
+}
+```
+
+- [ ] **Step 2: Run them to see them fail:** `nix develop -c cargo test -p mxt-core app`
+- [ ] **Step 3: Implement** `app/command_line.rs` (line editing, execute,
+completion state) and `app/search.rs`; route the `Text` sink and the new
+actions from `app.rs`.
+- [ ] **Step 4: Run all core tests**, then fmt and clippy.
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/mxt-core/src
+git commit -m "Add the command line with completion and pane search, so commands and / searches resolve through the same actions as keys"
+```
+
+---
+
+### Task 8: Configuration loading
+
+**Files:**
+- Modify: root `Cargo.toml` (`serde = { version = "1", features = ["derive"] }`,
+  `toml = "1"` in `[workspace.dependencies]`),
+  `crates/mxt/Cargo.toml`, `crates/mxt/src/main.rs`
+- Create: `crates/mxt/src/config.rs` (paths, loading, conversion, errors),
+  `crates/mxt/src/config/dto.rs` (serde DTOs), `crates/mxt/src/config/tests.rs`
+
+**Interfaces:**
+- Consumes: `KeySeq::parse`, `Action::from_spec`, `ArgValue`, `Binding`,
+  `Keymap::new`, `TableId`, `Settings`, `RoomSort`, `ImagePreview`,
+  `ReceiptKind`, `UserId`.
+- Produces:
+
+```rust
+pub struct Config {
+    pub user_id: UserId,
+    /// `None`: discovered from the user ID's server name via .well-known.
+    pub homeserver: Option<String>,
+    pub keymap: Keymap,
+    pub settings: Settings,
+    /// strftime format, applied in the local time zone by `mxt-tui`.
+    pub time_format: String,
+    pub download_dir: PathBuf,
+    pub opener: Vec<String>,
+}
+
+/// `$XDG_CONFIG_HOME/mxt/config.toml`, or `$HOME/.config/mxt/config.toml` when
+/// `XDG_CONFIG_HOME` is unset or empty (the same on macOS).
+pub fn default_path(env: &impl Fn(&str) -> Option<String>) -> Option<PathBuf>;
+/// Reads and converts the file. `home` expands a leading `~` in paths.
+pub fn load(path: &Path, home: &Path) -> Result<Config, ConfigError>;
+/// The same for a string, for tests; `path` is only used in messages.
+pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Config, ConfigError>;
+
+pub enum ConfigError {
+    NotFound { path: PathBuf },
+    Read { path: PathBuf, error: std::io::Error },
+    /// `line` and `column` are 1-based.
+    Invalid { path: PathBuf, line: usize, column: usize, message: String },
+}
+impl std::fmt::Display for ConfigError;   // Invalid: "<path>:<line>:<column>: <message>"
+
+/// Printed with the path when the file does not exist.
+pub const MINIMAL_EXAMPLE: &str = "[account]\nuser_id = \"@alice:example.org\"\n";
+```
+
+**The file** (design, "Configuration"; every table uses
+`deny_unknown_fields`):
+
+| Key | Type | Default |
+|---|---|---|
+| `account.user_id` | string `@local:server` | required |
+| `account.homeserver` | URL string | none |
+| `ui.leader` | key notation | `"<Space>"` |
+| `ui.timeoutlen` | integer, milliseconds | `1000` |
+| `ui.room_list.visible` | boolean | `true` |
+| `ui.room_list.sort` | `"recent"` or `"name"` | `"recent"` |
+| `ui.time_format` | string | `"%H:%M"` |
+| `ui.image_preview` | `"auto"` or `"off"` | `"auto"` |
+| `ui.read_receipts` | `"public"` or `"private"` | `"public"` |
+| `files.download_dir` | path, leading `~` expanded | `"~/Downloads"` |
+| `files.opener` | array of strings, non-empty | `["open"]` on macOS, `["xdg-open"]` elsewhere |
+| `keymap.<table>` | tables `normal`, `room_list`, `timeline`, `message_view`, `picker`, `command_line`, and `keymap.composer.{normal,visual,insert,completion}` | none |
+
+Binding values: a string (an action without arguments, or `"nop"`), a table
+with `action` and the action's arguments, or a non-empty array of strings and
+tables. Argument values convert to `ArgValue` (string, integer, boolean);
+other TOML types are errors. Keys are parsed with `KeySeq::parse(key,
+&leader)` after the leader itself is parsed.
+
+**Errors** are `Invalid` with the line and column of the offending value or
+key, and a message that names the setting: unknown fields (from
+`deny_unknown_fields`), wrong types, an invalid `user_id`, invalid key
+notation (`keymap.timeline: invalid key "<C-x": ...`), unknown actions, wrong
+or conflicting arguments (the `ActionError` message), empty arrays. Use
+`toml::Spanned` (or `toml`'s span-preserving document API) to keep spans for
+keymap keys and values, and convert byte offsets to line and column.
+
+**`main`:** `mxt [--config PATH]` and `mxt --version` (prints
+`mxt <version>`); anything else prints a usage line and exits with status 2.
+Without `--config`, `default_path`. On `NotFound`, print the path and
+`MINIMAL_EXAMPLE` to stderr and exit with status 1; on other errors print the
+error and exit with status 1. With a valid configuration, exit with status 0
+for now (the startup tasks continue from here).
+
+- [ ] **Step 1: Write the failing tests** (`config/tests.rs`)
+
+```rust
+use super::*;
+use mxt_core::action::Action;
+use mxt_core::keymap::InputContext;
+use mxt_core::keys::KeySeq;
+use mxt_core::rooms::RoomSort;
+use mxt_core::settings::{ImagePreview, ReceiptKind};
+use std::path::{Path, PathBuf};
+
+fn ok(text: &str) -> Config {
+    parse(text, Path::new("config.toml"), Path::new("/home/alice")).unwrap_or_else(|e| panic!("{e}"))
+}
+fn err(text: &str) -> (usize, String) {
+    match parse(text, Path::new("config.toml"), Path::new("/home/alice")) {
+        Err(ConfigError::Invalid { line, message, .. }) => (line, message),
+        Err(other) => panic!("unexpected error: {other}"),
+        Ok(_) => panic!("accepted: {text}"),
+    }
+}
+fn lookup<'a>(c: &'a Config, ctx: InputContext, keys: &str) -> Option<Vec<&'static str>> {
+    let leader = KeySeq::parse("<Space>", &KeySeq::default()).unwrap();
+    let seq = KeySeq::parse(keys, &leader).unwrap();
+    c.keymap.effective(ctx).lookup(seq.keys()).binding.map(|b| b.actions().iter().map(Action::name).collect())
+}
+
+const MINIMAL: &str = "[account]\nuser_id = \"@alice:example.org\"\n";
+
+#[test]
+fn minimal_file_uses_defaults() {
+    let c = ok(MINIMAL);
+    assert_eq!(c.user_id.as_str(), "@alice:example.org");
+    assert_eq!(c.homeserver, None);
+    assert_eq!(c.settings.timeoutlen_ms, 1000);
+    assert_eq!(c.settings.room_sort, RoomSort::Recent);
+    assert!(c.settings.room_list_visible);
+    assert_eq!(c.settings.image_preview, ImagePreview::Auto);
+    assert_eq!(c.settings.read_receipts, ReceiptKind::Public);
+    assert_eq!(c.time_format, "%H:%M");
+    assert_eq!(c.download_dir, PathBuf::from("/home/alice/Downloads"));
+    assert!(!c.opener.is_empty());
+    assert_eq!(lookup(&c, InputContext::Timeline, "j"), Some(vec!["cursor.down"]));
+}
+
+#[test]
+fn the_design_example_loads() {
+    let c = ok(r#"
+[account]
+user_id = "@alice:example.org"
+# homeserver = "https://matrix.example.org"
+
+[ui]
+leader = "<Space>"
+timeoutlen = 1000
+room_list = { visible = true, sort = "recent" }
+time_format = "%H:%M"
+image_preview = "auto"
+read_receipts = "public"
+
+[files]
+download_dir = "~/Downloads"
+opener = ["xdg-open"]
+
+[keymap.normal]
+"]u" = { action = "room.open", filter = "unread", pick = "next" }
+"<leader>x" = ["room.mark_read", { action = "room.open", filter = "unread", pick = "next" }]
+
+[keymap.timeline]
+"dd" = "nop"
+"D" = "message.delete"
+
+[keymap.composer.insert]
+"<C-s>" = "composer.send"
+"#);
+    assert_eq!(lookup(&c, InputContext::Timeline, "]u"), Some(vec!["room.open"]));
+    assert_eq!(lookup(&c, InputContext::RoomList, "<Space>x"), Some(vec!["room.mark_read", "room.open"]));
+    assert_eq!(lookup(&c, InputContext::Timeline, "dd"), Some(vec!["nop"]));
+    assert_eq!(lookup(&c, InputContext::Timeline, "D"), Some(vec!["message.delete"]));
+    assert_eq!(lookup(&c, InputContext::ComposerInsert, "<C-s>"), Some(vec!["composer.send"]));
+    assert_eq!(lookup(&c, InputContext::ComposerInsert, "<CR>"), Some(vec!["composer.send"]));
+}
+
+#[test]
+fn settings_are_read() {
+    let c = ok(&format!("{MINIMAL}[ui]\ntimeoutlen = 300\nread_receipts = \"private\"\nroom_list = {{ visible = false, sort = \"name\" }}\nimage_preview = \"off\"\n[files]\ndownload_dir = \"/tmp/dl\"\nopener = [\"wslview\"]\n"));
+    assert_eq!(c.settings.timeoutlen_ms, 300);
+    assert_eq!(c.settings.read_receipts, ReceiptKind::Private);
+    assert_eq!(c.settings.room_sort, RoomSort::Name);
+    assert!(!c.settings.room_list_visible);
+    assert_eq!(c.settings.image_preview, ImagePreview::Off);
+    assert_eq!(c.download_dir, PathBuf::from("/tmp/dl"));
+    assert_eq!(c.opener, vec!["wslview".to_string()]);
+}
+
+#[test]
+fn leader_applies_to_defaults_and_user_bindings() {
+    let c = ok(&format!("{MINIMAL}[ui]\nleader = \",\"\n[keymap.normal]\n\"<leader>q\" = \"app.quit\"\n"));
+    let comma = KeySeq::parse(",", &KeySeq::default()).unwrap();
+    let seq = KeySeq::parse("<leader>q", &comma).unwrap();
+    let names: Vec<_> = c.keymap.effective(InputContext::Timeline).lookup(seq.keys()).binding.unwrap().actions().iter().map(Action::name).collect();
+    assert_eq!(names, vec!["app.quit"]);
+    let e = KeySeq::parse("<leader>e", &comma).unwrap();
+    assert!(c.keymap.effective(InputContext::Timeline).lookup(e.keys()).binding.is_some());
+}
+
+#[test]
+fn errors_name_the_line() {
+    let (line, msg) = err(&format!("{MINIMAL}[ui]\ntimeoutln = 5\n"));
+    assert_eq!(line, 4);
+    assert!(msg.contains("timeoutln"), "{msg}");
+
+    let (line, msg) = err(&format!("{MINIMAL}[keymap.timeline]\n\"x\" = \"message.dlete\"\n"));
+    assert_eq!(line, 4);
+    assert!(msg.contains("message.dlete"), "{msg}");
+
+    let (line, msg) = err(&format!("{MINIMAL}[keymap.normal]\n\"]u\" = {{ action = \"room.open\", pick = \"next\", query = \"x\" }}\n"));
+    assert_eq!(line, 4);
+    assert!(msg.contains("pick") && msg.contains("query"), "{msg}");
+
+    let (line, msg) = err(&format!("{MINIMAL}[keymap.normal]\n\"<C-x\" = \"nop\"\n"));
+    assert_eq!(line, 4);
+    assert!(msg.contains("<C-x"), "{msg}");
+
+    let (line, _) = err(&format!("{MINIMAL}[keymap.normal]\n\"x\" = []\n"));
+    assert_eq!(line, 4);
+
+    let (line, _) = err(&format!("{MINIMAL}[keymap.composer.foo]\n\"x\" = \"nop\"\n"));
+    assert_eq!(line, 3);
+
+    let (line, _) = err(&format!("{MINIMAL}[keymap.normal]\n\"x\" = {{ action = \"room.open\", filter = 3.5 }}\n"));
+    assert_eq!(line, 4);
+
+    let (line, msg) = err("[account]\nuser_id = \"alice\"\n");
+    assert_eq!(line, 2);
+    assert!(msg.contains("user_id"), "{msg}");
+
+    let (line, _) = err("[account]\n");
+    assert_eq!(line, 1);
+}
+
+#[test]
+fn default_path_follows_xdg() {
+    let env = |vars: &'static [(&'static str, &'static str)]| {
+        move |k: &str| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
+    };
+    assert_eq!(
+        default_path(&env(&[("XDG_CONFIG_HOME", "/x"), ("HOME", "/home/alice")])),
+        Some(PathBuf::from("/x/mxt/config.toml"))
+    );
+    assert_eq!(
+        default_path(&env(&[("XDG_CONFIG_HOME", ""), ("HOME", "/home/alice")])),
+        Some(PathBuf::from("/home/alice/.config/mxt/config.toml"))
+    );
+    assert_eq!(default_path(&env(&[])), None);
+}
+```
+
+- [ ] **Step 2: Run them to see them fail:** `nix develop -c cargo test -p mxt`
+- [ ] **Step 3: Implement** `config.rs`, `config/dto.rs` and the `main`
+command line. Keep the DTOs private to the module; only `Config`, the
+functions and `ConfigError` are public.
+- [ ] **Step 4: Run the tests**, then fmt, clippy, and by hand:
+`nix develop -c cargo run -p mxt -- --config /nonexistent` (prints the path
+and the example, status 1), `... -- --version`, and a file with a typo
+(prints `path:line:column: message`, status 1).
+- [ ] **Step 5: Commit**
+
+```bash
+git add Cargo.toml Cargo.lock crates/mxt
+git commit -m "Load the configuration into checked core types, so typos and invalid bindings are reported with their line before the UI starts"
+```
