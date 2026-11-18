@@ -154,7 +154,7 @@ const _: () = {
     }
 };
 
-/// The tables of `normal` keys in room lists and timelines.
+/// The tables that share the movement and search defaults.
 const LISTS: &[TableId] = &[TableId::RoomList, TableId::Timeline];
 
 /// The default keymap (design, "Default keymap"): tables, key notation with
@@ -256,8 +256,8 @@ const DEFAULTS: &[(&[TableId], &str, Action)] = &[
     (&[TableId::MessageView], "<Esc>", Action::ViewClose),
 ];
 
-/// All tables after the user's bindings were merged over the defaults, and one
-/// precomputed effective map per input context.
+/// The effective map of each input context, precomputed from the default
+/// tables with the user's bindings merged over them.
 #[derive(Clone, Debug)]
 pub struct Keymap {
     /// Indexed by `InputContext as usize`.

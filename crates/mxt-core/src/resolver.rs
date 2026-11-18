@@ -332,11 +332,13 @@ mod tests {
         );
         let ctx = InputContext::Timeline;
         let mut r = Resolver::new();
+        // The count typed before the pending keys reaches the binding.
+        assert!(r.feed(km.effective(ctx), true, T, k("2")).is_empty());
         let out = r.feed(km.effective(ctx), true, T, k("]"));
         let id = last_timer(&out);
         assert_eq!(
             r.timeout(km.effective(ctx), id),
-            Some(run(Action::CursorLast, None))
+            Some(run(Action::CursorLast, Some(2)))
         );
     }
 

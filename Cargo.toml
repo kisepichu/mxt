@@ -17,6 +17,9 @@ mxt-matrix = { path = "crates/mxt-matrix" }
 mxt-tui = { path = "crates/mxt-tui" }
 
 nucleo-matcher = "0.3"
+serde = { version = "1", features = ["derive"] }
+# Reading only: the `display` feature (serialization) is left out.
+toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
