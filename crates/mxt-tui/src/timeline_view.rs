@@ -30,23 +30,31 @@ const READ_MARKER: &str = "new messages";
 /// Before every row of a quote.
 const QUOTE: &str = "│ ";
 const CODE_BLOCK: Style = DIM;
+/// Columns between tab stops.
+const TAB_WIDTH: usize = 4;
 
-/// Checks `ui.time_format`: an empty format or an invalid directive is an
-/// error, so the configuration loader reports it before the UI starts
-/// (design, "Layers": a typo is never silently ignored).
-pub fn check_time_format(format: &str) -> Result<(), String> {
-    if format.is_empty() {
-        return Err("must not be empty".to_owned());
+/// A checked `ui.time_format`, the `strftime`-style format of the item
+/// headers' times.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TimeFormat(String);
+
+impl TimeFormat {
+    /// Checks `ui.time_format`: an empty format or an invalid directive is
+    /// an error, so the configuration loader reports it before the UI starts
+    /// (design, "Layers": a typo is never silently ignored).
+    pub fn parse(format: String) -> Result<TimeFormat, String> {
+        if format.is_empty() {
+            return Err("must not be empty".to_owned());
+        }
+        let sample = jiff::Timestamp::UNIX_EPOCH.to_zoned_datetime(TimeZone::UTC);
+        strtime::format(&format, &sample).map_err(|error| error.to_string())?;
+        Ok(TimeFormat(format))
     }
-    let sample = jiff::Timestamp::UNIX_EPOCH.to_zoned_datetime(TimeZone::UTC);
-    strtime::format(format, &sample)
-        .map(drop)
-        .map_err(|error| error.to_string())
 }
 
 /// What the timeline pane keeps between frames.
 pub(crate) struct TimelinePane {
-    time_format: String,
+    time_format: TimeFormat,
     zone: TimeZone,
     /// The cursor item of the last frame and the rows below it then, so the
     /// view stays put while the cursor moves inside it and while entries
@@ -63,13 +71,13 @@ struct Anchor {
 impl TimelinePane {
     pub(crate) fn new() -> TimelinePane {
         TimelinePane {
-            time_format: DEFAULT_TIME_FORMAT.to_owned(),
+            time_format: TimeFormat(DEFAULT_TIME_FORMAT.to_owned()),
             zone: TimeZone::system(),
             anchor: None,
         }
     }
 
-    pub(crate) fn set_time_format(&mut self, format: String) {
+    pub(crate) fn set_time_format(&mut self, format: TimeFormat) {
         self.time_format = format;
     }
 
@@ -96,7 +104,7 @@ impl TimelinePane {
             entries,
             width,
             height,
-            time_format: &self.time_format,
+            time_format: &self.time_format.0,
             zone: &self.zone,
         };
         let cursor = app.timeline_cursor();
@@ -123,19 +131,8 @@ impl TimelinePane {
             }
         }
 
-        let pane_rows = render.pane_rows();
-        self.anchor = cursor.and_then(|cursor| {
-            let TimelineEntry::Item(item) = &entries[cursor] else {
-                return None;
-            };
-            let bottom = window.top_of(cursor)? + window.len_of(cursor)?;
-            Some(Anchor {
-                index: cursor,
-                item: item.id.clone(),
-                below: usize::try_from(pane_rows - bottom).unwrap_or(0),
-            })
-        });
-        window.visible(pane_rows)
+        self.anchor = render.anchor(&window, cursor);
+        window.visible(render.pane_rows())
     }
 }
 
@@ -297,27 +294,41 @@ impl<'a> Render<'a> {
         window
     }
 
+    /// The anchor for the next frame: the cursor item and the rows below it.
+    fn anchor(&self, window: &Window, cursor: Option<usize>) -> Option<Anchor> {
+        let cursor = cursor?;
+        let TimelineEntry::Item(item) = &self.entries[cursor] else {
+            return None;
+        };
+        let bottom = window.top_of(cursor)? + window.len_of(cursor)?;
+        Some(Anchor {
+            index: cursor,
+            item: item.id.clone(),
+            below: usize::try_from(self.pane_rows() - bottom).unwrap_or(0),
+        })
+    }
+
     /// A window that holds the cursor item, placed where the last frame had
-    /// the anchor. A cursor more than a pane away from it, or a lost anchor,
-    /// puts the cursor at the pane's edge it moved towards.
+    /// the anchor. A lost anchor (its item went away or changed its
+    /// `ItemRef`, as a local echo does once the server has it) is replaced
+    /// by the entry at the anchor's index, clamped to the entries, which is
+    /// where the core's `settle` keeps the cursor. A cursor more than a pane
+    /// away from the anchor goes to the pane's edge it moved towards.
     fn around(&self, cursor: usize, anchor: Option<&Anchor>) -> Window<'a> {
         let height = self.pane_rows();
-        let anchor = anchor.and_then(|anchor| {
-            let is_anchor = |entry: &TimelineEntry| {
-                matches!(entry, TimelineEntry::Item(item) if item.id == anchor.item)
-            };
-            let index = if self.entries.get(anchor.index).is_some_and(is_anchor) {
-                anchor.index
-            } else {
-                self.entries.iter().position(is_anchor)?
-            };
-            Some((index, anchor.below))
-        });
-        let Some((index, below)) = anchor else {
+        let Some(anchor) = anchor else {
             return self.at_bottom(cursor);
         };
+        let is_anchor = |entry: &TimelineEntry| matches!(entry, TimelineEntry::Item(item) if item.id == anchor.item);
+        let index = if self.entries.get(anchor.index).is_some_and(is_anchor) {
+            anchor.index
+        } else {
+            let clamped = anchor.index.min(self.entries.len() - 1);
+            self.entries.iter().position(is_anchor).unwrap_or(clamped)
+        };
         let rows = self.rows(index);
-        let top = height - isize::try_from(below).unwrap_or(isize::MAX) - rows_isize(&rows);
+        let below = isize::try_from(anchor.below).unwrap_or(isize::MAX);
+        let top = height - below - rows_isize(&rows);
         let mut window = Window::new(index, rows, top);
         while cursor > window.last() {
             if window.bottom() > 2 * height {
@@ -639,7 +650,7 @@ impl<'a> Body<'a> {
         }
         let prefix_width: usize = self.prefixes.iter().map(Prefix::width).sum();
         let width = self.width.saturating_sub(prefix_width).max(1);
-        for row in wrap(&pieces, width) {
+        for row in wrap(pieces, width) {
             let mut spans = Vec::with_capacity(self.prefixes.len() + row.len());
             for prefix in &mut self.prefixes {
                 spans.push(prefix.span());
@@ -704,7 +715,15 @@ fn paragraph_lines(inlines: &[Inline]) -> Vec<Vec<Piece<'_>>> {
             }
             let part = if spoiler {
                 // Blocks of the same width; the message view shows the text.
-                Cow::Owned("█".repeat(text_width(part)))
+                // Tabs stay, so they take as many columns as in the text.
+                let mut blocks = String::with_capacity(part.len());
+                for (index, run) in part.split('\t').enumerate() {
+                    if index > 0 {
+                        blocks.push('\t');
+                    }
+                    blocks.extend(std::iter::repeat_n('█', text_width(run)));
+                }
+                Cow::Owned(blocks)
             } else {
                 Cow::Borrowed(part)
             };
@@ -741,11 +760,13 @@ struct Cluster {
 }
 
 /// Wraps the pieces into rows of at most `width` columns, measured per
-/// grapheme cluster as ratatui draws them. A row breaks after a space or
-/// before or after a wide cluster (CJK text has no spaces), else inside a
-/// word too long for a row. Spaces at a break are dropped. Always at least
-/// one row.
-fn wrap<'a>(pieces: &[Piece<'a>], width: usize) -> Vec<Vec<Piece<'a>>> {
+/// grapheme cluster as ratatui draws them, after expanding tabs. A row
+/// breaks after a space or before or after a wide cluster (CJK text has no
+/// spaces), else inside a word too long for a row. Every space at a break
+/// is dropped, and a row they would leave empty is left out. Always at
+/// least one row.
+fn wrap<'a>(mut pieces: Vec<Piece<'a>>, width: usize) -> Vec<Vec<Piece<'a>>> {
+    expand_tabs(&mut pieces);
     let clusters: Vec<Cluster> = pieces
         .iter()
         .enumerate()
@@ -775,12 +796,13 @@ fn wrap<'a>(pieces: &[Piece<'a>], width: usize) -> Vec<Vec<Piece<'a>>> {
             while row_end > start && clusters[row_end - 1].space {
                 row_end -= 1;
             }
-            rows.push(row(pieces, &clusters[start..row_end]));
-            start = if cluster.space && end == i {
-                i + 1
-            } else {
-                end
-            };
+            if row_end > start {
+                rows.push(row(&pieces, &clusters[start..row_end]));
+            }
+            start = end;
+            while clusters.get(start).is_some_and(|next| next.space) {
+                start += 1;
+            }
             (i, used, last_break) = (start, 0, None);
             continue;
         }
@@ -791,7 +813,7 @@ fn wrap<'a>(pieces: &[Piece<'a>], width: usize) -> Vec<Vec<Piece<'a>>> {
         i += 1;
     }
     if start < clusters.len() || rows.is_empty() {
-        rows.push(row(pieces, &clusters[start..]));
+        rows.push(row(&pieces, &clusters[start..]));
     }
     rows
 }
@@ -813,28 +835,141 @@ fn row<'a>(pieces: &[Piece<'a>], clusters: &[Cluster]) -> Vec<Piece<'a>> {
         .collect()
 }
 
+/// Replaces every tab with spaces up to the next tab stop, counted in
+/// columns from the start of the line: ratatui draws no tab, so code would
+/// lose its indentation.
+fn expand_tabs(pieces: &mut [Piece<'_>]) {
+    if !pieces.iter().any(|(text, _)| text.contains('\t')) {
+        return;
+    }
+    let mut column = 0;
+    for (text, _) in pieces {
+        if !text.contains('\t') {
+            column += text_width(text);
+            continue;
+        }
+        let mut expanded = String::with_capacity(text.len() + TAB_WIDTH);
+        for grapheme in text.graphemes(true) {
+            if grapheme == "\t" {
+                let spaces = TAB_WIDTH - column % TAB_WIDTH;
+                expanded.extend(std::iter::repeat_n(' ', spaces));
+                column += spaces;
+            } else {
+                expanded.push_str(grapheme);
+                column += grapheme_width(grapheme);
+            }
+        }
+        *text = Cow::Owned(expanded);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mxt_core::ids::{EventId, TxnId, UserId};
+
+    const WIDTH: usize = 20;
+    const HEIGHT: usize = 10;
 
     fn wrapped(pieces: &[&str], width: usize) -> Vec<String> {
         let pieces: Vec<Piece> = pieces
             .iter()
             .map(|text| (Cow::Borrowed(*text), PLAIN))
             .collect();
-        wrap(&pieces, width)
+        wrap(pieces, width)
             .into_iter()
             .map(|row| row.iter().map(|(text, _)| text.as_ref()).collect())
             .collect()
     }
 
+    /// A message of a header and `lines` rows of text.
+    fn message(id: ItemRef, lines: usize) -> TimelineEntry {
+        TimelineEntry::Item(TimelineItem {
+            id,
+            sender: UserId::new("@alice:example.org"),
+            sender_name: "alice".to_owned(),
+            timestamp: Timestamp::from_millis(0),
+            content: MessageContent::Text(RichText::plain(&vec!["text"; lines].join("\n"))),
+            reply: None,
+            reactions: Vec::new(),
+            edited: false,
+            send_state: None,
+        })
+    }
+
+    fn remote(id: usize, lines: usize) -> TimelineEntry {
+        message(ItemRef::Remote(EventId::new(format!("$event{id}"))), lines)
+    }
+
+    /// Items of 2 to 15 rows (cut to the pane's height) among date
+    /// dividers, a read marker and a hidden entry.
+    fn timeline() -> Vec<TimelineEntry> {
+        vec![
+            TimelineEntry::DateDivider(Timestamp::from_millis(0)),
+            remote(0, 1),
+            remote(1, 3),
+            TimelineEntry::Hidden,
+            remote(2, 2),
+            TimelineEntry::ReadMarker,
+            remote(3, 14),
+            remote(4, 1),
+            TimelineEntry::DateDivider(Timestamp::from_millis(86_400_000)),
+            remote(5, 4),
+            remote(6, 2),
+            remote(7, 1),
+        ]
+    }
+
+    fn items(entries: &[TimelineEntry]) -> Vec<usize> {
+        (0..entries.len())
+            .filter(|&index| matches!(entries[index], TimelineEntry::Item(_)))
+            .collect()
+    }
+
+    fn render<'a>(entries: &'a [TimelineEntry], zone: &'a TimeZone) -> Render<'a> {
+        Render {
+            entries,
+            width: WIDTH,
+            height: HEIGHT,
+            time_format: DEFAULT_TIME_FORMAT,
+            zone,
+        }
+    }
+
+    /// One frame: the entries laid out as `(index, top row, rows)`, and the
+    /// anchor for the next frame.
+    fn lay_out(
+        entries: &[TimelineEntry],
+        cursor: usize,
+        follows: bool,
+        anchor: Option<&Anchor>,
+    ) -> (Vec<(usize, isize, isize)>, Option<Anchor>) {
+        let zone = TimeZone::UTC;
+        let render = render(entries, &zone);
+        let window = render.lay_out(Some(cursor), follows, anchor);
+        let placed = (window.first..=window.last())
+            .map(|index| {
+                let top = window.top_of(index).unwrap();
+                (index, top, window.len_of(index).unwrap())
+            })
+            .collect();
+        (placed, render.anchor(&window, Some(cursor)))
+    }
+
+    /// The top row and the rows of the entry at `index`.
+    fn place(placed: &[(usize, isize, isize)], index: usize) -> (isize, isize) {
+        let &(_, top, len) = placed.iter().find(|(i, ..)| *i == index).unwrap();
+        (top, len)
+    }
+
     #[test]
-    fn time_format_check() {
-        assert_eq!(check_time_format("%H:%M"), Ok(()));
-        assert_eq!(check_time_format("%Y-%m-%d %I:%M %p"), Ok(()));
-        assert!(check_time_format("%H:%K").is_err());
-        assert!(check_time_format("%").is_err());
-        assert!(check_time_format("").is_err());
+    fn time_formats_are_checked() {
+        let parse = |format: &str| TimeFormat::parse(format.to_owned());
+        assert_eq!(parse("%H:%M"), Ok(TimeFormat("%H:%M".to_owned())));
+        assert!(parse("%Y-%m-%d %I:%M %p").is_ok());
+        assert!(parse("%H:%K").is_err());
+        assert!(parse("%").is_err());
+        assert!(parse("").is_err());
     }
 
     #[test]
@@ -847,6 +982,27 @@ mod tests {
         assert_eq!(wrapped(&["abcdefghij"], 4), ["abcd", "efgh", "ij"]);
         // Pieces of one word stay together.
         assert_eq!(wrapped(&["ab ", "cd", "ef"], 5), ["ab", "cdef"]);
+        // Every space at a break is dropped, also across pieces, and a row
+        // of spaces only is left out.
+        assert_eq!(wrapped(&["abc.  defgh"], 4), ["abc.", "defg", "h"]);
+        assert_eq!(wrapped(&["abc.  de"], 4), ["abc.", "de"]);
+        assert_eq!(wrapped(&["ab   cdefgh"], 3), ["ab", "cde", "fgh"]);
+        assert_eq!(wrapped(&["one  ", " two"], 4), ["one", "two"]);
+        assert_eq!(wrapped(&["        x"], 4), ["x"]);
+    }
+
+    #[test]
+    fn tabs_expand_to_the_next_tab_stop() {
+        // An indented code line keeps its indentation, and the wrap counts
+        // its columns.
+        assert_eq!(wrapped(&["\t\treturn x;"], 40), ["        return x;"]);
+        assert_eq!(
+            wrapped(&["\tlet x = 1; // a comment"], 20),
+            ["    let x = 1; // a", "comment"]
+        );
+        // Tab stops count display columns from the line's start, across
+        // pieces.
+        assert_eq!(wrapped(&["ab\tc", "日\td"], 20), ["ab  c日 d"]);
     }
 
     #[test]
@@ -882,5 +1038,97 @@ mod tests {
         assert_eq!(file_size(512), "512 B");
         assert_eq!(file_size(1536), "1.5 KiB");
         assert_eq!(file_size(3 * 1024 * 1024 + 200 * 1024), "3.2 MiB");
+    }
+
+    #[test]
+    fn the_cursor_item_is_always_fully_on_the_pane() {
+        let entries = timeline();
+        let items = items(&entries);
+        let newest = items[items.len() - 1];
+        let (_, mut anchor) = lay_out(&entries, newest, true, None);
+        // Up one item at a time to the oldest and down again, then jumps
+        // from one end to the other.
+        let mut moves: Vec<usize> = items.iter().rev().chain(&items).copied().collect();
+        moves.extend([items[0], newest, items[0]]);
+        for cursor in moves {
+            let (placed, next) = lay_out(&entries, cursor, false, anchor.as_ref());
+            let (top, len) = place(&placed, cursor);
+            assert!(
+                top >= 0 && top + len <= HEIGHT as isize,
+                "cursor {cursor}: {placed:?}"
+            );
+            anchor = next;
+        }
+    }
+
+    #[test]
+    fn following_puts_the_newest_entry_at_the_bottom() {
+        let mut entries = timeline();
+        let (placed, anchor) = lay_out(&entries, entries.len() - 1, true, None);
+        let (top, len) = place(&placed, entries.len() - 1);
+        assert_eq!(top + len, HEIGHT as isize);
+
+        entries.push(remote(8, 2));
+        let (placed, _) = lay_out(&entries, entries.len() - 1, true, anchor.as_ref());
+        let (top, len) = place(&placed, entries.len() - 1);
+        assert_eq!(top + len, HEIGHT as isize);
+
+        // A timeline shorter than the pane, too.
+        let short = [remote(0, 1), remote(1, 1)];
+        let (placed, _) = lay_out(&short, 1, true, None);
+        assert_eq!(placed, [(0, 6, 2), (1, 8, 2)]);
+    }
+
+    #[test]
+    fn entries_added_above_or_below_leave_the_cursor_item_in_place() {
+        let entries = timeline();
+        let items = items(&entries);
+        let (_, anchor) = lay_out(&entries, items[items.len() - 1], true, None);
+        // One item up: the view no longer follows.
+        let cursor = items[items.len() - 2];
+        let (placed, anchor) = lay_out(&entries, cursor, false, anchor.as_ref());
+        let rows = place(&placed, cursor);
+
+        // Back pagination.
+        let mut paginated = vec![
+            remote(100, 2),
+            TimelineEntry::DateDivider(Timestamp::from_millis(0)),
+            remote(101, 5),
+        ];
+        paginated.extend(entries.iter().cloned());
+        let (placed, _) = lay_out(&paginated, cursor + 3, false, anchor.as_ref());
+        assert_eq!(place(&placed, cursor + 3), rows);
+
+        // New messages.
+        let mut appended = entries.clone();
+        appended.extend([remote(102, 1), remote(103, 3)]);
+        let (placed, _) = lay_out(&appended, cursor, false, anchor.as_ref());
+        assert_eq!(place(&placed, cursor), rows);
+    }
+
+    #[test]
+    fn a_local_echo_keeps_its_rows_when_it_gets_its_event_id() {
+        let echo = message(ItemRef::Local(TxnId::new("txn")), 2);
+        let mut entries = vec![remote(0, 2), remote(1, 2), echo, remote(2, 1)];
+        let (_, anchor) = lay_out(&entries, 3, true, None);
+        let (placed, anchor) = lay_out(&entries, 2, false, anchor.as_ref());
+        let rows = place(&placed, 2);
+
+        entries[2] = remote(3, 2);
+        let (placed, _) = lay_out(&entries, 2, false, anchor.as_ref());
+        assert_eq!(place(&placed, 2), rows);
+    }
+
+    #[test]
+    fn an_item_taller_than_the_pane_ends_in_the_count_of_hidden_rows() {
+        let entries = [remote(0, 30)];
+        let zone = TimeZone::UTC;
+        let rows = render(&entries, &zone).rows(0);
+        assert_eq!(rows.len(), HEIGHT);
+        // The header and 30 rows of text, of which 22 do not fit.
+        assert_eq!(rows[HEIGHT - 1].to_string(), "[+22 lines]");
+        // As the cursor item, it fills the pane.
+        let (placed, _) = lay_out(&entries, 0, false, None);
+        assert_eq!(placed, [(0, 0, 10)]);
     }
 }

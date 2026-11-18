@@ -20,7 +20,7 @@ use ratatui::widgets::ListState;
 use crate::clipboard::SharedRegister;
 use crate::input::key_from_crossterm;
 use crate::message_view::MessageView;
-use crate::timeline_view::TimelinePane;
+use crate::timeline_view::{TimeFormat, TimelinePane};
 use crate::timers::Timers;
 use crate::view::{self, Panes};
 
@@ -73,9 +73,8 @@ impl Tui {
         }
     }
 
-    /// Sets `ui.time_format`, checked with [`crate::check_time_format`].
-    /// Until then the timeline shows `%H:%M`.
-    pub fn set_time_format(&mut self, format: String) {
+    /// Sets `ui.time_format`. Until then the timeline shows `%H:%M`.
+    pub fn set_time_format(&mut self, format: TimeFormat) {
         self.timeline.set_time_format(format);
     }
 

@@ -11,4 +11,4 @@ mod view;
 
 pub use input::key_from_crossterm;
 pub use terminal::{Tui, install_panic_hook};
-pub use timeline_view::check_time_format;
+pub use timeline_view::TimeFormat;
