@@ -121,14 +121,27 @@ impl From<RecoveryError> for Error {
 }
 
 fn is_unknown_token(error: &matrix_sdk::Error) -> bool {
-    matches!(
-        error.client_api_error_kind(),
-        Some(ErrorKind::UnknownToken(_))
-    )
+    matches!(error, matrix_sdk::Error::Http(error) if is_unknown_token_http(error))
+}
+
+/// Also inside `HttpError::Cached`: the SDK fetches `/versions` lazily before
+/// the first request that needs it, and hands that request's error to every
+/// request that waited for it. With a saved session, that is where an
+/// `M_UNKNOWN_TOKEN` shows up first.
+fn is_unknown_token_http(error: &HttpError) -> bool {
+    match error {
+        HttpError::Cached(error) => is_unknown_token_http(error),
+        error => matches!(
+            error.client_api_error_kind(),
+            Some(ErrorKind::UnknownToken(_))
+        ),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use matrix_sdk::{
         reqwest::StatusCode,
         ruma::api::{
@@ -159,6 +172,8 @@ mod tests {
         );
         let recovery = RecoveryError::Sdk(server_error("M_UNKNOWN_TOKEN").into());
         assert!(Error::from(recovery).is_unknown_token());
+        let cached = HttpError::Cached(Arc::new(server_error("M_UNKNOWN_TOKEN")));
+        assert!(Error::from(cached).is_unknown_token());
     }
 
     #[test]
