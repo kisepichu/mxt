@@ -7,6 +7,8 @@ pub mod action;
 pub mod command;
 pub mod fuzzy;
 pub mod ids;
+pub mod keymap;
 pub mod keys;
+pub mod resolver;
 pub mod room;
 pub mod rooms;
