@@ -8,17 +8,18 @@ use std::{
 
 use crate::paths::{Paths, create_private_dir, with_path};
 
-/// `M_UNKNOWN_TOKEN`: renames the data directory to
-/// `<parent>/mxt.invalid-<unix seconds>` and deletes the cache directory.
-/// Returns the new path. The caller has dropped the SDK client before, so the
-/// stores are closed.
+/// `M_UNKNOWN_TOKEN`: deletes the cache directory, then renames the data
+/// directory to `<parent>/mxt.invalid-<unix seconds>` and returns the new
+/// path. The cache goes first because it can always be rebuilt: an error
+/// always means the data directory has not moved. The caller has dropped the
+/// SDK client before, so the stores are closed.
 #[allow(dead_code)] // Used by `main` once the startup flow is wired.
 pub fn invalidate(paths: &Paths, unix_seconds: u64) -> io::Result<PathBuf> {
+    delete_dir(&paths.cache)?;
     let moved = paths
         .data
         .with_file_name(format!("mxt.invalid-{unix_seconds}"));
     rename(&paths.data, &moved)?;
-    delete_dir(&paths.cache)?;
     Ok(moved)
 }
 
