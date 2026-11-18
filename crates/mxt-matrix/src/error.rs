@@ -1,6 +1,6 @@
 //! The error type of the adapter's startup calls.
 
-use std::fmt;
+use std::{fmt, path::PathBuf};
 
 use matrix_sdk::{
     ClientBuildError, HttpError,
@@ -8,8 +8,9 @@ use matrix_sdk::{
     ruma::api::error::ErrorKind,
 };
 
-/// Every variant that wraps another error displays it unchanged and forwards
-/// its source, so printing the source chain shows each message once.
+/// Every variant that wraps another error displays its message (the session
+/// file errors after the path) and forwards its source, so printing the
+/// source chain shows each message once.
 #[derive(Debug)]
 pub enum Error {
     /// Building the client: homeserver discovery, `/versions` (including a
@@ -19,10 +20,17 @@ pub enum Error {
     Sdk(matrix_sdk::Error),
     /// Recovery, for example with a wrong recovery key.
     Recovery(RecoveryError),
-    /// Reading or writing the session file.
-    Io(std::io::Error),
+    /// Reading or writing the session file, its temporary file or its
+    /// directory (`path`).
+    Io {
+        path: PathBuf,
+        error: std::io::Error,
+    },
     /// Encoding or decoding the session file.
-    Json(serde_json::Error),
+    Json {
+        path: PathBuf,
+        error: serde_json::Error,
+    },
     /// The homeserver does not offer `m.login.password`.
     PasswordLoginUnsupported { offered: Vec<String> },
     /// The homeserver no longer accepts the access token (`M_UNKNOWN_TOKEN`).
@@ -48,8 +56,8 @@ impl fmt::Display for Error {
             Error::Build(error) => error.fmt(f),
             Error::Sdk(error) => error.fmt(f),
             Error::Recovery(error) => error.fmt(f),
-            Error::Io(error) => error.fmt(f),
-            Error::Json(error) => error.fmt(f),
+            Error::Io { path, error } => write!(f, "{}: {error}", path.display()),
+            Error::Json { path, error } => write!(f, "{}: {error}", path.display()),
             Error::PasswordLoginUnsupported { offered } => write!(
                 f,
                 "the homeserver does not offer password login (m.login.password); it offers: {}",
@@ -68,8 +76,8 @@ impl std::error::Error for Error {
             Error::Build(error) => error.source(),
             Error::Sdk(error) => error.source(),
             Error::Recovery(error) => error.source(),
-            Error::Io(error) => error.source(),
-            Error::Json(error) => error.source(),
+            Error::Io { error, .. } => error.source(),
+            Error::Json { error, .. } => error.source(),
             Error::PasswordLoginUnsupported { .. } | Error::UnknownToken => None,
         }
     }
@@ -109,18 +117,6 @@ impl From<RecoveryError> for Error {
         } else {
             Error::Recovery(error)
         }
-    }
-}
-
-impl From<std::io::Error> for Error {
-    fn from(error: std::io::Error) -> Self {
-        Error::Io(error)
-    }
-}
-
-impl From<serde_json::Error> for Error {
-    fn from(error: serde_json::Error) -> Self {
-        Error::Json(error)
     }
 }
 
