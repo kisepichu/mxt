@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 nucleo-matcher.workspace = true
+pulldown-cmark.workspace = true
 
 [lints]
 workspace = true
