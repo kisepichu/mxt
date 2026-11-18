@@ -1,12 +1,13 @@
-//! The error type of the adapter's startup calls.
+//! The error type of the adapter.
 
 use std::{fmt, path::PathBuf};
 
 use matrix_sdk::{
-    ClientBuildError, HttpError,
+    ClientBuildError, HttpError, StoreError,
     encryption::{recovery::RecoveryError, secret_storage::SecretStorageError},
     ruma::api::error::ErrorKind,
 };
+use matrix_sdk_ui::{room_list_service, sync_service};
 
 /// Every variant that wraps another error displays its message (the session
 /// file errors after the path) and forwards its source, so printing the
@@ -35,6 +36,10 @@ pub enum Error {
     PasswordLoginUnsupported { offered: Vec<String> },
     /// The homeserver no longer accepts the access token (`M_UNKNOWN_TOKEN`).
     UnknownToken,
+    /// Building the sync service, or its room list.
+    Sync(sync_service::Error),
+    /// An effect names a room this client does not know.
+    UnknownRoom,
 }
 
 impl Error {
@@ -66,6 +71,8 @@ impl fmt::Display for Error {
             Error::UnknownToken => {
                 f.write_str("the homeserver no longer accepts this session (M_UNKNOWN_TOKEN)")
             }
+            Error::Sync(error) => error.fmt(f),
+            Error::UnknownRoom => f.write_str("the room is not known to this client"),
         }
     }
 }
@@ -78,7 +85,10 @@ impl std::error::Error for Error {
             Error::Recovery(error) => error.source(),
             Error::Io { error, .. } => error.source(),
             Error::Json { error, .. } => error.source(),
-            Error::PasswordLoginUnsupported { .. } | Error::UnknownToken => None,
+            Error::Sync(error) => error.source(),
+            Error::PasswordLoginUnsupported { .. } | Error::UnknownToken | Error::UnknownRoom => {
+                None
+            }
         }
     }
 }
@@ -102,6 +112,24 @@ impl From<matrix_sdk::Error> for Error {
 impl From<HttpError> for Error {
     fn from(error: HttpError) -> Self {
         matrix_sdk::Error::from(error).into()
+    }
+}
+
+impl From<StoreError> for Error {
+    fn from(error: StoreError) -> Self {
+        matrix_sdk::Error::from(error).into()
+    }
+}
+
+impl From<sync_service::Error> for Error {
+    fn from(error: sync_service::Error) -> Self {
+        Error::Sync(error)
+    }
+}
+
+impl From<room_list_service::Error> for Error {
+    fn from(error: room_list_service::Error) -> Self {
+        Error::Sync(error.into())
     }
 }
 

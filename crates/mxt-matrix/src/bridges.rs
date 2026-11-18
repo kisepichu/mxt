@@ -1,0 +1,360 @@
+//! Bridge state from one-off MSC4186 requests, and `m.bridge` parsing.
+//!
+//! The room list service's required state has no `m.bridge`, and a second
+//! SDK sliding sync would feed its responses into the SDK's sync processing
+//! (design, "Matrix adapter"). So the requests here go out with
+//! `Client::send` on a connection of their own, and their responses are
+//! parsed here and never reach the SDK's store or event cache.
+
+use std::{collections::HashSet, sync::Arc, time::Duration};
+
+use matrix_sdk::{
+    Client,
+    config::RequestConfig,
+    ruma::{
+        OwnedRoomId, UInt,
+        api::client::sync::sync_events::v5,
+        events::{AnySyncStateEvent, StateEventType},
+        presence::PresenceState,
+        serde::Raw,
+    },
+};
+use matrix_sdk_ui::{RoomListService, room_list_service};
+use mxt_core::room::BridgeInfo;
+use serde_json::Value;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tracing::{debug, info, warn};
+
+use crate::Error;
+
+/// The connection ID of the one-off requests, so they never touch the SDK's
+/// `room-list` and `encryption` connections.
+const CONN_ID: &str = "mxt-bridges";
+const LIST: &str = "bridges";
+const PAGE_SIZE: u32 = 100;
+/// 100 000 rooms; a guard against a server whose `count` never gets covered.
+const MAX_PAGES: u32 = 1000;
+const SUBSCRIPTION_BATCH: usize = 100;
+/// How long rooms whose check failed wait before they are asked for again.
+const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(60);
+const M_BRIDGE: &str = "m.bridge";
+const HALF_SHOT_BRIDGE: &str = "uk.half-shot.bridge";
+
+/// Bridge state per room: the parsed information, or `None` when the room
+/// has no bridge.
+pub(crate) type BridgeStates = Vec<(OwnedRoomId, Option<BridgeInfo>)>;
+
+/// Once the room list service runs, pages a list over all rooms, then asks
+/// with `room_subscriptions` for every listed room (sent on `listed`) that no
+/// page returned, and later for each room that appears. Each room is checked
+/// once; the results go to `results`.
+pub(crate) async fn run(
+    client: Client,
+    room_list: Arc<RoomListService>,
+    mut listed: UnboundedReceiver<Vec<OwnedRoomId>>,
+    results: UnboundedSender<BridgeStates>,
+) {
+    let mut pending = HashSet::new();
+    let mut state = room_list.state();
+    // Two responses have arrived, so the homeserver answers.
+    while !matches!(state.get(), room_list_service::State::Running) {
+        tokio::select! {
+            changed = state.next() => if changed.is_none() { return },
+            rooms = listed.recv() => match rooms {
+                Some(rooms) => pending.extend(rooms),
+                None => return,
+            },
+        }
+    }
+
+    let mut checked = HashSet::new();
+    if let Err(error) = scan_list(&client, &results, &mut checked).await {
+        warn!("fetching the bridge state of the room list failed: {error}");
+    }
+
+    loop {
+        while let Ok(rooms) = listed.try_recv() {
+            pending.extend(rooms);
+        }
+        pending.retain(|room| !checked.contains(room));
+        let mut failed = Vec::new();
+        let rooms: Vec<OwnedRoomId> = pending.drain().collect();
+        for batch in rooms.chunks(SUBSCRIPTION_BATCH) {
+            match check_rooms(&client, batch).await {
+                Ok(states) => {
+                    // Rooms the server did not return are not asked for again.
+                    checked.extend(batch.iter().cloned());
+                    if results.send(states).is_err() {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    warn!("fetching the bridge state of new rooms failed: {error}");
+                    failed.extend_from_slice(batch);
+                }
+            }
+        }
+        let retry = !failed.is_empty();
+        pending.extend(failed);
+        tokio::select! {
+            rooms = listed.recv() => match rooms {
+                Some(rooms) => pending.extend(rooms),
+                None => return,
+            },
+            () = tokio::time::sleep(RETRY_AFTER_FAILURE), if retry => {}
+        }
+    }
+}
+
+/// Pages the list until its `count` is covered and sends each page's rooms.
+/// Pages are fresh requests without `pos`; when a later fresh page fails or
+/// comes back empty below `count`, the rest is chained with `pos`.
+async fn scan_list(
+    client: &Client,
+    results: &UnboundedSender<BridgeStates>,
+    checked: &mut HashSet<OwnedRoomId>,
+) -> Result<(), Error> {
+    let mut chained = false;
+    let mut pos = None;
+    let mut first = 0;
+    for _ in 0..MAX_PAGES {
+        let request = list_request(first, if chained { pos.clone() } else { None });
+        let response = match send(client, request).await {
+            Ok(response) => response,
+            Err(error) if first > 0 && !chained => {
+                info!("a fresh bridge list page failed ({error}); chaining pos from now on");
+                chained = true;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let count = response
+            .lists
+            .get(LIST)
+            .map_or(0, |list| u64::from(list.count));
+        if response.rooms.is_empty() && first > 0 && !chained && u64::from(first) < count {
+            info!("a fresh bridge list page came back empty; chaining pos from now on");
+            chained = true;
+            continue;
+        }
+        debug!(
+            first,
+            count,
+            rooms = response.rooms.len(),
+            "bridge list page"
+        );
+        checked.extend(response.rooms.keys().cloned());
+        let _ = results.send(states(&response));
+        pos = Some(response.pos);
+        first += PAGE_SIZE;
+        if u64::from(first) >= count {
+            break;
+        }
+    }
+    Ok(())
+}
+
+async fn check_rooms(client: &Client, rooms: &[OwnedRoomId]) -> Result<BridgeStates, Error> {
+    let response = send(client, subscription_request(rooms)).await?;
+    debug!(
+        asked = rooms.len(),
+        returned = response.rooms.len(),
+        "bridge room subscriptions"
+    );
+    Ok(states(&response))
+}
+
+async fn send(client: &Client, request: v5::Request) -> Result<v5::Response, Error> {
+    let config = RequestConfig::new()
+        .timeout(Duration::from_secs(120))
+        .retry_limit(2);
+    Ok(client.send(request).with_request_config(config).await?)
+}
+
+fn states(response: &v5::Response) -> BridgeStates {
+    response
+        .rooms
+        .iter()
+        .map(|(room, data)| (room.clone(), room_bridge_state(&data.required_state)))
+        .collect()
+}
+
+fn required_state() -> Vec<(StateEventType, String)> {
+    [M_BRIDGE, HALF_SHOT_BRIDGE]
+        .into_iter()
+        .map(|event_type| (StateEventType::from(event_type), "*".to_owned()))
+        .collect()
+}
+
+fn base_request(pos: Option<String>) -> v5::Request {
+    let mut request = v5::Request::new();
+    request.conn_id = Some(CONN_ID.to_owned());
+    request.pos = pos;
+    // Answer at once, and do not mark the user online.
+    request.timeout = Some(Duration::ZERO);
+    request.set_presence = PresenceState::Offline;
+    request
+}
+
+fn list_request(first: u32, pos: Option<String>) -> v5::Request {
+    let mut list = v5::request::List::default();
+    list.ranges = vec![(UInt::from(first), UInt::from(first + PAGE_SIZE - 1))];
+    list.room_details.required_state = required_state();
+    list.room_details.timeline_limit = UInt::from(0u32);
+    let mut request = base_request(pos);
+    request.lists.insert(LIST.to_owned(), list);
+    request
+}
+
+fn subscription_request(rooms: &[OwnedRoomId]) -> v5::Request {
+    let mut request = base_request(None);
+    for room in rooms {
+        let mut subscription = v5::request::RoomSubscription::default();
+        subscription.required_state = required_state();
+        subscription.timeline_limit = UInt::from(0u32);
+        request
+            .room_subscriptions
+            .insert(room.clone(), subscription);
+    }
+    request
+}
+
+fn room_bridge_state(state: &[Raw<AnySyncStateEvent>]) -> Option<BridgeInfo> {
+    let events: Vec<(String, Value)> = state
+        .iter()
+        .filter_map(|raw| {
+            let event_type = raw.get_field::<String>("type").ok()??;
+            let content = raw.get_field::<Value>("content").ok()??;
+            Some((event_type, content))
+        })
+        .collect();
+    room_bridge(
+        events
+            .iter()
+            .map(|(event_type, content)| (event_type.as_str(), content)),
+    )
+}
+
+/// One room's bridge information from its bridge state events: the first
+/// network and the first protocol display name, `m.bridge` events before
+/// `uk.half-shot.bridge` ones. `None` when no event has content; a bridge
+/// removes its state by emptying it.
+fn room_bridge<'a>(events: impl Iterator<Item = (&'a str, &'a Value)>) -> Option<BridgeInfo> {
+    let mut bridges: Vec<(bool, BridgeInfo)> = events
+        .filter(|(_, content)| content.as_object().is_some_and(|c| !c.is_empty()))
+        .filter_map(|(event_type, content)| match event_type {
+            M_BRIDGE => Some((false, parse_bridge(content))),
+            HALF_SHOT_BRIDGE => Some((true, parse_bridge(content))),
+            _ => None,
+        })
+        .collect();
+    if bridges.is_empty() {
+        return None;
+    }
+    // Stable, so events of one type keep the server's order.
+    bridges.sort_by_key(|(half_shot, _)| *half_shot);
+    let first = |field: fn(&BridgeInfo) -> &Option<String>| {
+        bridges.iter().find_map(|(_, info)| field(info).clone())
+    };
+    Some(BridgeInfo {
+        network: first(|info| &info.network),
+        protocol: first(|info| &info.protocol),
+    })
+}
+
+/// `content.network.displayname` and `content.protocol.displayname` of an
+/// `m.bridge` or `uk.half-shot.bridge` state event's content. Blank names
+/// count as missing.
+pub(crate) fn parse_bridge(content: &Value) -> BridgeInfo {
+    let display_name = |key: &str| {
+        content
+            .get(key)?
+            .get("displayname")?
+            .as_str()
+            .filter(|name| !name.trim().is_empty())
+            .map(str::to_owned)
+    };
+    BridgeInfo {
+        network: display_name("network"),
+        protocol: display_name("protocol"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn info(network: Option<&str>, protocol: Option<&str>) -> BridgeInfo {
+        BridgeInfo {
+            network: network.map(Into::into),
+            protocol: protocol.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn parse_bridge_reads_network_and_protocol_display_names() {
+        let content = json!({
+            "bridgebot": "@discordbot:example.org",
+            "protocol": { "id": "discord", "displayname": "Discord" },
+            "network": { "id": "123", "displayname": "myserver" },
+            "channel": { "id": "456", "displayname": "general" },
+        });
+        assert_eq!(
+            parse_bridge(&content),
+            info(Some("myserver"), Some("Discord"))
+        );
+    }
+
+    #[test]
+    fn parse_bridge_without_network() {
+        let content = json!({ "protocol": { "id": "discord", "displayname": "Discord" } });
+        assert_eq!(parse_bridge(&content), info(None, Some("Discord")));
+    }
+
+    #[test]
+    fn parse_bridge_without_display_names() {
+        let content = json!({
+            "protocol": { "id": "telegram" },
+            "network": { "id": "123", "displayname": 7 },
+        });
+        assert_eq!(parse_bridge(&content), info(None, None));
+    }
+
+    #[test]
+    fn parse_bridge_of_non_object_content() {
+        assert_eq!(parse_bridge(&json!("m.bridge")), info(None, None));
+        assert_eq!(parse_bridge(&json!(null)), info(None, None));
+        assert_eq!(
+            parse_bridge(&json!({ "network": "myserver" })),
+            info(None, None)
+        );
+    }
+
+    #[test]
+    fn room_bridge_prefers_m_bridge_and_ignores_emptied_state() {
+        let half_shot = json!({ "network": { "displayname": "half-shot network" } });
+        let m_bridge = json!({ "protocol": { "displayname": "Discord" } });
+        let removed = json!({});
+        let events = [
+            (HALF_SHOT_BRIDGE, &half_shot),
+            (M_BRIDGE, &removed),
+            (M_BRIDGE, &m_bridge),
+        ];
+        assert_eq!(
+            room_bridge(events.into_iter()),
+            Some(info(Some("half-shot network"), Some("Discord")))
+        );
+        let m_bridge_network = json!({ "network": { "displayname": "myserver" } });
+        let events = [
+            (HALF_SHOT_BRIDGE, &half_shot),
+            (M_BRIDGE, &m_bridge_network),
+        ];
+        assert_eq!(
+            room_bridge(events.into_iter()),
+            Some(info(Some("myserver"), None))
+        );
+        assert_eq!(room_bridge([(M_BRIDGE, &removed)].into_iter()), None);
+    }
+}
