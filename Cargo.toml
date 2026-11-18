@@ -25,7 +25,9 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 # Reading only: the `display` feature (serialization) is left out.
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
-unicode-width = "0.2"
+# ratatui draws text per grapheme cluster; the view cuts text at the same
+# boundaries.
+unicode-segmentation = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

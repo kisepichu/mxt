@@ -5,11 +5,12 @@ use mxt_core::app::{App, CommandLine, Focus, LineKind, StatusKind};
 use mxt_core::msg::SyncState;
 use mxt_core::room::{Badge, RoomName, RoomSummary};
 use ratatui::Frame;
+use ratatui::buffer::CellWidth;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// The room list width, its border included.
 const ROOM_LIST_WIDTH: u16 = 30;
@@ -24,6 +25,12 @@ const ERROR: Style = Style::new().fg(Color::Red);
 /// Between the groups of the status line.
 const GAP: &str = "  ";
 const ELLIPSIS: &str = "…";
+/// Between the network part and the room part of a displayed name.
+const SEPARATOR: &str = " / ";
+/// A name keeps at least this many columns where the layout can make room:
+/// a room list row leaves out the mode label first, and a bridged name leaves
+/// out its network part, already shortened to `…`.
+const MIN_NAME_WIDTH: usize = 6;
 
 /// Draws the frame. Returns the first and last visible room list indices,
 /// inclusive, when the room list shows any room.
@@ -92,26 +99,47 @@ fn draw_room_list(
 }
 
 /// The displayed name, cut to fit, and right-aligned the badge and the
-/// notification mode label.
+/// notification mode label. The label is left out before the name would get
+/// fewer than `MIN_NAME_WIDTH` columns: the badge is the signal to act on. The
+/// right part never takes more than the row.
 fn room_row(room: &RoomSummary, is_open: bool, width: usize) -> Line<'_> {
-    let badge = Badge::from_counts(&room.unread);
-    let label = room.mode.label();
     let mut right = Vec::with_capacity(3);
-    if let Some(badge) = badge {
-        right.push(Span::styled(badge.text(), badge_style(badge)));
-    }
-    if let Some(label) = label {
-        if badge.is_some() {
-            right.push(Span::raw(" "));
+    let mut right_width = 0;
+    if let Some(badge) = Badge::from_counts(&room.unread) {
+        let text = badge.text();
+        let style = badge_style(badge);
+        right_width = text_width(&text);
+        if right_width <= width {
+            right.push(Span::styled(text, style));
+        } else {
+            // Only a row narrower than the badge gets here.
+            let (spans, used) = fit(&[(text.as_str(), style)], width);
+            let owned = spans
+                .into_iter()
+                .map(|s| Span::styled(s.content.into_owned(), s.style));
+            right.extend(owned);
+            right_width = used;
         }
-        right.push(Span::styled(label, DIM));
     }
-    let right_width: usize = right.iter().map(Span::width).sum();
+    if let Some(label) = room.mode.label() {
+        let space = usize::from(!right.is_empty());
+        let with_label = right_width + space + text_width(label);
+        // One column stays between the name and the right part.
+        let name_room = width.checked_sub(with_label + 1);
+        let wanted = name_width(&room.name).min(MIN_NAME_WIDTH);
+        if name_room.is_some_and(|columns| columns >= wanted) {
+            if space > 0 {
+                right.push(Span::raw(" "));
+            }
+            right.push(Span::styled(label, DIM));
+            right_width = with_label;
+        }
+    }
     let gap = usize::from(right_width > 0);
 
     let room_style = if is_open { BOLD } else { PLAIN };
-    let segments = name_segments(&room.name, room_style);
-    let (mut spans, used) = fit(&segments, width.saturating_sub(right_width + gap));
+    let name_room = width.saturating_sub(right_width + gap);
+    let (mut spans, used) = fit_name(&room.name, room_style, name_room);
     spans.push(Span::raw(
         " ".repeat(width.saturating_sub(used + right_width)),
     ));
@@ -128,14 +156,40 @@ fn badge_style(badge: Badge) -> Style {
     }
 }
 
-/// `network / room`, with the network part dim, so a room whose own name is
-/// `Discord / Boss` can be told apart from a bridged room.
-fn name_segments(name: &RoomName, room_style: Style) -> [(&str, Style); 3] {
-    let (network, separator) = match &name.network {
-        Some(network) => (network.as_str(), " / "),
-        None => ("", ""),
+/// The displayed name, `network / room`, cut to `width` columns. The network
+/// part is dim, so a room whose own name is `Discord / Boss` can be told apart
+/// from a bridged room.
+///
+/// A bridged name loses the end of its network part first, down to `…`, so
+/// the room part that tells rooms apart stays; only then is the room part
+/// cut. When `… / ` would leave the room part fewer than `MIN_NAME_WIDTH`
+/// columns, the room part is shown alone.
+fn fit_name(name: &RoomName, room_style: Style, width: usize) -> (Vec<Span<'_>>, usize) {
+    let room = (name.room.as_str(), room_style);
+    let Some(network) = name.network.as_deref() else {
+        return fit(&[room], width);
     };
-    [(network, DIM), (separator, DIM), (&name.room, room_style)]
+    let separator_width = text_width(SEPARATOR);
+    let rest_width = separator_width + text_width(&name.room);
+    if let Some(network_width) = width.checked_sub(rest_width).filter(|&w| w > 0) {
+        let (mut spans, used) = fit(&[(network, DIM)], network_width);
+        spans.extend([
+            Span::styled(SEPARATOR, DIM),
+            Span::styled(room.0, room_style),
+        ]);
+        return (spans, used + rest_width);
+    }
+    if width < text_width(ELLIPSIS) + separator_width + MIN_NAME_WIDTH {
+        return fit(&[room], width);
+    }
+    fit(&[(ELLIPSIS, DIM), (SEPARATOR, DIM), room], width)
+}
+
+/// The columns of the whole displayed name.
+fn name_width(name: &RoomName) -> usize {
+    let network = name.network.as_deref();
+    let prefix = network.map_or(0, |network| text_width(network) + text_width(SEPARATOR));
+    prefix + text_width(&name.room)
 }
 
 /// Until phase 2: the open room's displayed name as a header.
@@ -146,10 +200,7 @@ fn draw_timeline(frame: &mut Frame, area: Rect, app: &App) {
         ..inner
     };
     let line = match app.open_room().and_then(|id| app.rooms().get(id)) {
-        Some(room) => {
-            let segments = name_segments(&room.name, BOLD);
-            Line::from(fit(&segments, usize::from(header.width)).0)
-        }
+        Some(room) => Line::from(fit_name(&room.name, BOLD, usize::from(header.width)).0),
         None => Line::styled("No room open", DIM),
     };
     frame.render_widget(line, header);
@@ -182,16 +233,17 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
     let sync = sync_label(app.sync_state());
     let width = usize::from(area.width);
     // One column stays between the left part and the sync state.
-    let available = width.saturating_sub(sync.width() + 1);
+    let available = width.saturating_sub(text_width(sync) + 1);
     let (mut spans, mut used) = fit(&head, available);
     if let Some(room) = app.open_room().and_then(|id| app.rooms().get(id)) {
-        let [network, separator, name] = name_segments(&room.name, PLAIN);
         let status_width = status.as_ref().map_or(0, |status| segments_width(status));
         let room_width = available.saturating_sub(used + status_width);
-        if room_width > GAP.len() {
-            let (room, room_used) = fit(&[(GAP, PLAIN), network, separator, name], room_width);
+        let gap_width = text_width(GAP);
+        if room_width > gap_width {
+            let (room, room_used) = fit_name(&room.name, PLAIN, room_width - gap_width);
+            spans.push(Span::raw(GAP));
             spans.extend(room);
-            used += room_used;
+            used += gap_width + room_used;
         }
     }
     if let Some(status) = &status {
@@ -200,7 +252,7 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
         used += status_used;
     }
     spans.push(Span::raw(
-        " ".repeat(width.saturating_sub(used + sync.width())),
+        " ".repeat(width.saturating_sub(used + text_width(sync))),
     ));
     spans.push(Span::raw(sync));
     frame.render_widget(Line::from(spans), area);
@@ -226,24 +278,25 @@ fn draw_command_line(frame: &mut Frame, area: Rect, line: &CommandLine) {
     // The prompt and the cursor take a column each.
     let room = usize::from(area.width).saturating_sub(2);
     let mut text = line.text.as_str();
-    let mut text_width: usize = text.chars().map(char_width).sum();
-    for c in line.text.chars() {
-        if text_width <= room {
+    let mut text_columns = text_width(text);
+    for (at, grapheme) in line.text.grapheme_indices(true) {
+        if text_columns <= room {
             break;
         }
-        text = &text[c.len_utf8()..];
-        text_width -= char_width(c);
+        text = &line.text[at + grapheme.len()..];
+        text_columns -= grapheme_width(grapheme);
     }
     frame.render_widget(Line::from(vec![Span::raw(prompt), Span::raw(text)]), area);
-    let column = u16::try_from(1 + text_width).unwrap_or(u16::MAX);
+    let column = u16::try_from(1 + text_columns).unwrap_or(u16::MAX);
     let x = area.x.saturating_add(column);
     frame.set_cursor_position(Position::new(x.min(area.right().saturating_sub(1)), area.y));
 }
 
-/// Spans of the segments cut to `width` display columns, ending with `…` when
-/// cut, and the columns they take. Empty segments are left out.
+/// Spans of the segments cut to `width` columns at grapheme cluster
+/// boundaries, ending with `…` when cut, and the columns they take. Empty
+/// segments are left out.
 fn fit<'a>(segments: &[(&'a str, Style)], width: usize) -> (Vec<Span<'a>>, usize) {
-    let mut spans = Vec::with_capacity(segments.len());
+    let mut spans = Vec::with_capacity(segments.len() + 1);
     let total = segments_width(segments);
     if total <= width {
         spans.extend(
@@ -254,19 +307,19 @@ fn fit<'a>(segments: &[(&'a str, Style)], width: usize) -> (Vec<Span<'a>>, usize
         );
         return (spans, total);
     }
-    // One column is left for the ellipsis.
-    let budget = width.saturating_sub(1);
+    let ellipsis = text_width(ELLIPSIS);
+    let budget = width.saturating_sub(ellipsis);
     let mut used = 0;
     for &(text, style) in segments {
-        for (at, c) in text.char_indices() {
-            let w = char_width(c);
+        for (at, grapheme) in text.grapheme_indices(true) {
+            let w = grapheme_width(grapheme);
             if used + w > budget {
                 if at > 0 {
                     spans.push(Span::styled(&text[..at], style));
                 }
-                if width > 0 {
+                if width >= ellipsis {
                     spans.push(Span::styled(ELLIPSIS, style));
-                    used += 1;
+                    used += ellipsis;
                 }
                 return (spans, used);
             }
@@ -280,14 +333,155 @@ fn fit<'a>(segments: &[(&'a str, Style)], width: usize) -> (Vec<Span<'a>>, usize
 }
 
 fn segments_width(segments: &[(&str, Style)]) -> usize {
-    segments
-        .iter()
-        .flat_map(|(text, _)| text.chars())
-        .map(char_width)
-        .sum()
+    segments.iter().map(|(text, _)| text_width(text)).sum()
 }
 
-/// Control characters take no column: ratatui does not draw them.
-fn char_width(c: char) -> usize {
-    c.width().unwrap_or(0)
+/// The columns ratatui gives the text: it draws each segment, a span, per
+/// grapheme cluster.
+fn text_width(text: &str) -> usize {
+    text.graphemes(true).map(grapheme_width).sum()
+}
+
+/// The columns ratatui gives a grapheme cluster. A cluster with a control
+/// character takes none: ratatui leaves it out.
+fn grapheme_width(grapheme: &str) -> usize {
+    if grapheme.contains(char::is_control) {
+        0
+    } else {
+        usize::from(grapheme.cell_width())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mxt_core::ids::RoomId;
+    use mxt_core::room::{NotificationMode, RoomKind, UnreadCounts};
+
+    const FAMILY: &str = "👨\u{200d}👩\u{200d}👧";
+
+    fn text(spans: &[Span]) -> String {
+        spans.iter().map(|span| span.content.as_ref()).collect()
+    }
+
+    /// The drawn text and the columns `fit` reports.
+    fn fit_plain(segment: &str, width: usize) -> (String, usize) {
+        let (spans, used) = fit(&[(segment, PLAIN)], width);
+        (text(&spans), used)
+    }
+
+    fn name(network: Option<&str>, room: &str) -> RoomName {
+        RoomName {
+            network: network.map(str::to_owned),
+            room: room.to_owned(),
+        }
+    }
+
+    fn fit_name_text(name: &RoomName, width: usize) -> String {
+        let (spans, used) = fit_name(name, PLAIN, width);
+        let drawn = text(&spans);
+        assert_eq!(used, text_width(&drawn), "{drawn:?}");
+        drawn
+    }
+
+    fn summary(name: RoomName, unread: UnreadCounts, mode: NotificationMode) -> RoomSummary {
+        RoomSummary {
+            id: RoomId::new("!room:example.org"),
+            name,
+            kind: RoomKind::Group,
+            unread,
+            mode,
+            latest_activity: None,
+        }
+    }
+
+    fn mentions(mentions: u64) -> UnreadCounts {
+        UnreadCounts {
+            mentions,
+            ..UnreadCounts::default()
+        }
+    }
+
+    fn row_text(room: &RoomSummary, width: usize) -> String {
+        let line = room_row(room, false, width);
+        let drawn = text(&line.spans);
+        assert_eq!(text_width(&drawn), width, "{drawn:?}");
+        drawn
+    }
+
+    #[test]
+    fn emoji_with_vs16_takes_two_columns() {
+        // U+2764 U+FE0F: one column per char, two as a cluster.
+        assert_eq!(fit_plain("❤️ab", 4), ("❤️ab".to_owned(), 4));
+        assert_eq!(fit_plain("❤️abc", 4), ("❤️a…".to_owned(), 4));
+    }
+
+    #[test]
+    fn zwj_sequence_is_one_cluster() {
+        // Six columns per char, two as a cluster.
+        let name = format!("a{FAMILY}b");
+        assert_eq!(fit_plain(&name, 4), (name.clone(), 4));
+        // The cut falls between clusters, never inside the sequence.
+        let name = format!("a{FAMILY}{FAMILY}");
+        assert_eq!(fit_plain(&name, 4), (format!("a{FAMILY}…"), 4));
+    }
+
+    #[test]
+    fn wide_character_at_the_cut_is_left_out_whole() {
+        assert_eq!(fit_plain("日本語", 4), ("日…".to_owned(), 3));
+        assert_eq!(fit_plain("日本語", 1), ("…".to_owned(), 1));
+    }
+
+    #[test]
+    fn width_zero_draws_nothing() {
+        assert_eq!(fit_plain("abc", 0), (String::new(), 0));
+        assert_eq!(fit_plain("", 0), (String::new(), 0));
+    }
+
+    #[test]
+    fn control_characters_take_no_column() {
+        assert_eq!(fit_plain("a\u{7}b", 2), ("a\u{7}b".to_owned(), 2));
+    }
+
+    #[test]
+    fn bridged_name_shortens_the_network_part_first() {
+        let bridged = name(Some("Discord"), "plain-room");
+        assert_eq!(fit_name_text(&bridged, 20), "Discord / plain-room");
+        assert_eq!(fit_name_text(&bridged, 18), "Disc… / plain-room");
+        assert_eq!(fit_name_text(&bridged, 14), "… / plain-room");
+        assert_eq!(fit_name_text(&bridged, 13), "… / plain-ro…");
+        assert_eq!(fit_name_text(&bridged, 10), "… / plain…");
+        // `… / ` would leave the room part fewer than six columns.
+        assert_eq!(fit_name_text(&bridged, 9), "plain-ro…");
+        assert_eq!(fit_name_text(&name(None, "plain-room"), 5), "plai…");
+    }
+
+    #[test]
+    fn narrow_row_drops_the_label_before_the_name() {
+        let room = summary(
+            name(Some("Discord"), "plain-room"),
+            mentions(3),
+            NotificationMode::MentionsAndKeywords,
+        );
+        assert_eq!(
+            row_text(&room, 40),
+            "Discord / plain-room    @3 Mentions only"
+        );
+        assert_eq!(row_text(&room, 22), "Disco… / plain-room @3");
+        // A short name keeps the label while it fits whole.
+        let short = summary(name(None, "ops"), mentions(3), NotificationMode::Mute);
+        assert_eq!(row_text(&short, 13), "ops  @3 Muted");
+    }
+
+    #[test]
+    fn right_part_never_exceeds_the_row() {
+        let room = summary(
+            name(None, "plain-room"),
+            mentions(100),
+            NotificationMode::Mute,
+        );
+        assert_eq!(row_text(&room, 4), "@99+");
+        assert_eq!(row_text(&room, 3), "@9…");
+        assert_eq!(row_text(&room, 0), "");
+    }
 }

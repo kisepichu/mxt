@@ -12,7 +12,7 @@ publish = false
 crossterm.workspace = true
 mxt-core.workspace = true
 ratatui.workspace = true
-unicode-width.workspace = true
+unicode-segmentation.workspace = true
 
 [lints]
 workspace = true

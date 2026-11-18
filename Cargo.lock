@@ -707,7 +707,7 @@ dependencies = [
  "crossterm",
  "mxt-core",
  "ratatui",
- "unicode-width",
+ "unicode-segmentation",
 ]
 
 [[package]]
