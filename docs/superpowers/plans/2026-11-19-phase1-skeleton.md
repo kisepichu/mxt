@@ -3000,3 +3000,84 @@ pub(crate) fn parse_bridge(content: &serde_json::Value) -> BridgeInfo;
 git add crates/mxt-matrix Cargo.toml Cargo.lock
 git commit -m "Add the sync and room list adapter, so room summaries with network names and unread counts reach the core as messages"
 ```
+
+---
+
+### Task 12: Startup flow and wiring
+
+Connects Tasks 8–11 in `main`: the design's "Startup" steps, the matrix
+adapter and the event loop, and the `M_UNKNOWN_TOKEN` handling. Starts after
+Tasks 8, 9, 10 and 11 have merged.
+
+**Files:**
+- Modify: `crates/mxt/src/main.rs`, `crates/mxt/src/event_loop.rs` (only if
+  the effect forwarding needs it)
+- Create: `crates/mxt/src/startup.rs`
+
+**Flow** (design, "Startup"; every failure before the terminal UI prints a
+message and exits with status 1):
+1. Configuration (Task 8).
+2. `Paths::from_env`, `create_dirs`, `DataLock::acquire(lock_file)`.
+   `LockError::Held`: print `another mxt is running (lock: <path>)`.
+3. `init_logging(state, MXT_LOG)`; keep the guard alive until exit.
+4. Session:
+   - `load_session` returns a session: `build_client(Homeserver::Url(saved.homeserver))`,
+     `restore`.
+   - None: `set_aside_orphaned_store` (log it at `warn`), then
+     `build_client` with `config.homeserver` as `Homeserver::Url`, or
+     `Homeserver::Discover(<server name of the user ID>)`; print
+     `Logging in as <user ID> on <homeserver>`; `prompt_secret("Password: ")`;
+     `login`; `save_session` right away, before anything else can fail.
+5. `build_sync_service`. Right after a first login only: start it, print
+   `Waiting for this device's keys to reach the server...`,
+   `wait_for_device_keys` (90 s; on timeout print that recovery may fail and
+   continue), then `recovery_status`:
+   - `Disabled`: print that the account has no secret storage, recovery has
+     to be set up in another client, and continue.
+   - otherwise: `prompt_secret("Recovery key (empty to skip): ")`; empty
+     skips (print that `:recover` asks again later); `recover`; print
+     `Recovery complete` or `Recovery failed: <error>` and continue either way.
+6. `install_panic_hook`, `Tui::new`, the two channels, `Matrix::start(client,
+   sync, config.settings.read_receipts, to_core)`, a task that forwards
+   `MatrixEffect`s from the loop's channel to `Matrix::execute`, then
+   `event_loop::run`.
+7. On exit: `Matrix::stop`, `Tui::restore`, drop the client, release the
+   lock.
+
+**`M_UNKNOWN_TOKEN`** (design, "Startup"): subscribe to
+`client.subscribe_to_session_changes()` before restoring or logging in. When
+`SessionChange::UnknownToken` arrives, at any time: end the event loop (run
+the loop inside `tokio::select!` with the session-change receiver), restore
+the terminal, stop the adapter, drop the client so the stores are closed,
+`invalidate(paths, now)`, print `The homeserver no longer accepts this
+session (M_UNKNOWN_TOKEN). The old data was moved to <path>; the next start
+logs in as a new device.`, and exit with status 1. The same applies when
+`restore` or the first requests fail with an unknown token before the UI
+starts (`Error::is_unknown_token`).
+
+**Tests:** the flow is I/O; it is verified by running. Keep decisions that can
+be pure (for example the server name from a user ID, and the homeserver
+choice from the configuration and the saved session) in small functions with
+unit tests.
+
+- [ ] **Step 1: Write the unit tests for the pure helpers; see them fail.**
+- [ ] **Step 2: Implement the flow.**
+- [ ] **Step 3: Run the tests, fmt and clippy** (under the shared lock).
+- [ ] **Step 4: Check by running, without a real login:**
+  - `--config` pointing to a file with `user_id = "@alice:example.org"` and
+    an empty `XDG_DATA_HOME`, `XDG_CACHE_HOME` and `XDG_STATE_HOME` under a
+    temporary directory: mxt creates the directories (mode 0700), takes the
+    lock, fails discovery for `example.org` with a readable message and
+    status 1, and restores nothing because no UI started.
+  - A second mxt on the same data directory while the first waits at the
+    password prompt (use a reachable public homeserver in the configuration,
+    for example `homeserver = "https://matrix.org"`, and do not type a
+    password; quit the first with `<C-c>`): the second prints the lock
+    message.
+  - The orchestrator runs the check against the real account; do not log in.
+- [ ] **Step 5: Commit.**
+
+```bash
+git add crates/mxt
+git commit -m "Wire the startup flow, the matrix adapter and the event loop, so mxt logs in or restores its session, syncs and shows the room list"
+```
