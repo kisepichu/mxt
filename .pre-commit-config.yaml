@@ -1,0 +1,18 @@
+# Run `prek install` to enable. The hooks expect the flake's shell
+# (`nix develop`) or an equivalent toolchain on PATH.
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: cargo fmt --all --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --all-targets -- -D warnings
+        language: system
+        # Manifest and lock changes can break clippy too.
+        files: '(\.rs|Cargo\.(toml|lock))$'
+        pass_filenames: false
