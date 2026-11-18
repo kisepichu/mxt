@@ -17,9 +17,7 @@ pub(super) struct Timeline {
     entries: Vec<TimelineEntry>,
     /// The item under the cursor; `None` while the cursor follows the newest item.
     anchor: Option<Anchor>,
-    /// A `PaginateBackwards` request is in flight.
-    paginating: bool,
-    reached_start: bool,
+    pagination: Pagination,
     /// The event of the last receipt requested.
     receipt: Option<EventId>,
 }
@@ -28,6 +26,17 @@ pub(super) struct Timeline {
 struct Anchor {
     index: usize,
     item: ItemRef,
+}
+
+/// Back pagination of the open room's timeline.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Pagination {
+    #[default]
+    Idle,
+    /// A `PaginateBackwards` request is in flight.
+    InFlight,
+    /// The room's start is loaded.
+    ReachedStart,
 }
 
 impl Timeline {
@@ -63,14 +72,16 @@ impl Timeline {
 
     /// Applies `diffs` in order. An anchored cursor follows its item's index
     /// through them, so inserted older items do not move it to another
-    /// message, and a local echo replaced in place by its remote event keeps
-    /// it.
+    /// message, and a local echo that the SDK removes and replaces by its
+    /// remote event in the same batch keeps it.
     fn apply(&mut self, diffs: Vec<TimelineDiff>) {
         let mut index = self.anchor.as_ref().map(|anchor| anchor.index);
         for diff in diffs {
-            if matches!(diff, TimelineDiff::Clear | TimelineDiff::Reset(_)) {
+            if matches!(diff, TimelineDiff::Clear | TimelineDiff::Reset(_))
+                && self.pagination == Pagination::ReachedStart
+            {
                 // The new entries may not reach back to the room's start.
-                self.reached_start = false;
+                self.pagination = Pagination::Idle;
             }
             if let Some(index) = &mut index {
                 *index = shifted(*index, &diff, self.entries.len());
@@ -134,8 +145,11 @@ impl App {
         if self.open_room.as_ref() != Some(&room) {
             return;
         }
-        self.timeline.paginating = false;
-        self.timeline.reached_start = reached_start;
+        self.timeline.pagination = if reached_start {
+            Pagination::ReachedStart
+        } else {
+            Pagination::Idle
+        };
         self.check_pagination(effects);
     }
 
@@ -145,7 +159,9 @@ impl App {
         if self.open_room.as_ref() != Some(&room) {
             return;
         }
-        self.timeline.paginating = false;
+        if self.timeline.pagination == Pagination::InFlight {
+            self.timeline.pagination = Pagination::Idle;
+        }
         self.set_status(
             StatusKind::Error,
             format!("Could not load older messages: {error}"),
@@ -194,7 +210,7 @@ impl App {
             return;
         };
         let timeline = &mut self.timeline;
-        if timeline.paginating || timeline.reached_start {
+        if timeline.pagination != Pagination::Idle {
             return;
         }
         let older = timeline.cursor().map_or(0, |cursor| {
@@ -205,7 +221,7 @@ impl App {
                 .count()
         });
         if older <= PAGINATE_WITHIN {
-            timeline.paginating = true;
+            timeline.pagination = Pagination::InFlight;
             effects.push(Effect::Matrix(MatrixEffect::PaginateBackwards(
                 room.clone(),
             )));
@@ -261,6 +277,13 @@ impl App {
         if std::mem::take(&mut self.view_open) {
             effects.push(Effect::Ui(UiEffect::CloseView));
         }
+    }
+
+    /// Starts a new timeline when another room or no room is open, and closes
+    /// the message view, which shows an item of the previous one.
+    pub(super) fn reset_timeline(&mut self, effects: &mut Vec<Effect>) {
+        self.timeline = Timeline::default();
+        self.close_view(effects);
     }
 
     /// `message.yank`: the item's plain text.
@@ -326,12 +349,14 @@ fn newer(entries: &[TimelineEntry], from: usize, count: usize) -> usize {
 
 /// Where the entry at `index` is after `diff`, which applies to `len`
 /// entries. If the diff removes the entry, the index of the entry that takes
-/// its place.
+/// its place. An insert at `index` itself does not shift it: the SDK replaces
+/// a local echo by removing it and inserting its remote event at the same
+/// index, and an entry still there after the insert is found by its ID.
 fn shifted(index: usize, diff: &TimelineDiff, len: usize) -> usize {
     match *diff {
         TimelineDiff::PushFront(_) => index + 1,
         TimelineDiff::PopFront if len > 0 => index.saturating_sub(1),
-        TimelineDiff::Insert(at, _) if at <= len && at <= index => index + 1,
+        TimelineDiff::Insert(at, _) if at <= len && at < index => index + 1,
         TimelineDiff::Remove(at) if at < len && at < index => index - 1,
         _ => index,
     }

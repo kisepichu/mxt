@@ -2,7 +2,6 @@
 
 use std::cmp::Ordering;
 
-use super::timeline::Timeline;
 use super::{App, Focus, Motion, StatusKind};
 use crate::effect::{Effect, MatrixEffect};
 use crate::ids::RoomId;
@@ -31,7 +30,7 @@ impl App {
             };
         }
         if let Some(open) = self.open_room.take_if(|open| *open == id) {
-            self.timeline = Timeline::default();
+            self.reset_timeline(effects);
             effects.push(Effect::Matrix(MatrixEffect::UnsubscribeTimeline(open)));
         }
     }
@@ -80,7 +79,7 @@ impl App {
             if let Some(previous) = self.open_room.replace(id.clone()) {
                 effects.push(Effect::Matrix(MatrixEffect::UnsubscribeTimeline(previous)));
             }
-            self.timeline = Timeline::default();
+            self.reset_timeline(effects);
             effects.push(Effect::Matrix(MatrixEffect::SubscribeTimeline(id)));
             self.room_cursor = Some(index);
         }

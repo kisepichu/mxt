@@ -132,6 +132,8 @@ fn k_leaves_follow_mode_and_stays_on_its_item() {
     assert_eq!(app.timeline_cursor(), Some(5));
 }
 
+/// The SDK replaces a local echo by removing it and inserting its remote
+/// event after the last remote event, in one batch.
 #[test]
 fn the_cursor_stays_on_a_local_echo_replaced_by_its_remote_event() {
     let mut app = opened();
@@ -145,17 +147,34 @@ fn the_cursor_stays_on_a_local_echo_replaced_by_its_remote_event() {
     );
     keys(&mut app, "k");
     assert_eq!(cursor_body(&app), "hello");
+    // Two echoes: the remote event takes the first one's index.
     diffs(
         &mut app,
         vec![
-            TimelineDiff::Set(1, item(remote(5), "hello")),
-            TimelineDiff::PushFront(msg(0)),
+            TimelineDiff::Remove(1),
+            TimelineDiff::Insert(1, item(remote(5), "hello")),
         ],
     );
+    assert_eq!(app.timeline_cursor(), Some(1));
+    assert_eq!(cursor_body(&app), "hello");
+    assert!(!app.timeline_follows());
+    // The cursor is on the remote event now.
+    diffs(&mut app, vec![TimelineDiff::PushFront(divider())]);
     assert_eq!(app.timeline_cursor(), Some(2));
     assert_eq!(cursor_body(&app), "hello");
-    diffs(&mut app, vec![TimelineDiff::PushFront(divider())]);
+    // One echo, the last entry: the remote event is pushed back.
+    keys(&mut app, "/later<CR>");
     assert_eq!(app.timeline_cursor(), Some(3));
+    assert!(!app.timeline_follows());
+    diffs(
+        &mut app,
+        vec![
+            TimelineDiff::Remove(3),
+            TimelineDiff::PushBack(item(remote(6), "later")),
+        ],
+    );
+    assert_eq!(app.timeline_cursor(), Some(3));
+    assert_eq!(cursor_body(&app), "later");
     assert!(!app.timeline_follows());
 }
 
@@ -337,12 +356,12 @@ fn the_receipt_is_requested_once_per_newest_remote_event() {
     let echo = TimelineDiff::PushBack(item(local("t1"), "mine"));
     assert_eq!(diffs(&mut app, vec![echo]), vec![]);
     assert_eq!(viewport(&mut app, 0, 2), vec![]);
-    // The echo becomes the remote event in place.
-    let sent = TimelineDiff::Set(2, item(remote(3), "mine"));
-    assert_eq!(
-        diffs(&mut app, vec![sent]),
-        vec![receipt("!c:example.org", 3)]
-    );
+    // The SDK replaces the echo by its remote event.
+    let sent = vec![
+        TimelineDiff::Remove(2),
+        TimelineDiff::PushBack(item(remote(3), "mine")),
+    ];
+    assert_eq!(diffs(&mut app, sent), vec![receipt("!c:example.org", 3)]);
     // The newest item is not visible.
     app.update(Msg::RoomUpserted(room("!c:example.org", 30, 4)));
     assert_eq!(
@@ -544,10 +563,15 @@ fn opening_another_room_resets_the_timeline() {
 }
 
 #[test]
-fn removing_the_open_room_clears_the_timeline() {
+fn removing_the_open_room_clears_the_timeline_and_closes_the_view() {
     let mut app = opened();
     reset(&mut app, msgs(1..3));
-    app.update(Msg::RoomRemoved(id("!c:example.org")));
+    keys(&mut app, "<CR>");
+    assert!(app.view_open());
+    let fx = app.update(Msg::RoomRemoved(id("!c:example.org")));
+    assert!(fx.contains(&Effect::Ui(UiEffect::CloseView)));
+    assert!(!app.view_open());
+    assert_eq!(app.mode_label(None), "NORMAL");
     assert!(app.timeline().is_empty());
     assert_eq!(app.timeline_cursor(), None);
 }
