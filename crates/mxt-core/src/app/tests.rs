@@ -278,6 +278,34 @@ fn removing_the_open_room_unsubscribes_and_keeps_a_cursor() {
 }
 
 #[test]
+fn an_empty_room_list_ignores_cursor_and_room_keys() {
+    let mark = Binding::single(Action::RoomMarkRead);
+    let keymap = Keymap::new(&space(), vec![(TableId::RoomList, seq("m"), mark)]);
+    let mut app = App::new(keymap, Settings::default());
+    assert_eq!(keys(&mut app, "jkG<C-d><C-u><CR>"), vec![]);
+    assert_eq!(app.room_cursor(), None);
+    assert_eq!(app.open_room(), None);
+    assert_eq!(keys(&mut app, "m"), vec![]);
+    assert_eq!(app.status().unwrap().text, "No room");
+}
+
+#[test]
+fn removing_rooms_at_the_end_clamps_then_unplaces_the_cursor() {
+    let mut app = app();
+    keys(&mut app, "G"); // on !a, the last room
+    app.update(Msg::RoomRemoved(id("!a:example.org")));
+    assert_eq!(cursor_id(&app), "!b:example.org");
+    app.update(Msg::RoomRemoved(id("!b:example.org")));
+    app.update(Msg::RoomRemoved(id("!c:example.org")));
+    assert_eq!(app.room_cursor(), None);
+    assert_eq!(keys(&mut app, "jG"), vec![]);
+    // Unplaced again: the cursor is on whichever room is first.
+    app.update(Msg::RoomUpserted(room("!d:example.org", 40, 0)));
+    app.update(Msg::RoomUpserted(room("!e:example.org", 50, 0)));
+    assert_eq!(cursor_id(&app), "!e:example.org");
+}
+
+#[test]
 fn quit_and_unavailable_actions() {
     let mut app = app();
     assert_eq!(no_timers(keys(&mut app, "<Space><Space>")).len(), 0);

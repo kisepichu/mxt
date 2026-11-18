@@ -23,8 +23,7 @@ pub(super) enum Motion {
 impl App {
     /// The cursor stays on its room when the order changes.
     pub(super) fn upsert_room(&mut self, summary: RoomSummary) {
-        let old = self.rooms.position(&summary.id);
-        let new = self.rooms.upsert(summary);
+        let (old, new) = self.rooms.upsert(summary);
         if let Some(cursor) = self.room_cursor {
             self.room_cursor = Some(follow(cursor, old, new));
         }
@@ -32,15 +31,14 @@ impl App {
 
     /// A cursor on the removed room moves to the room now at its index.
     pub(super) fn remove_room(&mut self, id: RoomId, effects: &mut Vec<Effect>) {
-        if let Some(index) = self.rooms.position(&id) {
-            self.rooms.remove(&id);
-            if let Some(cursor) = self.room_cursor {
-                self.room_cursor = match cursor.cmp(&index) {
-                    Ordering::Less => Some(cursor),
-                    Ordering::Greater => Some(cursor - 1),
-                    Ordering::Equal => self.rooms.len().checked_sub(1).map(|last| cursor.min(last)),
-                };
-            }
+        if let Some((index, _)) = self.rooms.remove(&id)
+            && let Some(cursor) = self.room_cursor
+        {
+            self.room_cursor = match cursor.cmp(&index) {
+                Ordering::Less => Some(cursor),
+                Ordering::Greater => Some(cursor - 1),
+                Ordering::Equal => self.rooms.len().checked_sub(1).map(|last| cursor.min(last)),
+            };
         }
         if let Some(open) = self.open_room.take_if(|open| *open == id) {
             effects.push(Effect::Matrix(MatrixEffect::UnsubscribeTimeline(open)));
@@ -54,10 +52,10 @@ impl App {
         if self.focus != Focus::RoomList {
             return;
         }
-        let Some(cursor) = self.room_cursor() else {
+        let (Some(cursor), Some(last)) = (self.room_cursor(), self.rooms.len().checked_sub(1))
+        else {
             return;
         };
-        let last = self.rooms.len() - 1;
         let half_pages =
             |count: u32| (count as usize).saturating_mul(self.half_page(Pane::RoomList));
         let target = match motion {
