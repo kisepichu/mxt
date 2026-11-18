@@ -3,7 +3,11 @@
 
 use std::time::Duration;
 
-use matrix_sdk::{Client, encryption::recovery::RecoveryState, ruma::api::client::keys::get_keys};
+use matrix_sdk::{
+    Client,
+    encryption::recovery::RecoveryState,
+    ruma::{DeviceId, UserId, api::client::keys::get_keys},
+};
 
 use crate::Error;
 
@@ -44,14 +48,22 @@ pub async fn recover(client: &Client, key: &str) -> Result<(), Error> {
 }
 
 /// Polls a one-off `/keys/query` for the own device until its keys are on the
-/// server (`true`) or `timeout` passes (`false`). `recover` signs the device,
-/// and that upload needs the device keys on the server, so the first start
-/// waits for this, with sync running, before asking for the recovery key.
+/// server (`true`) or `timeout` passes (`false`). A failed query is asked
+/// again (the SDK logs the error), except `UnknownToken`, which is returned at
+/// once. `recover` signs the device, and that upload needs the device keys on
+/// the server, so the first start waits for this, with sync running, before
+/// asking for the recovery key.
 pub async fn wait_for_device_keys(client: &Client, timeout: Duration) -> Result<bool, Error> {
+    let (Some(user_id), Some(device_id)) = (client.user_id(), client.device_id()) else {
+        return Err(matrix_sdk::Error::AuthenticationRequired.into());
+    };
     let poll = async {
         loop {
-            if device_keys_on_server(client).await? {
-                return Ok::<_, Error>(true);
+            match device_keys_on_server(client, user_id, device_id).await {
+                Ok(true) => return Ok(true),
+                Err(error) if error.is_unknown_token() => return Err(error),
+                // Not there yet, or a transient failure such as a network blip.
+                Ok(false) | Err(_) => {}
             }
             tokio::time::sleep(DEVICE_KEYS_POLL_INTERVAL).await;
         }
@@ -62,10 +74,11 @@ pub async fn wait_for_device_keys(client: &Client, timeout: Duration) -> Result<
 }
 
 /// The response goes only to the caller, never into the SDK's state.
-async fn device_keys_on_server(client: &Client) -> Result<bool, Error> {
-    let (Some(user_id), Some(device_id)) = (client.user_id(), client.device_id()) else {
-        return Err(matrix_sdk::Error::AuthenticationRequired.into());
-    };
+async fn device_keys_on_server(
+    client: &Client,
+    user_id: &UserId,
+    device_id: &DeviceId,
+) -> Result<bool, Error> {
     let mut request = get_keys::v3::Request::new();
     request
         .device_keys
