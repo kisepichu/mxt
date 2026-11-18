@@ -1,6 +1,7 @@
 //! The mxt binary: command line, startup flow and the composition root.
 
 mod config;
+mod event_loop;
 mod invalidate;
 mod lock;
 mod logging;
@@ -13,7 +14,10 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use config::ConfigError;
+use config::{Config, ConfigError};
+use mxt_core::app::App;
+use mxt_tui::Tui;
+use tokio::sync::mpsc;
 
 const USAGE: &str = "usage: mxt [--config PATH]\n       mxt --version";
 
@@ -43,8 +47,7 @@ fn main() -> ExitCode {
     };
 
     match config::load(&path, Path::new(&home)) {
-        // The startup tasks continue from here.
-        Ok(_config) => ExitCode::SUCCESS,
+        Ok(config) => run_ui(config),
         Err(ConfigError::NotFound { path }) => {
             eprint!(
                 "mxt: {} does not exist. A minimal configuration:\n\n{}",
@@ -55,6 +58,43 @@ fn main() -> ExitCode {
         }
         Err(error) => {
             eprintln!("mxt: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The terminal UI until `:q`.
+fn run_ui(config: Config) -> ExitCode {
+    let mut app = App::new(config.keymap, config.settings);
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("mxt: cannot start the async runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    mxt_tui::install_panic_hook();
+    let mut tui = match Tui::new() {
+        Ok(tui) => tui,
+        Err(error) => {
+            eprintln!("mxt: cannot set up the terminal: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // The matrix adapter (the sync task) takes `_to_core` and
+    // `_matrix_effects`; until then they stay open, so the loop sees neither
+    // channel closed.
+    let (_to_core, from_matrix) = mpsc::unbounded_channel();
+    let (to_matrix, _matrix_effects) = mpsc::unbounded_channel();
+    let result = runtime.block_on(event_loop::run(&mut app, &mut tui, from_matrix, to_matrix));
+    let restored = tui.restore();
+    match result.and(restored) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("mxt: terminal: {error}");
             ExitCode::FAILURE
         }
     }
