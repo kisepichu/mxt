@@ -1,6 +1,13 @@
 //! The mxt binary: command line, startup flow and the composition root.
 
 mod config;
+mod invalidate;
+mod lock;
+mod logging;
+mod paths;
+mod prompt;
+#[cfg(test)]
+mod test_dir;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
