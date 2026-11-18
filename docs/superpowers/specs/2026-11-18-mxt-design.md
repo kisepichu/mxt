@@ -50,7 +50,8 @@ Included:
 3. A fuzzy room picker, also used to list rooms with unread mentions.
 4. A timeline that renders HTML message bodies and shows replies, edits and
    reactions.
-5. Sending messages written in Markdown, replies, and read receipts.
+5. Sending messages written in Markdown, replies, mentions of room members
+   completed after typing `@`, and read receipts.
 6. Toggling reactions, editing and deleting (redacting) the user's own
    messages.
 7. Muting and unmuting a room.
@@ -63,6 +64,7 @@ Not included in the first release:
 
 - Threads, desktop notifications, typing notifications.
 - Event-level mention lists (see "Mentions").
+- Room-wide mentions (`@room`).
 - SSO or OAuth login, logout, and account management.
 - Setting up cross-signing or secret storage for an account that has none
   (bootstrapping needs user-interactive authentication). Such accounts must be
@@ -200,10 +202,12 @@ Rules:
   domain types once, at the boundary. Code inside the core trusts them.
 - Identifiers in the core are mxt's own newtypes (`RoomId`, `EventId`,
   `TxnId`, `UserId`), not `ruma` types. Timestamps are UTC milliseconds.
-- Subscriptions and timers are effects too: `Effect::SubscribeTimeline`,
-  `Effect::UnsubscribeTimeline`, `Effect::PaginateBackwards` and
-  `Effect::StartTimer { id, after }`. Their results arrive as `Msg`s
-  (timeline diffs, `Msg::Timeout { id }`).
+- Effects come in two groups. `Effect::Matrix(..)` is executed by the matrix
+  adapter (for example `SubscribeTimeline`, `UnsubscribeTimeline`,
+  `PaginateBackwards`, `LoadMembers`, `Send`). `Effect::Ui(..)` is executed by
+  the tui adapter (for example `StartTimer { id, after }`, `LoadComposer`,
+  `ClearComposer`, `ReplayKeys`, `ReplaceMentionToken`). Results arrive as
+  `Msg`s (timeline diffs, `Msg::MembersLoaded`, `Msg::Timeout { id }`).
 - No ceremony: no repository traits, dependency injection containers or one
   type per use case. Types and functions are enough.
 
@@ -236,8 +240,11 @@ The main types in `mxt-core`:
   with bold, italic, strikethrough, inline code or spoiler style; links with a
   URL; mentions of users or rooms; custom emoticons shown by their alt text.
   The terminal adapter maps it to ratatui lines.
-- Drafts: one `Draft` per room, kept when switching rooms, plus whether that
-  room's composer is empty.
+- Composers: per room, the `Draft`, the mentions inserted so far
+  (`MentionRef { user: UserId, text: String }`), and whether the composer is
+  empty. They are kept when switching rooms.
+- Room members: user ID and display name, loaded per room on demand, used for
+  mention completion.
 - UI state: focus (room list, timeline, composer), mode, keymap resolver
   state, picker state, cursor positions, the last known viewport of each pane,
   terminal focus, the status message.
@@ -252,7 +259,7 @@ covered by unit tests.
 - A key sequence that is a complete binding and not a prefix of a longer one
   runs immediately.
 - A key sequence that is a prefix of a longer binding stays pending. The
-  resolver returns `Effect::StartTimer` with `ui.timeoutlen` (default 1000 ms,
+  resolver returns `Effect::Ui(StartTimer)` with `ui.timeoutlen` (default 1000 ms,
   like nvim's `timeoutlen`).
 - On `Msg::Timeout`: if the pending sequence is itself a binding, it runs.
   Otherwise the pending keys are released (see below).
@@ -269,7 +276,7 @@ covered by unit tests.
   `RoomListService` for the set of rooms.
 - Timelines: only the open room has a subscribed `Timeline`. Opening another
   room unsubscribes the previous one. The core requests
-  `Effect::PaginateBackwards` when the timeline cursor comes within 10 items
+  `Effect::Matrix(PaginateBackwards)` when the timeline cursor comes within 10 items
   of the oldest loaded item, with at most one request in flight per room.
 - Room summaries come from the SDK room info: display name,
   `num_unread_messages`, `num_unread_notifications`, `num_unread_mentions`,
@@ -294,9 +301,14 @@ covered by unit tests.
 - Mute: the SDK notification settings. Muting sets the room mode to mute.
   Unmuting removes the user-defined room rule, so the account default applies
   again.
-- Sending: the composer text is Markdown and is sent with
-  `RoomMessageEventContent::text_markdown` (matrix-sdk's `markdown` feature),
-  which fills both `body` and `formatted_body`. Replies and edits use the
+- Sending: the composer text is Markdown. Before sending, the core's
+  `render_mentions(body, mentions)` replaces every inserted mention text that
+  is still in the body with a Markdown link to `https://matrix.to/#/<user ID>`
+  (escaping Markdown in the link text), and returns the user IDs that remain.
+  The adapter sends the result with `RoomMessageEventContent::text_markdown`
+  (matrix-sdk's `markdown` feature), which fills both `body` and
+  `formatted_body`, and sets `m.mentions.user_ids` to those IDs. Bridges turn
+  such links into mentions on the remote network. Replies and edits use the
   timeline's reply and edit calls.
 - Reactions: `Timeline::toggle_reaction`. Choosing a reaction the user already
   sent removes it.
@@ -346,11 +358,25 @@ covered by unit tests.
   the core returns `Effect::Ui(LoadComposer { room, text })`.
 - `composer.cancel`: a reply draft becomes `New` and keeps its text. An edit
   draft becomes `New` and the composer is cleared.
+- Mention completion:
+  - After each edit in insert mode, the tui adapter looks for an `@` token at
+    the cursor (an `@` at the start of the text or after whitespace, followed
+    by non-whitespace) and reports `Msg::MentionQuery { room, query }` when it
+    changes, with `query: None` when there is no token.
+  - The first time a room's composer gets focus, the core returns
+    `Effect::Matrix(LoadMembers(room))`. The members arrive as `Msg::MembersLoaded`.
+  - The core ranks the loaded members against the query with
+    `nucleo-matcher`, on display name and user ID. Members who sent one of the
+    loaded messages come first, newest sender first.
+  - Accepting a candidate records a `MentionRef` in the room's composer and
+    returns `Effect::Ui(ReplaceMentionToken { room, text })`, which replaces
+    the token with the text and a space.
 - Input routing while the composer has focus:
   - edtui in normal or visual mode: look the key up in `composer.normal` or
     `composer.visual`, then in `normal`. If it is not bound, pass it to edtui.
-  - edtui in insert mode: look the key up in `composer.insert`. If it is not
-    bound, pass it to edtui.
+  - edtui in insert mode: while the mention menu is open, look the key up in
+    `composer.completion`, then in `composer.insert`. Otherwise look it up in
+    `composer.insert`. If it is not bound, pass it to edtui.
   - edtui in search mode: every key goes to edtui, including `<Esc>`.
 - The external editor (`composer.external_editor`) uses edtui's
   `system-editor` feature, which opens `$VISUAL` or `$EDITOR`.
@@ -393,7 +419,8 @@ and exits. The next start logs in as a new device with fresh stores.
   message is an image.
 - Bottom line: status line showing the mode, the open room and the sync state.
   Pressing `:` turns it into the command line.
-- Overlays: the fuzzy room picker and the emoji picker.
+- Overlays: the fuzzy room picker, the emoji picker, and the mention menu
+  above the composer.
 
 ### Modes
 
@@ -474,6 +501,9 @@ rooms by network. Spaces themselves are not listed.
 | `composer.insert`, `composer.normal` | `<C-x><C-e>` | `composer.external_editor` | shell edit-command-line |
 | `composer.normal` | `<Esc>` | `focus.timeline`; the draft is kept | |
 | `composer.normal` | `<C-c>` | `composer.cancel` | |
+| `composer.completion` | `<C-n>` / `<C-p>` | `completion.next` / `completion.prev` | completion menu |
+| `composer.completion` | `<C-y>` / `<Tab>` / `<CR>` | `completion.accept` | completion menu |
+| `composer.completion` | `<C-e>` | `completion.cancel` | completion menu |
 | `picker` | `<C-n>` / `<C-p>` | `picker.next` / `picker.prev` | completion menu |
 | `picker` | `<CR>` / `<Esc>` | `picker.accept` / `picker.cancel` | |
 | `command_line` | `<CR>` / `<Esc>` / `<Tab>` | `command_line.execute` / `command_line.cancel` / `command_line.complete` | same |
@@ -515,6 +545,17 @@ spaces work without quoting.
 `<leader>m` opens the room picker filtered to rooms whose `mentions > 0`.
 Listing individual mention events needs the server's `/notifications`
 endpoint, and phase 0 checks whether the target homeservers support it.
+
+### Mention completion
+
+- In the composer's insert mode, typing `@` at the start of the text or after
+  whitespace opens the mention menu above the composer. Typing more characters
+  narrows it. Whitespace or `completion.cancel` closes it.
+- Accepting a candidate replaces `@<typed text>` with `@<display name>` and a
+  space. If another member of the room has the same display name, it inserts
+  `@<user ID>` instead, so every inserted text names exactly one user.
+- The inserted text stays plain text in the editor. Deleting or changing it
+  removes the mention: only texts still present when sending become mentions.
 
 ### Files and images
 
@@ -601,6 +642,7 @@ Settings:
 | `timeline` | the timeline has focus | look in `normal` |
 | `composer.normal`, `composer.visual` | the composer has focus and edtui is in normal or visual mode | look in `normal`, then pass the key to edtui |
 | `composer.insert` | the composer has focus and edtui is in insert mode | pass the key to edtui |
+| `composer.completion` | the mention menu is open in insert mode | look in `composer.insert`, then pass the key to edtui |
 | `picker` | a picker is open | type it into the query |
 | `command_line` | the command line is open | type it into the command line |
 | `normal` | fallback for the tables above that name it | ignore the key |
@@ -620,7 +662,8 @@ Actions are named `<target>.<verb>`. The first release has:
   `message.yank`, `message.react`, `message.open`, `message.goto_reply`,
   `message.resend`
 - composer: `composer.focus`, `composer.send`, `composer.newline`,
-  `composer.cancel`, `composer.external_editor`
+  `composer.cancel`, `composer.external_editor`, `completion.next`,
+  `completion.prev`, `completion.accept`, `completion.cancel`
 - pickers: `picker.rooms`, `picker.next`, `picker.prev`, `picker.accept`,
   `picker.cancel`
 - command line: `command_line.open`, `command_line.execute`,
@@ -711,6 +754,9 @@ platforms.
     clearing before a following action
   - badge precedence and the network name order
   - `OwnEvent` construction
+  - `render_mentions`: mentions whose text was deleted are dropped, Markdown
+    in display names is escaped, and only the remaining user IDs are returned
+  - mention candidate ranking and the rule for duplicate display names
 - `mxt-matrix`: tests for converting SDK values into domain types and for HTML
   rendering, with constructed inputs. The SDK is not mocked. The rest is
   covered by phase 0 and by running mxt against a homeserver.
@@ -767,10 +813,10 @@ Prebuilt binaries on GitHub Releases are out of scope for the first release.
 
 | Phase | Work | Exit criteria |
 |---|---|---|
-| 0. Spike | The flake's development shell. A throwaway binary that logs in, recovers, runs `SyncService` and `RoomListService` plus the bridge state connection, and prints the room list with unread counts and network names and the latest message of a bridged room. A small edtui program for checking CJK text and input method input. The spike is deleted afterwards and its findings are added to this document. | Decisions recorded: (1) sliding sync or classic sync for the target homeservers; (2) the bridge state connection stores `m.bridge`, and the network name order yields names for bridged channels and DMs; (3) after a long offline period, a muted room's `messages` count is not zero and is close to the real number of unread messages; (4) whether `/notifications` is supported; (5) edtui handles CJK width and input method input correctly, or the composer choice is revisited. |
+| 0. Spike | The flake's development shell. A throwaway binary that logs in, recovers, runs `SyncService` and `RoomListService` plus the bridge state connection, prints the room list with unread counts and network names and the latest message of a bridged room, and sends a message that mentions a user with a `matrix.to` link and `m.mentions`. A small edtui program for checking CJK text and input method input. The spike is deleted afterwards and its findings are added to this document. | Decisions recorded: (1) sliding sync or classic sync for the target homeservers; (2) the bridge state connection stores `m.bridge`, and the network name order yields names for bridged channels and DMs; (3) after a long offline period, a muted room's `messages` count is not zero and is close to the real number of unread messages; (4) whether `/notifications` is supported; (5) edtui handles CJK width and input method input correctly, or the composer choice is revisited; (6) the bridge turns the mention into a mention that notifies the user on the remote network. |
 | 1. Skeleton | Workspace and crates, the flake package and checks, CI, the prek configuration, core domain (room summaries, filters, ordering, keymap and resolver, actions, `update`), startup (configuration, lock, login, session restore, recovery), sync, the room list pane and the status line | The room list with network names and unread badges can be browsed, keymap overrides from the configuration work, and CI passes |
 | 2. Timeline | `Timeline` subscription, HTML rendering, replies, edits and reactions shown, date dividers and the read marker, back pagination, read receipts | Rooms can be read day to day |
-| 3. Sending | The edtui composers, sending Markdown, replying, editing, deleting, toggling reactions with the emoji picker, the external editor | Messages can be written day to day |
+| 3. Sending | The edtui composers, sending Markdown, mention completion, replying, editing, deleting, toggling reactions with the emoji picker, the external editor | Messages can be written day to day, and mentions notify people on the remote network |
 | 4. Rest of the first release | Fuzzy room picker, mentions filter, mute and unmute, file download, open and upload, the image preview pane | Everything in "Scope of the first release" works |
 
 ## Risks and open questions
@@ -794,10 +840,13 @@ Prebuilt binaries on GitHub Releases are out of scope for the first release.
 - **edtui differences from vim.** edtui has no count prefixes, and `r` is
   redo instead of replace. Rebinding through edtui's keybinding API covers
   what it can. The rest is accepted for the first release.
-- **Mentions when sending.** Bridges turn Matrix mention pills and
-  `m.mentions` into mentions on the remote network. Plain `@name` text may not
-  notify anyone there. Whether the first release gets `@` completion that
-  inserts pills is not decided yet.
+- **Mentions on the remote network.** mxt relies on bridges turning
+  `matrix.to` user links and `m.mentions` into remote mentions. Phase 0
+  checks this for the target bridges.
+- **Member lists of large rooms.** Mention completion needs the room's member
+  list. Bridged rooms with thousands of members load slowly the first time.
+  The list is loaded once per room, and completion works on what has loaded
+  so far.
 - **Network names for other bridges.** Discord rooms carry the server name in
   `m.bridge`. Other bridges are expected to fill `network` or `protocol`
   similarly, which is not yet verified.
