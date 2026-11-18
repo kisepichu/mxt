@@ -1,7 +1,7 @@
 //! The terminal: setup and restore, drawing, converting events and
 //! executing UI effects.
 
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write as _};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -10,16 +10,19 @@ use crossterm::event::{DisableFocusChange, EnableFocusChange, Event};
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use mxt_core::app::App;
-use mxt_core::effect::UiEffect;
+use mxt_core::effect::{UiEffect, ViewContent};
 use mxt_core::msg::{Msg, Pane};
 use mxt_core::resolver::TimerId;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::ListState;
 
+use crate::clipboard::SharedRegister;
 use crate::input::key_from_crossterm;
+use crate::message_view::MessageView;
+use crate::timeline_view::{TimeFormat, TimelinePane};
 use crate::timers::Timers;
-use crate::view;
+use crate::view::{self, Panes};
 
 /// Whether the terminal is in raw mode and on the alternate screen. Shared by
 /// [`Tui::restore`] and the panic hook, so the terminal is restored once: a
@@ -32,6 +35,12 @@ pub struct Tui {
     room_list: ListState,
     /// The room list range last reported with `Msg::Viewport`.
     room_list_viewport: Option<(usize, usize)>,
+    timeline: TimelinePane,
+    /// The timeline range last reported with `Msg::Viewport`.
+    timeline_viewport: Option<(usize, usize)>,
+    /// The message view while it is open.
+    view: Option<MessageView>,
+    register: SharedRegister,
     timers: Timers<TimerId>,
     should_quit: bool,
 }
@@ -49,6 +58,10 @@ impl Tui {
                 terminal,
                 room_list: ListState::default(),
                 room_list_viewport: None,
+                timeline: TimelinePane::new(),
+                timeline_viewport: None,
+                view: None,
+                register: SharedRegister::default(),
                 timers: Timers::new(),
                 should_quit: false,
             }),
@@ -60,40 +73,71 @@ impl Tui {
         }
     }
 
-    /// Draws the frame and returns `Msg::Viewport` for panes whose visible
-    /// range changed since the last draw.
+    /// Sets `ui.time_format`. Until then the timeline shows `%H:%M`.
+    pub fn set_time_format(&mut self, format: TimeFormat) {
+        self.timeline.set_time_format(format);
+    }
+
+    /// Sends the last copy to the terminal clipboard if it has not reached
+    /// it yet, draws the frame, and returns `Msg::Viewport` for panes whose
+    /// visible range changed since the last draw.
     pub fn draw(&mut self, app: &App) -> io::Result<Vec<Msg>> {
+        if let Some(sequence) = self.register.take_unsent() {
+            let backend = self.terminal.backend_mut();
+            backend.write_all(sequence.as_bytes())?;
+            backend.flush()?;
+        }
         let Tui {
             terminal,
             room_list,
+            timeline,
+            view,
             ..
         } = self;
-        let mut visible = None;
-        terminal.draw(|frame| visible = view::draw(frame, app, room_list))?;
+        let mut visible = view::Visible::default();
+        terminal.draw(|frame| {
+            let panes = Panes {
+                room_list,
+                timeline,
+                view: view.as_mut(),
+            };
+            visible = view::draw(frame, app, panes);
+        })?;
 
         let mut msgs = Vec::new();
-        if let Some((first, last)) = visible
-            && self.room_list_viewport != visible
-        {
-            self.room_list_viewport = visible;
-            msgs.push(Msg::Viewport {
-                pane: Pane::RoomList,
-                first,
-                last,
-            });
+        for (pane, range, reported) in [
+            (
+                Pane::RoomList,
+                visible.room_list,
+                &mut self.room_list_viewport,
+            ),
+            (
+                Pane::Timeline,
+                visible.timeline,
+                &mut self.timeline_viewport,
+            ),
+        ] {
+            if let Some((first, last)) = range
+                && *reported != range
+            {
+                *reported = range;
+                msgs.push(Msg::Viewport { pane, first, last });
+            }
         }
         Ok(msgs)
     }
 
     /// Converts one terminal event. Key presses and repeats become `Msg::Key`
-    /// (`editor: None` until the composer exists), focus events become
+    /// with the message view's editor mode while it is open (`editor: None`
+    /// otherwise until the composer exists); focus events become
     /// `Msg::TerminalFocus`; resizes produce nothing (the loop redraws after
     /// every event anyway). Mouse and paste events are not enabled.
     pub fn handle_event(&mut self, event: Event) -> Vec<Msg> {
         let msg = match event {
-            Event::Key(event) => {
-                key_from_crossterm(event).map(|key| Msg::Key { key, editor: None })
-            }
+            Event::Key(event) => key_from_crossterm(event).map(|key| Msg::Key {
+                key,
+                editor: self.view.as_ref().map(MessageView::mode),
+            }),
             Event::FocusGained => Some(Msg::TerminalFocus(true)),
             Event::FocusLost => Some(Msg::TerminalFocus(false)),
             Event::Resize(..) | Event::Mouse(_) | Event::Paste(_) => None,
@@ -102,10 +146,11 @@ impl Tui {
     }
 
     /// Executes a UI effect. `StartTimer` schedules a deadline; `ReplayKeys`
-    /// goes to the focused editor (no editors exist before phase 3, so it is
-    /// dropped); `OpenView`, `CloseView` and `Yank` are dropped until the
-    /// message view and the clipboard exist (phase 2 Task 5); `Quit` sets
-    /// `should_quit`.
+    /// goes to the message view's editor while it is open (the composer does
+    /// not exist yet, so it is dropped otherwise); `OpenView` replaces the
+    /// message view and `CloseView` drops it with its edits; `Yank` copies
+    /// into the register, and the next draw sends it to the terminal
+    /// clipboard; `Quit` sets `should_quit`.
     pub fn execute(&mut self, effect: UiEffect, now: Instant) {
         match effect {
             UiEffect::StartTimer { id, after_ms } => {
@@ -114,10 +159,16 @@ impl Tui {
                     self.timers.start(id, deadline);
                 }
             }
-            UiEffect::ReplayKeys(_)
-            | UiEffect::OpenView(_)
-            | UiEffect::CloseView
-            | UiEffect::Yank(_) => {}
+            UiEffect::ReplayKeys(keys) => {
+                if let Some(view) = &mut self.view {
+                    view.replay(&keys);
+                }
+            }
+            UiEffect::OpenView(ViewContent::Text(text)) => {
+                self.view = Some(MessageView::new(&text, self.register.clone()));
+            }
+            UiEffect::CloseView => self.view = None,
+            UiEffect::Yank(text) => self.register.copy(text),
             UiEffect::Quit => self.should_quit = true,
         }
     }

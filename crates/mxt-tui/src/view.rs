@@ -12,15 +12,18 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding};
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::message_view::MessageView;
+use crate::timeline_view::TimelinePane;
+
 /// The room list width, its border included.
 const ROOM_LIST_WIDTH: u16 = 30;
 /// Terminals narrower than this give the room list a third of their width.
 const NARROW_WIDTH: u16 = 90;
 
-const PLAIN: Style = Style::new();
-const DIM: Style = Style::new().add_modifier(Modifier::DIM);
-const BOLD: Style = Style::new().add_modifier(Modifier::BOLD);
-const ERROR: Style = Style::new().fg(Color::Red);
+pub(crate) const PLAIN: Style = Style::new();
+pub(crate) const DIM: Style = Style::new().add_modifier(Modifier::DIM);
+pub(crate) const BOLD: Style = Style::new().add_modifier(Modifier::BOLD);
+pub(crate) const ERROR: Style = Style::new().fg(Color::Red);
 
 /// Between the groups of the status line.
 const GAP: &str = "  ";
@@ -32,33 +35,54 @@ const SEPARATOR: &str = " / ";
 /// out its network part, already shortened to `…`.
 const MIN_NAME_WIDTH: usize = 6;
 
-/// Draws the frame. Returns the first and last visible room list indices,
-/// inclusive, when the room list shows any room.
-pub(crate) fn draw(
-    frame: &mut Frame,
-    app: &App,
-    room_list: &mut ListState,
-) -> Option<(usize, usize)> {
+/// The panes' state between frames.
+pub(crate) struct Panes<'a> {
+    pub(crate) room_list: &'a mut ListState,
+    pub(crate) timeline: &'a mut TimelinePane,
+    pub(crate) view: Option<&'a mut MessageView>,
+}
+
+/// The first and last visible items of the panes, inclusive; `None` for a
+/// pane that shows none or is not drawn.
+#[derive(Default)]
+pub(crate) struct Visible {
+    pub(crate) room_list: Option<(usize, usize)>,
+    pub(crate) timeline: Option<(usize, usize)>,
+}
+
+/// Draws the frame. The message view covers everything but the bottom line.
+pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
     let [main, bottom] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
-    let mut visible = None;
-    let timeline = if app.sidebar_visible() {
-        let width = if main.width < NARROW_WIDTH {
-            main.width / 3
-        } else {
-            ROOM_LIST_WIDTH
-        };
-        let [list, timeline] =
-            Layout::horizontal([Constraint::Length(width), Constraint::Fill(1)]).areas(main);
-        visible = draw_room_list(frame, list, app, room_list);
-        timeline
-    } else {
-        main
+    let mut visible = Visible::default();
+    let search = match panes.view {
+        Some(view) => {
+            view.draw(frame, main);
+            view.search()
+        }
+        None => {
+            let timeline = if app.sidebar_visible() {
+                let width = if main.width < NARROW_WIDTH {
+                    main.width / 3
+                } else {
+                    ROOM_LIST_WIDTH
+                };
+                let [list, timeline] =
+                    Layout::horizontal([Constraint::Length(width), Constraint::Fill(1)])
+                        .areas(main);
+                visible.room_list = draw_room_list(frame, list, app, panes.room_list);
+                timeline
+            } else {
+                main
+            };
+            visible.timeline = draw_timeline(frame, timeline, app, panes.timeline);
+            None
+        }
     };
-    draw_timeline(frame, timeline, app);
-    match app.command_line() {
-        Some(line) => draw_command_line(frame, bottom, line),
-        None => draw_status_line(frame, bottom, app),
+    match (app.command_line(), search) {
+        (Some(line), _) => draw_command_line(frame, bottom, line),
+        (None, Some(pattern)) => draw_prompt_line(frame, bottom, "/", &pattern),
+        (None, None) => draw_status_line(frame, bottom, app),
     }
     visible
 }
@@ -192,18 +216,37 @@ fn name_width(name: &RoomName) -> usize {
     prefix + text_width(&name.room)
 }
 
-/// Until phase 2: the open room's displayed name as a header.
-fn draw_timeline(frame: &mut Frame, area: Rect, app: &App) {
-    let inner = Block::new().padding(Padding::horizontal(1)).inner(area);
+/// The open room's displayed name as a header, and its entries below.
+fn draw_timeline(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    pane: &mut TimelinePane,
+) -> Option<(usize, usize)> {
+    // The header lines up with the entries, which leave two columns for the
+    // cursor bar.
+    let block = Block::new().padding(Padding {
+        left: 2,
+        right: 1,
+        top: 0,
+        bottom: 0,
+    });
     let header = Rect {
-        height: inner.height.min(1),
-        ..inner
+        height: area.height.min(1),
+        ..block.inner(area)
     };
-    let line = match app.open_room().and_then(|id| app.rooms().get(id)) {
-        Some(room) => Line::from(fit_name(&room.name, BOLD, usize::from(header.width)).0),
-        None => Line::styled("No room open", DIM),
+    let Some(room) = app.open_room().and_then(|id| app.rooms().get(id)) else {
+        frame.render_widget(Line::styled("No room open", DIM), header);
+        return None;
     };
-    frame.render_widget(line, header);
+    let name = Line::from(fit_name(&room.name, BOLD, usize::from(header.width)).0);
+    frame.render_widget(name, header);
+    let entries = Rect {
+        y: area.y + header.height,
+        height: area.height - header.height,
+        ..area
+    };
+    pane.draw(frame, entries, app)
 }
 
 /// The mode, the pending count and keys, the open room, the status message,
@@ -267,23 +310,28 @@ fn sync_label(state: SyncState) -> &'static str {
     }
 }
 
-/// `:` or `/` and the text, with the terminal cursor after the text. A text
-/// wider than the line loses its start, so its end and the cursor stay
-/// visible.
+/// `:` or `/` and the text, with the terminal cursor after the text.
 fn draw_command_line(frame: &mut Frame, area: Rect, line: &CommandLine) {
     let prompt = match line.kind {
         LineKind::Command => ":",
         LineKind::Search(_) => "/",
     };
+    draw_prompt_line(frame, area, prompt, &line.text);
+}
+
+/// The one-column prompt and the text, with the terminal cursor after the
+/// text. A text wider than the line loses its start, so its end and the
+/// cursor stay visible.
+fn draw_prompt_line(frame: &mut Frame, area: Rect, prompt: &str, full: &str) {
     // The prompt and the cursor take a column each.
     let room = usize::from(area.width).saturating_sub(2);
-    let mut text = line.text.as_str();
+    let mut text = full;
     let mut text_columns = text_width(text);
-    for (at, grapheme) in line.text.grapheme_indices(true) {
+    for (at, grapheme) in full.grapheme_indices(true) {
         if text_columns <= room {
             break;
         }
-        text = &line.text[at + grapheme.len()..];
+        text = &full[at + grapheme.len()..];
         text_columns -= grapheme_width(grapheme);
     }
     frame.render_widget(Line::from(vec![Span::raw(prompt), Span::raw(text)]), area);
@@ -295,7 +343,7 @@ fn draw_command_line(frame: &mut Frame, area: Rect, line: &CommandLine) {
 /// Spans of the segments cut to `width` columns at grapheme cluster
 /// boundaries, ending with `…` when cut, and the columns they take. Empty
 /// segments are left out.
-fn fit<'a>(segments: &[(&'a str, Style)], width: usize) -> (Vec<Span<'a>>, usize) {
+pub(crate) fn fit<'a>(segments: &[(&'a str, Style)], width: usize) -> (Vec<Span<'a>>, usize) {
     let mut spans = Vec::with_capacity(segments.len() + 1);
     let total = segments_width(segments);
     if total <= width {
@@ -338,13 +386,13 @@ fn segments_width(segments: &[(&str, Style)]) -> usize {
 
 /// The columns ratatui gives the text: it draws each segment, a span, per
 /// grapheme cluster.
-fn text_width(text: &str) -> usize {
+pub(crate) fn text_width(text: &str) -> usize {
     text.graphemes(true).map(grapheme_width).sum()
 }
 
 /// The columns ratatui gives a grapheme cluster. A cluster with a control
 /// character takes none: ratatui leaves it out.
-fn grapheme_width(grapheme: &str) -> usize {
+pub(crate) fn grapheme_width(grapheme: &str) -> usize {
     if grapheme.contains(char::is_control) {
         0
     } else {

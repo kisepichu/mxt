@@ -382,12 +382,14 @@ text.
   features = ["system-editor"] }`, `jiff = "1"`)
 
 **Behavior:**
-- `ui.time_format` check: `mxt-tui` exports `pub fn check_time_format(format: &str) -> Result<(), String>`
-  (formats a fixed timestamp with `jiff::fmt::strtime`; an invalid directive
-  or an empty format is an error), with tests for a valid and an invalid
-  format. Task 6 calls it from the configuration loader, so the error is
-  reported with its line before the UI starts (design: a typo is never
-  silently ignored).
+- `ui.time_format` check: `mxt-tui` exports `TimeFormat`, a checked format
+  that only `TimeFormat::parse(format: String) -> Result<TimeFormat, String>`
+  builds (formats a fixed timestamp with `jiff::fmt::strtime`; an invalid
+  directive or an empty format is an error), with tests for a valid and an
+  invalid format. `Tui::set_time_format` takes it; `Tui::new()` keeps its
+  signature, so `mxt` builds unchanged until Task 6. Task 6 calls `parse`
+  from the configuration loader, so the error is reported with its line
+  before the UI starts (design: a typo is never silently ignored).
 - Timeline pane: items oldest at the top, newest at the bottom; each item has
   a header (local time with `ui.time_format`, jiff, and the sender name) and
   the body: `RichText` mapped to ratatui lines (bold, italic, crossed out,
@@ -429,10 +431,12 @@ text.
 ### Task 6: Wire the timeline and check against the account
 
 - The configuration loader in `crates/mxt` calls
-  `mxt_tui::check_time_format` for `ui.time_format` with the value's span
-  (`dto::Ui::time_format` becomes `Spanned<String>`), with tests for a valid
-  and an invalid format. This builds `mxt`, so it runs in the worktree that
-  holds the matrix-sdk build.
+  `mxt_tui::TimeFormat::parse` for `ui.time_format` with the value's span
+  (`dto::Ui::time_format` becomes `Spanned<String>`, and
+  `Config::time_format` a `TimeFormat`), with tests for a valid and an
+  invalid format. `mxt` passes it to `Tui::set_time_format` after
+  `Tui::new()`. This builds `mxt`, so it runs in the worktree that holds the
+  matrix-sdk build.
 - `mxt` routes the new effects (already generic) and messages; run mxt
   against the account (the orchestrator does this) and check: a bridged room
   reads correctly, back pagination loads history, undecryptable messages

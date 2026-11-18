@@ -9,7 +9,10 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+base64.workspace = true
 crossterm.workspace = true
+edtui.workspace = true
+jiff.workspace = true
 mxt-core.workspace = true
 ratatui.workspace = true
 unicode-segmentation.workspace = true
