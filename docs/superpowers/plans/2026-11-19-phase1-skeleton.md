@@ -3066,6 +3066,21 @@ be pure (for example the server name from a user ID, and the homeserver
 choice from the configuration and the saved session) in small functions with
 unit tests.
 
+**Configuration follow-ups** (from the review of the configuration loader,
+#19; same code, so they land here):
+- `files.download_dir` must be absolute after `~/` expansion; `"~alice/dl"`
+  and `"Downloads"` are errors at the value's position
+  (`files.download_dir: "<value>" must be an absolute path or start with ~/`).
+- `ActionError`s point at the offending argument: keep the argument names'
+  spans in the binding DTO and report `UnknownArgument`, `WrongType`,
+  `InvalidValue` and the second argument of `Conflict` at that argument's
+  position (header-form bindings such as `[keymap.normal."]u"]` then point at
+  the right line).
+- Tests for a non-default `account.homeserver` and `ui.time_format`, and for
+  a homeserver value without `https://` or `http://`.
+- Delete `TableId::from_config_name` (unused; the loader maps tables through
+  its DTO) and its test assertion.
+
 - [ ] **Step 1: Write the unit tests for the pure helpers; see them fail.**
 - [ ] **Step 2: Implement the flow.**
 - [ ] **Step 3: Run the tests, fmt and clippy** (under the shared lock).
