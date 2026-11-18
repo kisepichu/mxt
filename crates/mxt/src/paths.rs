@@ -1,6 +1,7 @@
 //! The data, cache and state directories (design, "Storage").
 
 use std::{
+    ffi::OsString,
     fs::{self, DirBuilder, Permissions},
     io,
     os::unix::fs::{DirBuilderExt as _, PermissionsExt as _},
@@ -27,8 +28,10 @@ impl Paths {
     /// `~/.local/share`, `~/.cache`, `~/.local/state` when a variable is unset,
     /// empty or relative (the XDG base directory specification ignores
     /// relative paths); the same on macOS. `None` when a directory falls back
-    /// to `HOME` and `HOME` is unset, empty or relative.
-    pub fn from_env(env: &impl Fn(&str) -> Option<String>) -> Option<Paths> {
+    /// to `HOME` and `HOME` is unset, empty or relative. `env` is
+    /// `std::env::var_os`, so a value that is not UTF-8 is used as it is
+    /// instead of falling back to another directory.
+    pub fn from_env(env: &impl Fn(&str) -> Option<OsString>) -> Option<Paths> {
         let absolute = |name: &str| {
             env(name)
                 .map(PathBuf::from)
@@ -98,15 +101,29 @@ pub fn with_path(error: io::Error, path: &Path) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::ffi::OsStringExt as _;
+
     use super::*;
     use crate::test_dir::TestDir;
 
-    fn env<'a>(vars: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<String> + 'a {
+    fn env<'a>(vars: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
         move |name| {
             vars.iter()
                 .find(|(key, _)| *key == name)
-                .map(|(_, value)| (*value).to_owned())
+                .map(|(_, value)| OsString::from(value))
         }
+    }
+
+    #[test]
+    fn values_that_are_not_utf8_are_used_as_they_are() {
+        let data = OsString::from_vec(b"/xdg/d\xffta".to_vec());
+        let paths = Paths::from_env(&|name: &str| match name {
+            "HOME" => Some("/home/alice".into()),
+            "XDG_DATA_HOME" => Some(data.clone()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(paths.data, PathBuf::from(data).join("mxt"));
     }
 
     #[test]
