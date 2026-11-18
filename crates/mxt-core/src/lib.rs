@@ -13,6 +13,8 @@ pub mod keymap;
 pub mod keys;
 pub mod msg;
 pub mod resolver;
+pub mod rich;
 pub mod room;
 pub mod rooms;
 pub mod settings;
+pub mod timeline;
