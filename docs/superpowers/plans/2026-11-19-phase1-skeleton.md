@@ -3027,10 +3027,11 @@ message and exits with status 1):
    `LockError::Held`: print `another mxt is running (lock: <path>)`.
 3. `init_logging(state, MXT_LOG)`; keep the guard alive until exit.
 4. Session:
-   - `load_session` returns a session: `build_client(Homeserver::Url(saved.homeserver))`,
-     `restore`.
+   - `load_session` returns a session:
+     `build_client(&Homeserver::Saved(saved.homeserver), &paths.store_dirs())`,
+     subscribe to session changes, then `restore`.
    - None: `set_aside_orphaned_store` (log it at `warn`), then
-     `build_client` with `config.homeserver` as `Homeserver::Url`, or
+     `build_client` (with `paths.store_dirs()`) with `config.homeserver` as `Homeserver::Url`, or
      `Homeserver::Discover(<server name of the user ID>)`; print
      `Logging in as <user ID> on <homeserver>`; `prompt_secret("Password: ")`;
      `login`; `save_session` right away, before anything else can fail.
@@ -3096,6 +3097,9 @@ unit tests.
   a homeserver value without `https://` or `http://`.
 - Delete `TableId::from_config_name` (unused; the loader maps tables through
   its DTO) and its test assertion.
+- `main` reads `HOME` and `XDG_CONFIG_HOME` with `std::env::var_os`, like
+  `Paths::from_env`, so a non-UTF-8 value is not silently replaced by the
+  default (`config::default_path` takes `Option<OsString>` too).
 
 - [ ] **Step 1: Write the unit tests for the pure helpers; see them fail.**
 - [ ] **Step 2: Implement the flow.**
