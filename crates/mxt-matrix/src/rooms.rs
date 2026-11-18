@@ -34,7 +34,7 @@ use tokio::sync::{
     broadcast::error::RecvError,
     mpsc::{UnboundedReceiver, UnboundedSender},
 };
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::{Error, bridges::BridgeStates};
 
@@ -116,7 +116,16 @@ pub(crate) async fn run(
             // parent spaces matter.
             update = room_updates.recv() => match update {
                 Ok(update) => rooms.refresh_children(&update.room_id).await,
-                Err(RecvError::Lagged(_)) => rooms.refresh_all_children().await,
+                // The stream's own receiver of these updates is drained in
+                // this task too, so it has most likely lagged as well, and it
+                // drops what it missed: listed rooms would keep stale facts
+                // and the SDK's filter stale room states. Setting the filter
+                // again rebuilds the list from fresh rooms and yields a
+                // `Reset`, which re-reads every listed room.
+                Err(RecvError::Lagged(missed)) => {
+                    info!("missed {missed} room info updates; rebuilding the room list");
+                    controller.set_filter(listed_rooms_filter());
+                }
                 Err(RecvError::Closed) => break,
             },
             states = bridges.recv(), if bridges_open => match states {
@@ -151,7 +160,7 @@ pub(crate) struct Rooms {
     /// The rooms the core has, with their facts.
     listed: HashMap<OwnedRoomId, Listed>,
     /// The listed rooms per parent space (every `m.space.parent`, joined or not).
-    children: HashMap<OwnedRoomId, HashSet<OwnedRoomId>>,
+    spaces: Spaces,
     /// Bridge state per room as far as known; an inner `None` means no bridge.
     bridges: HashMap<OwnedRoomId, Option<BridgeInfo>>,
 }
@@ -175,7 +184,7 @@ impl Rooms {
             to_bridges,
             order: Vector::new(),
             listed: HashMap::new(),
-            children: HashMap::new(),
+            spaces: Spaces::default(),
             bridges: HashMap::new(),
         }
     }
@@ -205,27 +214,37 @@ impl Rooms {
         }
     }
 
-    /// Reads the room's facts and sends its summary.
+    /// Reads the room's facts and sends its summary when they changed.
     async fn refresh(&mut self, room: &Room) {
         let id = room.room_id().to_owned();
         let bridge = self.bridges.get(&id).cloned().flatten();
         let (facts, parents) = match room_facts(&self.client, &self.settings, room, bridge).await {
             Ok(facts) => facts,
             Err(error) => {
-                warn!("reading a room for the room list failed: {error}");
-                debug!(room = %id, "the room whose facts failed");
+                warn!("reading a room for the room list failed: {}", error.brief());
+                debug!(room = %id, "reading the room failed: {error}");
                 return;
             }
         };
-        let _ = self.to_core.send(Msg::RoomUpserted(summary(&facts)));
-        self.forget(&id);
-        for parent in &parents {
-            self.children
-                .entry(parent.clone())
-                .or_default()
-                .insert(id.clone());
+        if self
+            .listed
+            .get(&id)
+            .is_none_or(|listed| listed.facts != facts)
+        {
+            let _ = self.to_core.send(Msg::RoomUpserted(summary(&facts)));
         }
-        self.listed.insert(id, Listed { facts, parents });
+        self.forget(&id);
+        let parent_ids = parents.iter().map(|parent| parent.id.clone()).collect();
+        for parent in parents {
+            self.spaces.add_child(parent.id, parent.name, id.clone());
+        }
+        self.listed.insert(
+            id,
+            Listed {
+                facts,
+                parents: parent_ids,
+            },
+        );
     }
 
     /// Whether the room was listed.
@@ -234,12 +253,7 @@ impl Rooms {
             return false;
         };
         for parent in &listed.parents {
-            if let Some(children) = self.children.get_mut(parent) {
-                children.remove(room);
-                if children.is_empty() {
-                    self.children.remove(parent);
-                }
-            }
+            self.spaces.remove_child(parent, room);
         }
         true
     }
@@ -254,29 +268,23 @@ impl Rooms {
         }
     }
 
-    /// After a change of `room`: the rooms that name it as a parent space.
+    /// After an update of `room`: the rooms that name it as a parent space,
+    /// when what they read from it changed.
     async fn refresh_children(&mut self, room: &ruma::RoomId) {
-        let Some(children) = self.children.get(room) else {
+        if !self.spaces.contains(room) {
             return;
+        }
+        let name = match joined_space_name(&self.client, room).await {
+            Ok(name) => name,
+            Err(error) => {
+                warn!("reading a parent space failed: {}", error.brief());
+                debug!(space = %room, "reading the space failed: {error}");
+                return;
+            }
         };
-        let children: Vec<OwnedRoomId> = children.iter().cloned().collect();
-        self.refresh_ids(children).await;
-    }
-
-    async fn refresh_all_children(&mut self) {
-        let children: Vec<OwnedRoomId> = self
-            .listed
-            .iter()
-            .filter(|(_, listed)| !listed.parents.is_empty())
-            .map(|(room, _)| room.clone())
-            .collect();
-        self.refresh_ids(children).await;
-    }
-
-    async fn refresh_ids(&mut self, rooms: Vec<OwnedRoomId>) {
-        for room in rooms {
-            if let Some(room) = self.client.get_room(&room) {
-                self.refresh(&room).await;
+        for child in self.spaces.changed(room, name) {
+            if let Some(child) = self.client.get_room(&child) {
+                self.refresh(&child).await;
             }
         }
     }
@@ -291,6 +299,60 @@ impl Rooms {
                 let _ = self.to_core.send(Msg::RoomUpserted(summary(&listed.facts)));
             }
             self.bridges.insert(room, bridge);
+        }
+    }
+}
+
+/// The listed rooms per parent space, with what they read from the space.
+#[derive(Default)]
+struct Spaces(HashMap<OwnedRoomId, Space>);
+
+struct Space {
+    /// See `joined_space_name`.
+    name: Option<String>,
+    children: HashSet<OwnedRoomId>,
+}
+
+impl Spaces {
+    /// `child` names `space` as a parent and read `name` from it.
+    ///
+    /// A known space keeps the name it had when it was added or last
+    /// changed, which its other children were refreshed with. A child may
+    /// read a newer name first, through an update of its own before the
+    /// space's; `changed` then still sees the change and refreshes the rest.
+    fn add_child(&mut self, space: OwnedRoomId, name: Option<String>, child: OwnedRoomId) {
+        self.0
+            .entry(space)
+            .or_insert_with(|| Space {
+                name,
+                children: HashSet::new(),
+            })
+            .children
+            .insert(child);
+    }
+
+    fn remove_child(&mut self, space: &ruma::RoomId, child: &ruma::RoomId) {
+        if let Some(entry) = self.0.get_mut(space) {
+            entry.children.remove(child);
+            if entry.children.is_empty() {
+                self.0.remove(space);
+            }
+        }
+    }
+
+    fn contains(&self, space: &ruma::RoomId) -> bool {
+        self.0.contains_key(space)
+    }
+
+    /// After an update of `space`, which now reads `name`: its children to
+    /// refresh, none when the name did not change.
+    fn changed(&mut self, space: &ruma::RoomId, name: Option<String>) -> Vec<OwnedRoomId> {
+        match self.0.get_mut(space) {
+            Some(entry) if entry.name != name => {
+                entry.name = name;
+                entry.children.iter().cloned().collect()
+            }
+            _ => Vec::new(),
         }
     }
 }
@@ -361,7 +423,7 @@ async fn room_facts(
     settings: &NotificationSettings,
     room: &Room,
     bridge: Option<BridgeInfo>,
-) -> Result<(RoomFacts, Vec<OwnedRoomId>), Error> {
+) -> Result<(RoomFacts, Vec<Parent>), Error> {
     let is_direct = room.is_direct().await?;
     let dm_partner_name = if is_direct {
         dm_partner_name(room).await?
@@ -385,10 +447,16 @@ async fn room_facts(
             .latest_event_timestamp()
             .map(|ts| Timestamp::from_millis(ts.0.into())),
         bridge,
-        canonical_parent_name: parents.canonical_name,
-        joined_parent_names: parents.joined_names,
+        canonical_parent_name: parents
+            .iter()
+            .find(|parent| parent.canonical && parent.name.is_some())
+            .and_then(|parent| parent.name.clone()),
+        joined_parent_names: parents
+            .iter()
+            .filter_map(|parent| parent.name.clone())
+            .collect(),
     };
-    Ok((facts, parents.ids))
+    Ok((facts, parents))
 }
 
 /// From the store only: no `/members` request.
@@ -422,24 +490,22 @@ async fn notification_mode(
     }
 }
 
-#[derive(Default)]
-struct Parents {
-    /// Every `m.space.parent`, joined or not.
-    ids: Vec<OwnedRoomId>,
-    /// The first joined parent marked canonical.
-    canonical_name: Option<String>,
-    joined_names: Vec<String>,
+/// One `m.space.parent` of a room.
+struct Parent {
+    id: OwnedRoomId,
+    canonical: bool,
+    /// See `joined_space_name`.
+    name: Option<String>,
 }
 
-/// From the room's `m.space.parent` state; the names come from the spaces
-/// the user has joined.
-async fn parent_spaces(client: &Client, room: &Room) -> Result<Parents, Error> {
-    let mut parents = Parents::default();
+/// From the room's `m.space.parent` state, joined spaces or not.
+async fn parent_spaces(client: &Client, room: &Room) -> Result<Vec<Parent>, Error> {
+    let mut parents = Vec::new();
     for raw in room
         .get_state_events_static::<SpaceParentEventContent>()
         .await?
     {
-        let (space, canonical) = match raw.deserialize() {
+        let (id, canonical) = match raw.deserialize() {
             Ok(SyncOrStrippedState::Sync(event)) => match event.as_original() {
                 Some(event) => (event.state_key.clone(), event.content.canonical),
                 // Redacted.
@@ -450,29 +516,30 @@ async fn parent_spaces(client: &Client, room: &Room) -> Result<Parents, Error> {
             }
             Err(_) => continue,
         };
-        let joined = client
-            .get_room(&space)
-            .filter(|space| space.state() == RoomState::Joined && space.is_space());
-        parents.ids.push(space);
-        let Some(space) = joined else {
-            continue;
-        };
-        let name = space_name(&space).await?;
-        if canonical && parents.canonical_name.is_none() {
-            parents.canonical_name = Some(name.clone());
-        }
-        parents.joined_names.push(name);
+        let name = joined_space_name(client, &id).await?;
+        parents.push(Parent {
+            id,
+            canonical,
+            name,
+        });
     }
     Ok(parents)
 }
 
-/// `""` for a space without a name or alias: a name the SDK calculates from
+/// The name of a space the user has joined, `None` for any other room. `""`
+/// for a space without a name or alias: a name the SDK calculates from
 /// members is no network name.
-async fn space_name(space: &Room) -> Result<String, Error> {
-    Ok(match space.display_name().await? {
+async fn joined_space_name(client: &Client, space: &ruma::RoomId) -> Result<Option<String>, Error> {
+    let Some(space) = client
+        .get_room(space)
+        .filter(|space| space.state() == RoomState::Joined && space.is_space())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(match space.display_name().await? {
         RoomDisplayName::Named(name) | RoomDisplayName::Aliased(name) => name,
         _ => String::new(),
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -643,5 +710,44 @@ mod tests {
         );
         assert_eq!(changes.removed, vec![c]);
         assert_eq!(changes.upserted, vec![(a, 2)]);
+    }
+
+    #[test]
+    fn a_space_update_refreshes_its_children_only_when_its_name_changed() {
+        let (space, a, b) = (
+            owned_room_id!("!space:example.org"),
+            owned_room_id!("!a:example.org"),
+            owned_room_id!("!b:example.org"),
+        );
+        let club = || Some("Book club".to_owned());
+        let readers = || Some("Readers".to_owned());
+        let sorted = |mut rooms: Vec<OwnedRoomId>| {
+            rooms.sort();
+            rooms
+        };
+        let mut spaces = Spaces::default();
+        spaces.add_child(space.clone(), club(), a.clone());
+        spaces.add_child(space.clone(), club(), b.clone());
+        assert!(spaces.changed(&space, club()).is_empty());
+
+        // `a` reads the new name through its own update before the space's
+        // (`Rooms::refresh` forgets the room, then adds it again).
+        spaces.remove_child(&space, &a);
+        spaces.add_child(space.clone(), readers(), a.clone());
+        assert_eq!(
+            sorted(spaces.changed(&space, readers())),
+            vec![a.clone(), b.clone()]
+        );
+        assert!(spaces.changed(&space, readers()).is_empty());
+        // The user left the space.
+        assert_eq!(
+            sorted(spaces.changed(&space, None)),
+            vec![a.clone(), b.clone()]
+        );
+
+        spaces.remove_child(&space, &a);
+        assert!(spaces.contains(&space));
+        spaces.remove_child(&space, &b);
+        assert!(!spaces.contains(&space));
     }
 }

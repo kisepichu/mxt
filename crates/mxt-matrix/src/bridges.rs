@@ -25,7 +25,7 @@ use serde_json::Value;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, info, warn};
 
-use crate::Error;
+use crate::{Error, backoff::Backoff};
 
 /// The connection ID of the one-off requests, so they never touch the SDK's
 /// `room-list` and `encryption` connections.
@@ -35,8 +35,10 @@ const PAGE_SIZE: u32 = 100;
 /// 100 000 rooms; a guard against a server whose `count` never gets covered.
 const MAX_PAGES: u32 = 1000;
 const SUBSCRIPTION_BATCH: usize = 100;
-/// How long rooms whose check failed wait before they are asked for again.
-const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(60);
+/// Rooms whose check failed are asked for again after 1 min, doubling up to
+/// 1 h while the checks keep failing.
+const FIRST_RETRY: Duration = Duration::from_secs(60);
+const MAX_RETRY: Duration = Duration::from_secs(60 * 60);
 const M_BRIDGE: &str = "m.bridge";
 const HALF_SHOT_BRIDGE: &str = "uk.half-shot.bridge";
 
@@ -69,15 +71,21 @@ pub(crate) async fn run(
 
     let mut checked = HashSet::new();
     if let Err(error) = scan_list(&client, &results, &mut checked).await {
-        warn!("fetching the bridge state of the room list failed: {error}");
+        warn!(
+            "fetching the bridge state of the room list failed: {}",
+            error.brief()
+        );
+        debug!("the bridge list scan failed: {error}");
     }
 
+    let mut retry = Backoff::new(FIRST_RETRY, MAX_RETRY);
     loop {
         while let Ok(rooms) = listed.try_recv() {
             pending.extend(rooms);
         }
         pending.retain(|room| !checked.contains(room));
         let mut failed = Vec::new();
+        let mut last_error = None;
         let rooms: Vec<OwnedRoomId> = pending.drain().collect();
         for batch in rooms.chunks(SUBSCRIPTION_BATCH) {
             match check_rooms(&client, batch).await {
@@ -89,19 +97,35 @@ pub(crate) async fn run(
                     }
                 }
                 Err(error) => {
-                    warn!("fetching the bridge state of new rooms failed: {error}");
                     failed.extend_from_slice(batch);
+                    last_error = Some(error);
                 }
             }
         }
-        let retry = !failed.is_empty();
+        let retry_in = match last_error {
+            None => {
+                retry.reset();
+                None
+            }
+            Some(error) => {
+                let delay = retry.next_delay();
+                warn!(
+                    "fetching the bridge state of {} rooms failed ({}); asking again in {} s",
+                    failed.len(),
+                    error.brief(),
+                    delay.as_secs()
+                );
+                debug!("the bridge room subscriptions failed: {error}");
+                Some(delay)
+            }
+        };
         pending.extend(failed);
         tokio::select! {
             rooms = listed.recv() => match rooms {
                 Some(rooms) => pending.extend(rooms),
                 None => return,
             },
-            () = tokio::time::sleep(RETRY_AFTER_FAILURE), if retry => {}
+            () = tokio::time::sleep(retry_in.unwrap_or_default()), if retry_in.is_some() => {}
         }
     }
 }
@@ -122,7 +146,11 @@ async fn scan_list(
         let response = match send(client, request).await {
             Ok(response) => response,
             Err(error) if first > 0 && !chained => {
-                info!("a fresh bridge list page failed ({error}); chaining pos from now on");
+                info!(
+                    "a fresh bridge list page failed ({}); chaining pos from now on",
+                    error.brief()
+                );
+                debug!("the fresh bridge list page failed: {error}");
                 chained = true;
                 continue;
             }
@@ -143,8 +171,7 @@ async fn scan_list(
             rooms = response.rooms.len(),
             "bridge list page"
         );
-        checked.extend(response.rooms.keys().cloned());
-        let _ = results.send(states(&response));
+        let _ = results.send(page_states(&response, checked));
         pos = Some(response.pos);
         first += PAGE_SIZE;
         if u64::from(first) >= count {
@@ -172,11 +199,26 @@ async fn send(client: &Client, request: v5::Request) -> Result<v5::Response, Err
 }
 
 fn states(response: &v5::Response) -> BridgeStates {
+    response.rooms.iter().map(room_state).collect()
+}
+
+/// The bridge state of a list page's rooms that no earlier page returned,
+/// or that the server sends complete (`initial`). With chained `pos`, a room
+/// the connection has sent before comes back with only the state that
+/// changed, and an empty `required_state` would read as "no bridge".
+fn page_states(response: &v5::Response, checked: &mut HashSet<OwnedRoomId>) -> BridgeStates {
     response
         .rooms
         .iter()
-        .map(|(room, data)| (room.clone(), room_bridge_state(&data.required_state)))
+        .filter(|(room, data)| checked.insert((*room).clone()) || data.initial == Some(true))
+        .map(room_state)
         .collect()
+}
+
+fn room_state(
+    (room, data): (&OwnedRoomId, &v5::response::Room),
+) -> (OwnedRoomId, Option<BridgeInfo>) {
+    (room.clone(), room_bridge_state(&data.required_state))
 }
 
 fn required_state() -> Vec<(StateEventType, String)> {
@@ -282,6 +324,7 @@ pub(crate) fn parse_bridge(content: &Value) -> BridgeInfo {
 
 #[cfg(test)]
 mod tests {
+    use matrix_sdk::ruma::owned_room_id;
     use serde_json::json;
 
     use super::*;
@@ -356,5 +399,58 @@ mod tests {
             Some(info(Some("myserver"), None))
         );
         assert_eq!(room_bridge([(M_BRIDGE, &removed)].into_iter()), None);
+    }
+
+    /// A list page's room with at most one state event.
+    fn page_room(initial: Option<bool>, state: Option<&Value>) -> v5::response::Room {
+        let mut room = v5::response::Room::new();
+        room.initial = initial;
+        room.required_state = state
+            .into_iter()
+            .map(|event| Raw::from_json(serde_json::value::to_raw_value(event).unwrap()))
+            .collect();
+        room
+    }
+
+    #[test]
+    fn a_room_from_an_earlier_page_counts_only_when_sent_complete() {
+        let m_bridge = json!({
+            "type": M_BRIDGE,
+            "state_key": "bridge",
+            "event_id": "$bridge:example.org",
+            "sender": "@bot:example.org",
+            "origin_server_ts": 1,
+            "content": { "network": { "displayname": "myserver" } },
+        });
+        let (a, b, c) = (
+            owned_room_id!("!a:example.org"),
+            owned_room_id!("!b:example.org"),
+            owned_room_id!("!c:example.org"),
+        );
+        let mut checked = HashSet::new();
+        let mut first = v5::Response::new("1".to_owned());
+        first
+            .rooms
+            .insert(a.clone(), page_room(None, Some(&m_bridge)));
+        first
+            .rooms
+            .insert(c.clone(), page_room(None, Some(&m_bridge)));
+        let bridged = Some(info(Some("myserver"), None));
+        assert_eq!(
+            page_states(&first, &mut checked),
+            vec![(a.clone(), bridged.clone()), (c.clone(), bridged.clone())]
+        );
+
+        // A chained page: `a` only with what changed, `b` new, `c` complete.
+        let mut chained = v5::Response::new("2".to_owned());
+        chained.rooms.insert(a, page_room(None, None));
+        chained.rooms.insert(b.clone(), page_room(None, None));
+        chained
+            .rooms
+            .insert(c.clone(), page_room(Some(true), Some(&m_bridge)));
+        assert_eq!(
+            page_states(&chained, &mut checked),
+            vec![(b, None), (c, bridged)]
+        );
     }
 }

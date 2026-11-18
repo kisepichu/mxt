@@ -2,6 +2,7 @@
 //! data into `mxt-core` domain types and executes matrix effects.
 
 mod adapter;
+mod backoff;
 mod bridges;
 mod client;
 mod error;

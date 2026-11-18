@@ -24,9 +24,9 @@ use tokio::{
     task::{JoinHandle, JoinSet},
     time::{Instant, sleep_until},
 };
-use tracing::warn;
+use tracing::{debug, warn};
 
-use crate::{Error, bridges, rooms};
+use crate::{Error, backoff::Backoff, bridges, error::brief_sync, rooms};
 
 /// Builds the sync service (matrix-sdk-ui `SyncService` with offline mode),
 /// so startup can start it before the UI (the first login waits for the
@@ -192,25 +192,29 @@ fn sdk_room(client: &Client, room: &RoomId) -> Result<Room, Error> {
         .ok_or(Error::UnknownRoom)
 }
 
-/// A short message without event contents for the status line, and the same
-/// at `warn` for the log.
+/// The status line and the `warn` log get the brief error, without event
+/// contents or room IDs; `debug` gets the full one.
 fn report(to_core: &UnboundedSender<Msg>, what: &str, error: &Error) {
-    warn!("{what}: {error}");
+    let brief = error.brief();
+    warn!("{what}: {brief}");
+    debug!("{what}: {error}");
     let _ = to_core.send(Msg::EffectFailed {
-        error: format!("{what}: {error}"),
+        error: format!("{what}: {brief}"),
     });
 }
 
 /// Reports the sync state, and restarts the sync service with backoff after
-/// it stopped with an error. (With offline mode, the SDK itself waits for the
-/// homeserver after a failed request and resumes.)
+/// it stopped with an error, or after it went offline again before the room
+/// list responded (see `Restarts`).
 async fn watch_sync(sync: Arc<SyncService>, to_core: UnboundedSender<Msg>) {
     let mut service = sync.state();
     let room_list = sync.room_list_service();
     let mut room_list_state = room_list.state();
-    let mut backoff = Backoff::new();
+    let mut restarts = Restarts::new();
     let mut restart_at = None;
     let mut reported = SyncState::Starting;
+    // The state at the start counts as a change.
+    let mut service_changed = true;
     loop {
         let service_state = service.next_now();
         let list_state = room_list_state.next_now();
@@ -220,17 +224,22 @@ async fn watch_sync(sync: Arc<SyncService>, to_core: UnboundedSender<Msg>) {
             let _ = to_core.send(Msg::SyncState(state));
         }
         if state == SyncState::Synced {
-            backoff.reset();
+            restarts.responded();
         }
-        match &service_state {
-            sync_service::State::Error(_) | sync_service::State::Terminated => {
-                if restart_at.is_none() {
-                    let delay = backoff.next_delay();
+        if std::mem::take(&mut service_changed) {
+            match restarts.service_changed(&service_state) {
+                Restart::None => restart_at = None,
+                Restart::Keep => {}
+                Restart::After(delay) => {
                     match &service_state {
-                        sync_service::State::Error(error) => warn!(
-                            "the sync service stopped ({error}); restarting it in {} s",
-                            delay.as_secs()
-                        ),
+                        sync_service::State::Error(error) => {
+                            warn!(
+                                "the sync service stopped ({}); restarting it in {} s",
+                                brief_sync(error),
+                                delay.as_secs()
+                            );
+                            debug!("the sync service stopped: {error}");
+                        }
                         _ => warn!(
                             "the sync service terminated; restarting it in {} s",
                             delay.as_secs()
@@ -238,11 +247,22 @@ async fn watch_sync(sync: Arc<SyncService>, to_core: UnboundedSender<Msg>) {
                     }
                     restart_at = Some(Instant::now() + delay);
                 }
+                Restart::StopThenAfter(delay) => {
+                    warn!(
+                        "the sync service went offline before the room list responded; \
+                         restarting it in {} s",
+                        delay.as_secs()
+                    );
+                    sync.stop().await;
+                    restart_at = Some(Instant::now() + delay);
+                }
             }
-            _ => restart_at = None,
         }
         tokio::select! {
-            changed = service.next() => if changed.is_none() { return },
+            changed = service.next() => match changed {
+                Some(_) => service_changed = true,
+                None => return,
+            },
             changed = room_list_state.next() => if changed.is_none() { return },
             () = sleep_until(restart_at.unwrap_or_else(Instant::now)), if restart_at.is_some() => {
                 restart_at = None;
@@ -273,32 +293,74 @@ fn sync_state(
         },
         sync_service::State::Offline => SyncState::Offline,
         sync_service::State::Error(_) | sync_service::State::Terminated => SyncState::Retrying,
-        // Before the first start, or after `Matrix::stop`.
+        // Before the first start, after `Matrix::stop`, or while
+        // `watch_sync` waits to restart the service.
         sync_service::State::Idle => previous,
     }
 }
 
-/// 1 s, doubling, at most 60 s.
-struct Backoff {
-    next: Duration,
+/// When `watch_sync` restarts the sync service: after `Error` or
+/// `Terminated`, and after `Offline` when the room list has not responded
+/// since the service last stopped or went offline.
+///
+/// With offline mode, the SDK leaves `Offline` on its own once `/versions`
+/// answers, and starts the syncs again at once. That recovers from an
+/// unreachable homeserver. But a sync that fails while the homeserver answers
+/// (an error response, or a response the SDK cannot read) would fail and
+/// start again in a tight loop, so mxt stops the service and backs off.
+struct Restarts {
+    /// 1 s, doubling, at most 60 s; reset by a room list response.
+    backoff: Backoff,
+    /// Whether the room list has responded since the service last stopped or
+    /// went offline.
+    responded: bool,
 }
 
-impl Backoff {
-    const FIRST: Duration = Duration::from_secs(1);
-    const MAX: Duration = Duration::from_secs(60);
+/// What `watch_sync` does after the sync service's state changed.
+#[derive(Debug, PartialEq, Eq)]
+enum Restart {
+    /// No restart: the service runs, or the SDK resumes it from offline mode.
+    None,
+    /// A scheduled restart stays: the service is idle because `watch_sync`
+    /// stopped it (or it has not been started yet).
+    Keep,
+    /// Start the service after the delay.
+    After(Duration),
+    /// Stop the service (it leaves offline mode), then start it after the
+    /// delay.
+    StopThenAfter(Duration),
+}
 
-    fn new() -> Backoff {
-        Backoff { next: Self::FIRST }
+impl Restarts {
+    fn new() -> Restarts {
+        Restarts {
+            backoff: Backoff::new(Duration::from_secs(1), Duration::from_secs(60)),
+            responded: false,
+        }
     }
 
-    fn next_delay(&mut self) -> Duration {
-        let delay = self.next;
-        self.next = (delay * 2).min(Self::MAX);
-        delay
+    /// The room list has responded: the reported state is `Synced`.
+    fn responded(&mut self) {
+        self.backoff.reset();
+        self.responded = true;
     }
 
-    fn reset(&mut self) {
-        self.next = Self::FIRST;
+    fn service_changed(&mut self, state: &sync_service::State) -> Restart {
+        match state {
+            sync_service::State::Running => Restart::None,
+            sync_service::State::Idle => Restart::Keep,
+            sync_service::State::Offline => {
+                if std::mem::take(&mut self.responded) {
+                    Restart::None
+                } else {
+                    Restart::StopThenAfter(self.backoff.next_delay())
+                }
+            }
+            sync_service::State::Error(_) | sync_service::State::Terminated => {
+                self.responded = false;
+                Restart::After(self.backoff.next_delay())
+            }
+        }
     }
 }
 
@@ -350,11 +412,52 @@ mod tests {
     }
 
     #[test]
-    fn backoff_doubles_up_to_a_minute_and_resets() {
-        let mut backoff = Backoff::new();
-        let delays: Vec<u64> = (0..8).map(|_| backoff.next_delay().as_secs()).collect();
-        assert_eq!(delays, [1, 2, 4, 8, 16, 32, 60, 60]);
-        backoff.reset();
-        assert_eq!(backoff.next_delay(), Duration::from_secs(1));
+    fn offline_mode_resumes_only_after_a_room_list_response() {
+        use sync_service::State as Service;
+        let mut restarts = Restarts::new();
+        let second = Duration::from_secs(1);
+        // No response since the start.
+        assert_eq!(restarts.service_changed(&Service::Running), Restart::None);
+        assert_eq!(
+            restarts.service_changed(&Service::Offline),
+            Restart::StopThenAfter(second)
+        );
+        assert_eq!(restarts.service_changed(&Service::Idle), Restart::Keep);
+        assert_eq!(restarts.service_changed(&Service::Running), Restart::None);
+        restarts.responded();
+        // The SDK waits for `/versions` and resumes.
+        assert_eq!(restarts.service_changed(&Service::Offline), Restart::None);
+        assert_eq!(restarts.service_changed(&Service::Running), Restart::None);
+        // That restart got no response: back off, doubling.
+        assert_eq!(
+            restarts.service_changed(&Service::Offline),
+            Restart::StopThenAfter(second)
+        );
+        assert_eq!(restarts.service_changed(&Service::Running), Restart::None);
+        assert_eq!(
+            restarts.service_changed(&Service::Offline),
+            Restart::StopThenAfter(2 * second)
+        );
+    }
+
+    #[test]
+    fn errors_restart_with_a_backoff_that_a_response_resets() {
+        use sync_service::State as Service;
+        let mut restarts = Restarts::new();
+        let second = Duration::from_secs(1);
+        restarts.responded();
+        assert_eq!(restarts.service_changed(&error()), Restart::After(second));
+        assert_eq!(restarts.service_changed(&Service::Running), Restart::None);
+        assert_eq!(
+            restarts.service_changed(&Service::Terminated),
+            Restart::After(2 * second)
+        );
+        // The error ended the response from before it.
+        assert_eq!(
+            restarts.service_changed(&Service::Offline),
+            Restart::StopThenAfter(4 * second)
+        );
+        restarts.responded();
+        assert_eq!(restarts.service_changed(&error()), Restart::After(second));
     }
 }
