@@ -16,8 +16,12 @@ use crate::Error;
 pub enum Homeserver {
     /// Discover from the user ID's server name via `.well-known`.
     Discover(String),
-    /// A homeserver URL, from the configuration or the session file.
+    /// A homeserver URL from the configuration.
     Url(String),
+    /// The homeserver URL from the session file. It passed the simplified
+    /// sliding sync check at login, so building sends no request and a
+    /// restore works offline.
+    Saved(String),
 }
 
 /// The directories of the SDK's SQLite stores.
@@ -32,14 +36,23 @@ pub struct StoreDirs {
 /// SQLite state and crypto stores in `dirs.data` without a passphrase, the
 /// event cache and media cache in `dirs.cache`. Room keys are fetched from the
 /// key backup when an event fails to decrypt; backups and cross-signing are
-/// never created. Simplified sliding sync is required: building fails when
-/// the homeserver's `/versions` does not advertise it. No refresh tokens.
+/// never created. Simplified sliding sync is required: for `Discover` and
+/// `Url`, building fails when the homeserver's `/versions` does not advertise
+/// it; `Saved` assumes it without a request. No refresh tokens.
 pub async fn build_client(homeserver: &Homeserver, dirs: &StoreDirs) -> Result<Client, Error> {
-    let builder = match homeserver {
-        Homeserver::Discover(server_name) => {
-            Client::builder().server_name_or_homeserver_url(server_name)
-        }
-        Homeserver::Url(url) => Client::builder().homeserver_url(url),
+    let (builder, sliding_sync) = match homeserver {
+        Homeserver::Discover(server_name) => (
+            Client::builder().server_name_or_homeserver_url(server_name),
+            VersionBuilder::DiscoverNative,
+        ),
+        Homeserver::Url(url) => (
+            Client::builder().homeserver_url(url),
+            VersionBuilder::DiscoverNative,
+        ),
+        Homeserver::Saved(url) => (
+            Client::builder().homeserver_url(url),
+            VersionBuilder::Native,
+        ),
     };
     let client = builder
         .sqlite_store_with_cache_path(&dirs.data, &dirs.cache, None)
@@ -48,7 +61,7 @@ pub async fn build_client(homeserver: &Homeserver, dirs: &StoreDirs) -> Result<C
             backup_download_strategy: BackupDownloadStrategy::AfterDecryptionFailure,
             auto_enable_backups: false,
         })
-        .sliding_sync_version_builder(VersionBuilder::DiscoverNative)
+        .sliding_sync_version_builder(sliding_sync)
         .build()
         .await?;
     Ok(client)

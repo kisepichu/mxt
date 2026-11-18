@@ -99,7 +99,11 @@ pub async fn login(client: &Client, user_id: &str, password: &str) -> Result<Sav
     })
 }
 
-/// Restores a saved session on a client built for `session.homeserver`.
+/// Restores a saved session on a client built with
+/// `Homeserver::Saved(session.homeserver)`. Separate from `build_client` so
+/// the caller can subscribe to `Client::subscribe_to_session_changes` in
+/// between: the E2EE tasks that restoring spawns send requests at once, and
+/// an `M_UNKNOWN_TOKEN` from them is only reported there.
 pub async fn restore(client: &Client, session: SavedSession) -> Result<(), Error> {
     client.restore_session(session.session).await?;
     Ok(())
