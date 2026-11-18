@@ -89,6 +89,11 @@ mod tests {
             key_from_crossterm(press(C::BackTab, M::SHIFT)),
             Some(key("<S-Tab>"))
         );
+        // Terminals that leave the modifier out still give `<S-Tab>`.
+        assert_eq!(
+            key_from_crossterm(press(C::BackTab, M::NONE)),
+            Some(key("<S-Tab>"))
+        );
         assert_eq!(
             key_from_crossterm(press(C::Esc, M::NONE)),
             Some(key("<Esc>"))
