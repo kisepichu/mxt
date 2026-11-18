@@ -1,7 +1,7 @@
 # mxt design
 
 Date: 2026-11-18
-Status: draft for review (revision 2)
+Status: draft for review (revision 3)
 
 ## Summary
 
@@ -49,7 +49,8 @@ Included:
 2. A room list that shows network names and unread badges.
 3. A fuzzy room picker, also used to list rooms with unread mentions.
 4. A timeline that renders HTML message bodies and shows replies, edits and
-   reactions.
+   reactions, and a full-screen view for messages taller than the screen and
+   for images.
 5. Sending messages written in Markdown, replies, mentions of room members
    completed after typing `@`, and read receipts.
 6. Toggling reactions, editing and deleting (redacting) the user's own
@@ -81,7 +82,9 @@ Not included in the first release:
 - License: MIT. Code adapted from Apache-2.0 projects keeps its Apache-2.0
   notice in the adapted files, and the repository then ships `LICENSE-APACHE`.
 - Dependency licenses are checked by `cargo-deny` in CI. GPL-family licenses,
-  including the AGPL, are rejected.
+  including the AGPL, are rejected. The allow list in `deny.toml` holds the
+  permissive licenses the tree needs (MIT, Apache-2.0, BSD-3-Clause, ISC,
+  MIT-0, Unicode-3.0, Unlicense and similar) and MPL-2.0.
 - Tests and fixtures use made-up identifiers (`@alice:example.org`,
   `!room:example.org`). Real user IDs, room IDs, access tokens and logs are
   never committed.
@@ -137,9 +140,9 @@ flowchart BT
 
 | Crate | Responsibility | May depend on |
 |---|---|---|
-| `mxt-core` | Domain types, keymap and its resolver, action registry, pickers, `App` state and `update` | `std` and small pure crates without I/O (`nucleo-matcher`, `emojis`, `unicode-segmentation`). Not the SDK, `ruma`, an async runtime, a terminal library, `serde` or `toml`. |
-| `mxt-matrix` | Builds the SDK client, converts SDK data into domain types, executes matrix effects, forwards SDK streams as `Msg`s, renders HTML bodies into domain rich text | `mxt-core`, `matrix-sdk`, `matrix-sdk-ui`, `ruma-html`, tokio |
-| `mxt-tui` | Layout and widgets, input routing, the composers (edtui), image previews, OSC 52 clipboard, local time formatting, executing UI effects | `mxt-core`, ratatui, crossterm, edtui, ratatui-image, jiff |
+| `mxt-core` | Domain types, keymap and its resolver, action registry, pickers, mention rendering, `App` state and `update` | `std` and small pure crates without I/O (`nucleo-matcher`, `emojis`, `pulldown-cmark`, `unicode-segmentation`). Not the SDK, `ruma`, an async runtime, a terminal library, `serde` or `toml`. |
+| `mxt-matrix` | Builds the SDK client, converts SDK data into domain types, executes matrix effects, forwards SDK streams as `Msg`s, fetches bridge state, renders HTML bodies into domain rich text | `mxt-core`, `matrix-sdk`, `matrix-sdk-ui`, tokio; HTML parsing through `matrix_sdk::ruma::html`, plus a feature-only `ruma` dependency of the SDK's ruma version that enables `html-matrix` (the SDK enables only `html`) |
+| `mxt-tui` | Layout and widgets, input routing, the composers and the message view (edtui), image decoding and previews, OSC 52 clipboard, local time formatting, executing UI effects | `mxt-core`, ratatui, crossterm, edtui, ratatui-image, image, jiff |
 | `mxt` | Command line, startup flow, configuration file loading (TOML DTOs), paths, the data directory lock, logging, wiring the adapters and the event loop | all of the above, `serde`, `toml`, `tracing` |
 
 Because `mxt-core` does not depend on the SDK, its tests build and run without
@@ -204,10 +207,14 @@ Rules:
   `TxnId`, `UserId`), not `ruma` types. Timestamps are UTC milliseconds.
 - Effects come in two groups. `Effect::Matrix(..)` is executed by the matrix
   adapter (for example `SubscribeTimeline`, `UnsubscribeTimeline`,
-  `PaginateBackwards`, `LoadMembers`, `Send`). `Effect::Ui(..)` is executed by
-  the tui adapter (for example `StartTimer { id, after }`, `LoadComposer`,
-  `ClearComposer`, `ReplayKeys`, `ReplaceMentionToken`). Results arrive as
-  `Msg`s (timeline diffs, `Msg::MembersLoaded`, `Msg::Timeout { id }`).
+  `PaginateBackwards`, `LoadMembers`, `FetchImage`, `Send`). `Effect::Ui(..)`
+  is executed by the tui adapter (for example `StartTimer { id, after }`,
+  `LoadComposer`, `ClearComposer`, `ReplayKeys`, `ReplaceMentionToken`,
+  `OpenView`). Results arrive as `Msg`s (timeline diffs, `Msg::MembersLoaded`,
+  `Msg::ImageFetched`, `Msg::Timeout { id }`).
+- Media bytes pass through the core as an opaque `MediaBytes` handle
+  (`Arc<[u8]>`). The core never decodes them; it only routes them from the
+  matrix adapter to the tui adapter.
 - No ceremony: no repository traits, dependency injection containers or one
   type per use case. Types and functions are enough.
 
@@ -246,16 +253,24 @@ The main types in `mxt-core`:
 - Room members: user ID and display name, loaded per room on demand, used for
   mention completion.
 - UI state: focus (room list, timeline, composer), mode, keymap resolver
-  state, picker state, cursor positions, the last known viewport of each pane,
-  terminal focus, the status message.
+  state, picker state, the open message view, cursor positions, the last
+  known viewport of each pane, terminal focus (initially focused), the status
+  message.
 
 ### Keymap resolver
 
 The resolver lives in `mxt-core` and is deterministic, so its behavior is
 covered by unit tests.
 
-- It holds the pending key sequence. Count prefixes (`5j`) are part of the
-  same pending state.
+- For the current mode, the tables in the fallback chain (see "Tables and
+  resolution") are merged into one effective map before resolution. For the
+  same key sequence, the earlier table wins. Prefixes are judged on the
+  merged map, so with `"]"` in `timeline` and `"]u"` in `normal`, `]` waits
+  like it does in nvim.
+- `nop` is a binding that does nothing. It shadows the same key sequence in
+  later tables.
+- The resolver holds the pending key sequence. Count prefixes (`5j`) are part
+  of the same pending state.
 - A key sequence that is a complete binding and not a prefix of a longer one
   runs immediately.
 - A key sequence that is a prefix of a longer binding stays pending. The
@@ -267,8 +282,9 @@ covered by unit tests.
   binding runs first, and the new key is resolved afresh. Without a complete
   binding, the pending keys are released.
 - Released keys go to the text input that would have received them: the
-  composer's editor through `Effect::Ui(ReplayKeys(keys))`, or the picker or
-  command line query. In panes without text input they are dropped.
+  composer's or the message view's editor through
+  `Effect::Ui(ReplayKeys(keys))`, or the picker or command line query. In
+  panes without text input they are dropped.
 
 ### Matrix adapter
 
@@ -284,13 +300,23 @@ covered by unit tests.
   time. The core filters and sorts them itself, so the meaning of every filter
   is defined in one place.
 - Bridge state: `RoomListService` requests a fixed set of state events that
-  does not include `m.bridge`, and it has no API to extend that set. mxt runs
-  a second sliding sync connection (`client.sliding_sync("mxt-bridge-state")`)
-  with one list over all rooms, `required_state` of `("m.bridge", "*")` and
-  `("uk.half-shot.bridge", "*")`, and `timeline_limit` 0. Its responses go
-  through the SDK into the same state store. `SpaceParent` state comes with
+  does not include `m.bridge`, and it has no API to extend that set. A second
+  `SlidingSync` instance would feed its responses through the SDK's sync
+  processing, and a `limited` response with a `prev_batch` token makes the
+  event cache add a gap to the room even when no events arrive. So mxt does
+  not use the SDK's sliding sync for this. It sends one-off MSC4186 requests
+  with `Client::send` (`ruma::api::client::sync::sync_events::v5::Request`):
+  - a list over all rooms, paged by its range until the response's `count` is
+    covered, with `timeline_limit` 0 and `required_state` of
+    `("m.bridge", "*")` and `("uk.half-shot.bridge", "*")`, and no extensions;
+  - at startup, and with `room_subscriptions` for rooms that appear later and
+    have not been checked yet.
+
+  `mxt-matrix` parses the returned state itself and keeps, per room, either
+  the bridge information or the fact that the room has none. The responses
+  never reach the SDK's store or event cache. `SpaceParent` state comes with
   the room list connection already.
-- Network names, first match wins:
+- Network names, for every room including direct messages, first match wins:
   1. `network.displayname` of the room's `m.bridge` event (or
      `uk.half-shot.bridge`)
   2. `protocol.displayname` of that event
@@ -298,26 +324,46 @@ covered by unit tests.
   4. the name of the parent space, when the user has joined exactly one
   5. none
 - Recovery: `Recovery::recover(recovery_key)`.
+- Encryption settings: `backup_download_strategy` is
+  `BackupDownloadStrategy::AfterDecryptionFailure`, so an event that fails to
+  decrypt makes the SDK fetch its key from the key backup. The SDK default
+  (`Manual`) never fetches keys, and `OneShot` downloads every key at once,
+  which is heavy for accounts with many rooms. `auto_enable_backups` and
+  `auto_enable_cross_signing` stay off, because creating them is out of
+  scope.
 - Mute: the SDK notification settings. Muting sets the room mode to mute.
   Unmuting removes the user-defined room rule, so the account default applies
   again.
-- Sending: the composer text is Markdown. Before sending, the core's
-  `render_mentions(body, mentions)` replaces every inserted mention text that
-  is still in the body with a Markdown link to `https://matrix.to/#/<user ID>`
-  (escaping Markdown in the link text), and returns the user IDs that remain.
-  The adapter sends the result with `RoomMessageEventContent::text_markdown`
-  (matrix-sdk's `markdown` feature), which fills both `body` and
-  `formatted_body`, and sets `m.mentions.user_ids` to those IDs. Bridges turn
-  such links into mentions on the remote network. Replies and edits use the
-  timeline's reply and edit calls.
+- Sending: the composer text is Markdown. The core's
+  `render_mentions(text, mentions)` returns three things:
+  - the plain body: the editor text unchanged, so mentions read as
+    `@Alice` in notifications and in clients that ignore HTML;
+  - the Markdown for the HTML body: every inserted mention text that is still
+    present and not inside inline code or a code block (found with
+    `pulldown-cmark` offsets) replaced by a link to
+    `https://matrix.to/#/<user ID>`, with Markdown in the link text escaped;
+  - the user IDs of the mentions that remain.
+
+  The adapter converts the Markdown with ruma's `FormattedBody::markdown`
+  and sends `RoomMessageEventContent::text_html(plain, html)` with
+  `m.mentions.user_ids` set. When the Markdown has no formatting at all, it
+  sends `text_plain(plain)`. ruma turns soft line breaks into hard breaks, so
+  newlines from `<C-j>` stay newlines in HTML. Bridges turn the links into
+  mentions on the remote network. Replies and edits use the timeline's reply
+  and edit calls.
 - Reactions: `Timeline::toggle_reaction`. Choosing a reaction the user already
   sent removes it.
 - Read receipts: the core requests a receipt for the latest event when the
-  room is open, the timeline shows its newest item, and the terminal has focus
-  (crossterm focus events). The adapter sends the configured receipt type
-  (`m.read` or `m.read.private`) and moves the `m.fully_read` marker to the
-  same event. `room.mark_read` does the same for the selected room and also
-  clears its manual unread mark.
+  room is open, the timeline shows its newest item, and the terminal has
+  focus. The terminal counts as focused from startup until a crossterm
+  `FocusLost` event arrives, so terminals and multiplexers that never send
+  focus events still get receipts. The adapter sends the configured receipt
+  type (`m.read` or `m.read.private`) and moves the `m.fully_read` marker to
+  the same event.
+- `room.mark_read` acts on the room under the cursor when the room list has
+  focus, and on the open room otherwise. It sends the same receipt for that
+  room's latest event as known to the room list (the exact SDK call is
+  settled in phase 1), and clears the room's manual unread mark.
 - Optimistic clearing: when the core requests a receipt or runs
   `room.mark_read`, it sets that room's `UnreadCounts` to zero immediately.
   The next SDK update overwrites it. This makes action sequences such as
@@ -325,10 +371,14 @@ covered by unit tests.
 - Room keys are shared with the SDK's default recipient strategy
   (`CollectStrategy::AllDevices`), which does not refuse to send when another
   user's identity changes.
-- HTML bodies: `formatted_body` is parsed with ruma-html into `RichText`.
+- HTML bodies: `formatted_body` is parsed with `ruma::html` into `RichText`.
   `<mx-reply>` fallbacks are dropped, `<del>` becomes strikethrough,
   `data-mx-spoiler` becomes spoiler style, and `<img data-mx-emoticon>`
   becomes its alt text.
+- Images: `FetchImage` uses the event's thumbnail source when there is one.
+  In encrypted rooms there is often none, and the SDK cannot ask the server to
+  scale encrypted media, so the adapter downloads the full file. Files larger
+  than 10 MB are not fetched for previews.
 - Sync path: phase 0 decides between sliding sync and classic `/sync` for the
   target homeservers, and only the chosen path is implemented. If classic sync
   is chosen, the adapter builds the room set from `Client::rooms()` and reads
@@ -343,8 +393,9 @@ covered by unit tests.
   the system clipboard (arboard), mouse support and syntax highlighting.
 - edtui's clipboard is a custom `ClipboardTrait` implementation: copying
   writes the text to the terminal clipboard with OSC 52 and keeps it in an
-  internal register, and pasting reads the internal register. Timeline yanks
-  use the same register.
+  internal register, and pasting reads the internal register. Every editor
+  state gets the same `Rc<RefCell<Register>>` handle, and timeline yanks use
+  the same register.
 - Text editing is an input detail. The core only knows the room's `Draft` and
   whether its composer is empty, which the tui adapter reports with
   `Msg::ComposerEdited { room, empty }` when that changes.
@@ -355,7 +406,12 @@ covered by unit tests.
   Failed sends are shown on the local echo (see "Error handling").
 - Editing an existing message: `message.edit` requires an empty composer and
   otherwise reports "Clear the composer first" in the status line. On success
-  the core returns `Effect::Ui(LoadComposer { room, text })`.
+  the core loads the message's plain body (without a reply fallback) with
+  `Effect::Ui(LoadComposer { room, text })`, and rebuilds the room's
+  `MentionRef`s from the mention spans in the message's `RichText` whose text
+  appears in that body. Edits keep their pills and `m.mentions`.
+- `composer.focus` puts edtui into insert mode by default. With
+  `mode = "keep"` it keeps edtui's previous mode.
 - `composer.cancel`: a reply draft becomes `New` and keeps its text. An edit
   draft becomes `New` and the composer is cleared.
 - Mention completion:
@@ -384,6 +440,14 @@ covered by unit tests.
   changes which items are visible. Half-page movement moves the cursor by half
   of the visible item count (at least one). The core never computes text
   layout.
+- The message view: `message.view` opens the selected message in a
+  full-screen overlay. For text, the overlay is an edtui scratch editor
+  holding the message's text, so vim motions, search, visual selection and
+  yanks work on messages taller than the timeline. Changes are discarded when
+  the view closes. For images, the overlay shows the image (fetched with
+  `FetchImage`, decoded and scaled down with the `image` crate, and kept in
+  the tui adapter's image cache) and the file name and size. Messages taller
+  than the timeline pane show a `[+N lines]` marker at the cut-off.
 - Replacing edtui later (with another editor widget or an in-house vim engine)
   only touches `mxt-tui`.
 
@@ -406,8 +470,9 @@ Command line: `mxt [--config PATH]` and `mxt --version`.
 5. Start the terminal UI and sync.
 
 If the homeserver answers `M_UNKNOWN_TOKEN` at any time, mxt restores the
-terminal, renames the data directory to `mxt.invalid-<timestamp>`, prints why,
-and exits. The next start logs in as a new device with fresh stores.
+terminal, drops the SDK client so the stores are closed, renames the data
+directory to `mxt.invalid-<timestamp>`, deletes the cache directory, prints
+why, and exits. The next start logs in as a new device with fresh stores.
 
 ## User interface
 
@@ -415,12 +480,10 @@ and exits. The next start logs in as a new device with fresh stores.
 
 - Left: the room list, which can be hidden.
 - Right: the timeline of the open room, with the composer below it.
-- Image preview pane: shown on the right of the timeline while the selected
-  message is an image.
 - Bottom line: status line showing the mode, the open room and the sync state.
   Pressing `:` turns it into the command line.
-- Overlays: the fuzzy room picker, the emoji picker, and the mention menu
-  above the composer.
+- Overlays: the fuzzy room picker, the emoji picker, the mention menu above
+  the composer, and the full-screen message view.
 
 ### Modes
 
@@ -430,6 +493,7 @@ and exits. The next start logs in as a new device with fresh stores.
 | composer modes | the composer has focus; the status line shows edtui's mode (`INSERT`, `NORMAL`, `VISUAL`, `SEARCH`) | see "Input routing" above |
 | `COMMAND` | the `:` command line is open | `command_line` table, then text input |
 | `PICKER` | the room picker or the emoji picker is open | `picker` table, then text input |
+| `VIEW` | the message view is open | `message_view` table while its editor is in normal or visual mode, then edtui |
 | `CONFIRM` | an action asks for confirmation | `y` confirms, any other key cancels |
 | `SECRET` | the recovery key is being entered | masked text input, `<CR>` submits, `<Esc>` cancels |
 
@@ -440,9 +504,11 @@ and is the default leader.
 ### Room names
 
 - Rooms with a network name (see "Matrix adapter"): `<network> / <room>`.
-- Direct messages: the other user's display name, prefixed with the
-  protocol name when the room is bridged (`Discord / Alice`).
-- Other rooms: the room's display name.
+  Direct messages use the other user's display name as `<room>`, so a
+  Discord DM reads `Discord / Alice`, and a Slack DM whose bridge sets the
+  workspace as `network` reads `<workspace> / Alice`.
+- Rooms without a network name: the room's display name, or the other user's
+  display name for direct messages.
 
 ### Unread badges
 
@@ -471,8 +537,10 @@ rooms by network. Spaces themselves are not listed.
 - Date dividers and the user's read marker come from the SDK's virtual items.
 - Messages the SDK cannot decrypt yet show a placeholder. Redacted messages
   show `(deleted)`.
-- Images show `[image: <name> <width>x<height>]` inline. The preview itself
-  appears in the preview pane (see "Files and images").
+- Images show `[image: <name> <width>x<height>]` inline. Images are never
+  drawn inside the scrolling timeline; `message.view` shows them.
+- Messages taller than the pane show `[+N lines]`, and `message.view` shows
+  them in full.
 
 ### Default keymap
 
@@ -488,7 +556,8 @@ rooms by network. Spaces themselves are not listed.
 | `room_list`, `timeline` | `<C-d>` / `<C-u>` | `cursor.half_page_down` / `cursor.half_page_up` | same |
 | `room_list`, `timeline` | `/` / `n` / `N` | `search.start` / `search.next` / `search.prev` | same |
 | `room_list` | `<CR>` | `room.open_selected` | |
-| `timeline` | `i` / `a` | `composer.focus` | insert |
+| `timeline` | `i` / `a` | `composer.focus` (enters insert mode) | insert |
+| `timeline` | `<CR>` | `message.view` | |
 | `timeline` | `r` | `message.reply` | |
 | `timeline` | `e` | `message.edit` (own messages only) | |
 | `timeline` | `dd` | `message.delete` (own messages only, after confirmation) | delete line |
@@ -507,6 +576,7 @@ rooms by network. Spaces themselves are not listed.
 | `picker` | `<C-n>` / `<C-p>` | `picker.next` / `picker.prev` | completion menu |
 | `picker` | `<CR>` / `<Esc>` | `picker.accept` / `picker.cancel` | |
 | `command_line` | `<CR>` / `<Esc>` / `<Tab>` | `command_line.execute` / `command_line.cancel` / `command_line.complete` | same |
+| `message_view` | `q` / `<Esc>` | `view.close` | close window |
 
 `<Esc>` in the composer's insert mode is not bound: edtui switches to its
 normal mode and the draft is kept.
@@ -553,7 +623,8 @@ endpoint, and phase 0 checks whether the target homeservers support it.
   narrows it. Whitespace or `completion.cancel` closes it.
 - Accepting a candidate replaces `@<typed text>` with `@<display name>` and a
   space. If another member of the room has the same display name, it inserts
-  `@<user ID>` instead, so every inserted text names exactly one user.
+  the user ID (`@alice:example.org`) instead, so every inserted text names
+  exactly one user.
 - The inserted text stays plain text in the editor. Deleting or changing it
   removes the mention: only texts still present when sending become mentions.
 
@@ -565,16 +636,18 @@ endpoint, and phase 0 checks whether the target homeservers support it.
 - `:upload <path>` sends the file as an image or a file message, using the
   MIME type guessed from the file.
 - Image previews use ratatui-image, which detects the terminal's graphics
-  protocol (sixel, kitty, iTerm2) and falls back to half blocks. The preview
-  pane shows the server thumbnail of the selected image message. Previews are
-  not drawn inline in the scrolling timeline. `ui.image_preview = "off"`
-  disables the pane.
+  protocol (sixel, kitty, iTerm2) and falls back to half blocks. They appear
+  only in the message view (`message.view`), which keeps the timeline's width
+  fixed. The image comes from the thumbnail source when the event has one and
+  from the full file otherwise, up to 10 MB, scaled down locally.
+  `ui.image_preview = "off"` shows only the file name and size in the view.
 
-### Clipboard
+### Clipboard and terminal focus
 
 `message.yank` and edtui copies use OSC 52. Inside tmux, OSC 52 reaches the
-outer terminal only with `set -g set-clipboard on`. The user documentation
-says so.
+outer terminal only with `set -g set-clipboard on`, and focus events reach mxt
+only with `set -g focus-events on`. Without focus events, mxt treats the
+terminal as always focused. The user documentation says so.
 
 ## Configuration
 
@@ -595,7 +668,7 @@ leader = "<Space>"
 timeoutlen = 1000                                 # milliseconds
 room_list = { visible = true, sort = "recent" }  # sort: "recent" | "name"
 time_format = "%H:%M"                             # strftime, in the local time zone
-image_preview = "auto"                            # "auto" | "off"
+image_preview = "auto"                            # "auto" | "off" (message view)
 read_receipts = "public"                          # "public" | "private"
 
 [files]
@@ -620,9 +693,8 @@ Settings:
   see. `"private"` sends `m.read.private`, which only the user's own devices
   see.
 - `ui.time_format` is applied in the local time zone (jiff, in `mxt-tui`).
-- `files.download_dir` defaults to `$XDG_DOWNLOAD_DIR` when set and to
-  `~/Downloads` otherwise. A leading `~` is expanded when the configuration
-  is loaded.
+- `files.download_dir` defaults to `~/Downloads`. A leading `~` is expanded
+  when the configuration is loaded.
 - `files.opener` is a command and its arguments. It defaults to `["xdg-open"]`
   on Linux and `["open"]` on macOS.
 
@@ -632,7 +704,9 @@ Settings:
 - A table names an action with arguments:
   `{ action = "room.open", filter = "unread", pick = "next" }`.
 - An array runs several actions in order against the state.
-- `"nop"` removes a binding, like nvim's `<Nop>`.
+- `"nop"` is a binding that does nothing, like nvim's `<Nop>`. It shadows
+  the same keys in fallback tables, which is how a default binding is
+  removed.
 
 ### Tables and resolution
 
@@ -643,14 +717,16 @@ Settings:
 | `composer.normal`, `composer.visual` | the composer has focus and edtui is in normal or visual mode | look in `normal`, then pass the key to edtui |
 | `composer.insert` | the composer has focus and edtui is in insert mode | pass the key to edtui |
 | `composer.completion` | the mention menu is open in insert mode | look in `composer.insert`, then pass the key to edtui |
+| `message_view` | the message view is open and its editor is in normal or visual mode | pass the key to edtui |
 | `picker` | a picker is open | type it into the query |
 | `command_line` | the command line is open | type it into the command line |
 | `normal` | fallback for the tables above that name it | ignore the key |
 
 `normal` holds only bindings that make sense everywhere outside text input.
 Movement keys are in `room_list` and `timeline`, so they reach edtui in the
-composer. The user's tables are merged over the defaults key by key. Movement
-actions accept a count prefix (`5j`).
+composer. The user's tables are merged over the defaults key by key, and the
+resolver merges each fallback chain into one effective map (see "Keymap
+resolver"). Movement actions accept a count prefix (`5j`).
 
 ### Action registry
 
@@ -660,10 +736,11 @@ Actions are named `<target>.<verb>`. The first release has:
   `room.unmute`
 - messages: `message.reply`, `message.edit`, `message.delete`,
   `message.yank`, `message.react`, `message.open`, `message.goto_reply`,
-  `message.resend`
-- composer: `composer.focus`, `composer.send`, `composer.newline`,
-  `composer.cancel`, `composer.external_editor`, `completion.next`,
-  `completion.prev`, `completion.accept`, `completion.cancel`
+  `message.resend`, `message.view`
+- composer: `composer.focus` (`mode = "insert" | "keep"`, default
+  `"insert"`), `composer.send`, `composer.newline`, `composer.cancel`,
+  `composer.external_editor`, `completion.next`, `completion.prev`,
+  `completion.accept`, `completion.cancel`
 - pickers: `picker.rooms`, `picker.next`, `picker.prev`, `picker.accept`,
   `picker.cancel`
 - command line: `command_line.open`, `command_line.execute`,
@@ -671,8 +748,8 @@ Actions are named `<target>.<verb>`. The first release has:
 - movement and search: `cursor.down`, `cursor.up`, `cursor.first`,
   `cursor.last`, `cursor.half_page_down`, `cursor.half_page_up`,
   `search.start`, `search.next`, `search.prev`
-- other: `sidebar.toggle`, `focus.room_list`, `focus.timeline`, `file.upload`,
-  `account.recover`, `app.quit`, `nop`
+- other: `view.close`, `sidebar.toggle`, `focus.room_list`, `focus.timeline`,
+  `file.upload`, `account.recover`, `app.quit`, `nop`
 
 Each action declares typed arguments. `room.open` takes a `RoomTarget`:
 
@@ -726,8 +803,9 @@ platforms.
   the latest message, so the log is the place to look for earlier ones.
 - Sync state (synced, offline, retrying) is shown in the status line. When the
   sync service stops with an error, mxt restarts it with backoff.
-- Events that cannot be decrypted yet show a placeholder. The `Timeline`
-  retries decryption when keys arrive.
+- Events that cannot be decrypted yet show a placeholder. With
+  `AfterDecryptionFailure` the SDK asks the key backup for the missing key,
+  and the `Timeline` retries decryption when a key arrives.
 - Failed sends keep the local echo with a failed marker. `message.resend` sends
   it again.
 - Redaction asks for confirmation in `CONFIRM` mode because it cannot be
@@ -746,16 +824,20 @@ platforms.
 - `mxt-core` carries most tests, as plain unit tests:
   - state transitions in `update`, including drafts kept per room,
     `composer.cancel`, and the empty-composer rule for `message.edit`
-  - key notation parsing, table resolution and fallbacks, pending sequences,
-    timeouts and released keys
+  - key notation parsing, merging a fallback chain into one effective map,
+    prefixes across tables, `nop` shadowing, pending sequences, timeouts and
+    released keys
   - `Action::from_spec` rejecting unknown actions, wrong arguments and
     `pick` together with `query`
-  - room filtering, ordering, `pick = next` wrapping around, and optimistic
-    clearing before a following action
-  - badge precedence and the network name order
+  - room filtering, ordering, `pick = next` wrapping around, optimistic
+    clearing before a following action, and the `room.mark_read` target
+  - badge precedence and the network name order, including direct messages
   - `OwnEvent` construction
-  - `render_mentions`: mentions whose text was deleted are dropped, Markdown
-    in display names is escaped, and only the remaining user IDs are returned
+  - `render_mentions`: the plain body is unchanged, mentions whose text was
+    deleted are dropped, mentions inside inline code and code blocks are not
+    linked, Markdown in display names is escaped, and only the remaining user
+    IDs are returned
+  - rebuilding `MentionRef`s when editing a message
   - mention candidate ranking and the rule for duplicate display names
 - `mxt-matrix`: tests for converting SDK values into domain types and for HTML
   rendering, with constructed inputs. The SDK is not mocked. The rest is
@@ -813,11 +895,11 @@ Prebuilt binaries on GitHub Releases are out of scope for the first release.
 
 | Phase | Work | Exit criteria |
 |---|---|---|
-| 0. Spike | The flake's development shell. A throwaway binary that logs in, recovers, runs `SyncService` and `RoomListService` plus the bridge state connection, prints the room list with unread counts and network names and the latest message of a bridged room, and sends a message that mentions a user with a `matrix.to` link and `m.mentions`. A small edtui program for checking CJK text and input method input. The spike is deleted afterwards and its findings are added to this document. | Decisions recorded: (1) sliding sync or classic sync for the target homeservers; (2) the bridge state connection stores `m.bridge`, and the network name order yields names for bridged channels and DMs; (3) after a long offline period, a muted room's `messages` count is not zero and is close to the real number of unread messages; (4) whether `/notifications` is supported; (5) edtui handles CJK width and input method input correctly, or the composer choice is revisited; (6) the bridge turns the mention into a mention that notifies the user on the remote network. |
+| 0. Spike | The flake's development shell. A throwaway binary that logs in, recovers, runs `SyncService` and `RoomListService`, fetches bridge state with the one-off MSC4186 request, prints the room list with unread counts and network names and the latest message of a bridged room, and sends a message that mentions a user. A small edtui program for checking CJK text and input method input. The spike is deleted afterwards and its findings are added to this document. | Decisions recorded: (1) sliding sync or classic sync for the target homeservers; (2) the one-off request returns `m.bridge`, and the network name order yields names for bridged channels and DMs; (3) after a long offline period, a muted room's `messages` count is not zero and is close to the real number of unread messages; (4) whether `/notifications` is supported; (5) edtui handles CJK width and input method input correctly, or the composer choice is revisited; (6) the bridge turns the mention into a mention that notifies the user on the remote network; (7) with `AfterDecryptionFailure`, messages of a bridged room from before this device logged in decrypt. |
 | 1. Skeleton | Workspace and crates, the flake package and checks, CI, the prek configuration, core domain (room summaries, filters, ordering, keymap and resolver, actions, `update`), startup (configuration, lock, login, session restore, recovery), sync, the room list pane and the status line | The room list with network names and unread badges can be browsed, keymap overrides from the configuration work, and CI passes |
-| 2. Timeline | `Timeline` subscription, HTML rendering, replies, edits and reactions shown, date dividers and the read marker, back pagination, read receipts | Rooms can be read day to day |
+| 2. Timeline | `Timeline` subscription, HTML rendering, replies, edits and reactions shown, date dividers and the read marker, back pagination, read receipts, the message view for text | Rooms can be read day to day, including messages taller than the pane |
 | 3. Sending | The edtui composers, sending Markdown, mention completion, replying, editing, deleting, toggling reactions with the emoji picker, the external editor | Messages can be written day to day, and mentions notify people on the remote network |
-| 4. Rest of the first release | Fuzzy room picker, mentions filter, mute and unmute, file download, open and upload, the image preview pane | Everything in "Scope of the first release" works |
+| 4. Rest of the first release | Fuzzy room picker, mentions filter, mute and unmute, file download, open and upload, images in the message view | Everything in "Scope of the first release" works |
 
 ## Risks and open questions
 
@@ -825,10 +907,11 @@ Prebuilt binaries on GitHub Releases are out of scope for the first release.
   `org.matrix.simplified_msc3575` and still behave differently from what
   `matrix-sdk-ui` expects. Phase 0 tests this before either sync path is
   built.
-- **The bridge state connection.** A second sliding sync connection costs one
-  more long poll. Phase 0 checks that its state reaches the store. If it does
-  not, network names come from parent spaces only (steps 3 and 4 of the
-  order).
+- **Bridge state requests.** mxt sends its own MSC4186 requests and parses
+  the returned state itself, outside the SDK. A homeserver could answer such
+  one-off requests differently from long-lived connections. Phase 0 checks
+  it. If the requests do not return `m.bridge`, network names come from
+  parent spaces only (steps 3 and 4 of the order).
 - **Client-side unread counts.** The SDK counts unread messages from the
   events it has loaded since the user's read receipt. After a gap (a long
   offline period, or the small timeline limit of the room list), it paginates
@@ -861,10 +944,10 @@ dependencies with notable licenses:
 | Component | License |
 |---|---|
 | matrix-rust-sdk (`matrix-sdk`, `matrix-sdk-ui`), vodozemac | Apache-2.0 |
-| ratatui, ratatui-image, edtui, ruma-html | MIT |
+| ratatui, ratatui-image, edtui, ruma (`ruma::html`), pulldown-cmark | MIT |
 | `nucleo-matcher` | MPL-2.0 |
 | `emojis` | (MIT OR Apache-2.0) AND Unicode-3.0 |
 | jiff | Unlicense OR MIT |
-| unicode-segmentation | MIT OR Apache-2.0 |
+| image, unicode-segmentation | MIT OR Apache-2.0 |
 
 All of them can be used from an MIT-licensed program.
