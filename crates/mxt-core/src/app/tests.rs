@@ -340,3 +340,104 @@ fn editor_contexts_release_keys_to_the_editor() {
     );
     assert_eq!(app.mode_label(Some(EditorMode::Insert)), "INSERT");
 }
+
+fn line(app: &App) -> Option<(LineKind, &str)> {
+    app.command_line().map(|l| (l.kind, l.text.as_str()))
+}
+
+#[test]
+fn command_line_runs_a_command() {
+    let mut app = app();
+    keys(&mut app, ":open b");
+    assert_eq!(line(&app), Some((LineKind::Command, "open b")));
+    assert_eq!(app.mode_label(None), "COMMAND");
+    let fx = keys(&mut app, "<CR>");
+    assert_eq!(
+        fx,
+        vec![Effect::Matrix(MatrixEffect::SubscribeTimeline(id(
+            "!b:example.org"
+        )))]
+    );
+    assert_eq!(line(&app), None);
+}
+
+#[test]
+fn command_line_keys_do_not_trigger_bindings() {
+    let mut app = app();
+    keys(&mut app, ":jjgg");
+    assert_eq!(line(&app), Some((LineKind::Command, "jjgg")));
+    assert_eq!(cursor_id(&app), "!c:example.org");
+}
+
+#[test]
+fn command_line_editing() {
+    let mut app = app();
+    keys(&mut app, ":open foo bar<C-w>");
+    assert_eq!(line(&app), Some((LineKind::Command, "open foo ")));
+    keys(&mut app, "<C-u>");
+    assert_eq!(line(&app), Some((LineKind::Command, "")));
+    keys(&mut app, "a<BS>");
+    assert_eq!(line(&app), Some((LineKind::Command, "")));
+    keys(&mut app, "<BS>");
+    assert_eq!(line(&app), None);
+}
+
+#[test]
+fn command_errors_go_to_the_status_line() {
+    let mut app = app();
+    keys(&mut app, ":quit<CR>");
+    assert_eq!(app.status().unwrap().kind, StatusKind::Error);
+    // `:q` quits.
+    assert_eq!(keys(&mut app, ":q<CR>"), vec![Effect::Ui(UiEffect::Quit)]);
+}
+
+#[test]
+fn escape_cancels_the_command_line() {
+    let mut app = app();
+    keys(&mut app, ":open b<Esc>");
+    assert_eq!(line(&app), None);
+    assert_eq!(app.open_room(), None);
+}
+
+#[test]
+fn completes_command_names_and_cycles_back() {
+    let mut app = app();
+    keys(&mut app, ":u");
+    keys(&mut app, "<Tab>");
+    assert_eq!(line(&app), Some((LineKind::Command, "unmute")));
+    keys(&mut app, "<Tab>");
+    assert_eq!(line(&app), Some((LineKind::Command, "upload ")));
+    keys(&mut app, "<Tab>");
+    assert_eq!(line(&app), Some((LineKind::Command, "u")));
+}
+
+#[test]
+fn completes_room_names_for_open() {
+    let mut app = app();
+    keys(&mut app, ":open c<Tab>");
+    assert_eq!(line(&app), Some((LineKind::Command, "open c:example.org")));
+}
+
+#[test]
+fn search_moves_the_cursor_and_repeats() {
+    let mut app = app();
+    keys(&mut app, "/A:<CR>");
+    assert_eq!(cursor_id(&app), "!a:example.org");
+    keys(&mut app, "n");
+    assert_eq!(cursor_id(&app), "!a:example.org"); // only match: wraps onto itself
+    keys(&mut app, "/example<CR>");
+    assert_eq!(cursor_id(&app), "!c:example.org"); // after !a, wrapping
+    keys(&mut app, "n");
+    assert_eq!(cursor_id(&app), "!b:example.org");
+    keys(&mut app, "N");
+    assert_eq!(cursor_id(&app), "!c:example.org");
+}
+
+#[test]
+fn search_failures() {
+    let mut app = app();
+    keys(&mut app, "n");
+    assert_eq!(app.status().unwrap().text, "No previous search");
+    keys(&mut app, "/zzz<CR>");
+    assert_eq!(app.status().unwrap().text, "Pattern not found: zzz");
+}

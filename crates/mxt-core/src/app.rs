@@ -1,7 +1,9 @@
 //! The application state and `update`: keys and adapter messages in, effects
 //! out, without I/O.
 
+mod command_line;
 mod rooms;
+mod search;
 #[cfg(test)]
 mod tests;
 
@@ -15,7 +17,11 @@ use crate::resolver::{Resolved, Resolver, TimerId};
 use crate::rooms::RoomList;
 use crate::settings::Settings;
 
+pub use command_line::{CommandLine, LineKind};
+
+use command_line::OpenLine;
 use rooms::Motion;
+use search::Direction;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
@@ -53,9 +59,9 @@ pub struct App {
     /// started.
     key_context: InputContext,
     rooms: RoomList,
-    /// The room list cursor, once a cursor action or opening a room placed
-    /// it. Until then, and while the list is empty, it is `None` and the
-    /// cursor is on the first room, whichever room that is, so rooms that
+    /// The room list cursor, once a cursor action, a search or opening a room
+    /// placed it. Until then, and while the list is empty, it is `None` and
+    /// the cursor is on the first room, whichever room that is, so rooms that
     /// arrive in any order at startup leave it at the top.
     room_cursor: Option<usize>,
     open_room: Option<RoomId>,
@@ -66,6 +72,9 @@ pub struct App {
     status: Option<StatusMessage>,
     room_list_viewport: Option<Viewport>,
     timeline_viewport: Option<Viewport>,
+    command_line: Option<OpenLine>,
+    /// The pattern `search.next` and `search.prev` repeat.
+    last_search: Option<String>,
 }
 
 impl App {
@@ -89,6 +98,8 @@ impl App {
             status: None,
             room_list_viewport: None,
             timeline_viewport: None,
+            command_line: None,
+            last_search: None,
             settings,
         }
     }
@@ -159,9 +170,12 @@ impl App {
         self.resolver.count()
     }
 
-    /// "NORMAL", or for the composer's editor "INSERT", "NORMAL", "VISUAL"
-    /// or "SEARCH".
+    /// "COMMAND" while a command or search line is open, "NORMAL", or for
+    /// the composer's editor "INSERT", "NORMAL", "VISUAL" or "SEARCH".
     pub fn mode_label(&self, editor: Option<EditorMode>) -> &'static str {
+        if self.command_line.is_some() {
+            return "COMMAND";
+        }
         match (self.focus, editor) {
             (Focus::Composer, Some(EditorMode::Insert)) => "INSERT",
             (Focus::Composer, Some(EditorMode::Visual)) => "VISUAL",
@@ -180,6 +194,9 @@ impl App {
 
     /// Where `key` goes (design, "Tables and resolution").
     fn input_context(&self, editor: Option<EditorMode>) -> InputContext {
+        if self.command_line.is_some() {
+            return InputContext::CommandLine;
+        }
         match self.focus {
             Focus::RoomList => InputContext::RoomList,
             Focus::Timeline => InputContext::Timeline,
@@ -251,9 +268,12 @@ impl App {
                     effects.push(Effect::Ui(UiEffect::ReplayKeys(keys)));
                 }
             }
-            // No text input is owned by the core yet: no picker or command line
-            // is ever open, so this context is never entered.
-            KeySink::Text => {}
+            // The command line; the picker query arrives with the picker.
+            KeySink::Text => {
+                for key in keys {
+                    self.type_into_line(key);
+                }
+            }
         }
     }
 
@@ -268,6 +288,13 @@ impl App {
             Action::RoomOpen(target) => self.open_target(target, effects),
             Action::RoomOpenSelected => self.open_selected(effects),
             Action::RoomMarkRead => self.mark_read(effects),
+            Action::CommandLineOpen => self.open_line(LineKind::Command),
+            Action::CommandLineExecute => self.execute_line(effects),
+            Action::CommandLineCancel => self.cancel_line(),
+            Action::CommandLineComplete => self.complete_line(),
+            Action::SearchStart => self.start_search(),
+            Action::SearchNext => self.search_again(Direction::Forward),
+            Action::SearchPrev => self.search_again(Direction::Backward),
             Action::SidebarToggle => {
                 self.sidebar_visible = !self.sidebar_visible;
                 if !self.sidebar_visible && self.focus == Focus::RoomList {
