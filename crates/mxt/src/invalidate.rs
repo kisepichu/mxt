@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::paths::{Paths, with_path};
+use crate::paths::{Paths, create_private_dir, with_path};
 
 /// `M_UNKNOWN_TOKEN`: renames the data directory to
 /// `<parent>/mxt.invalid-<unix seconds>` and deletes the cache directory.
@@ -18,33 +18,47 @@ pub fn invalidate(paths: &Paths, unix_seconds: u64) -> io::Result<PathBuf> {
         .data
         .with_file_name(format!("mxt.invalid-{unix_seconds}"));
     rename(&paths.data, &moved)?;
-    match fs::remove_dir_all(&paths.cache) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => {
-            Err(with_path(error, &paths.cache))
-        }
-        _ => Ok(moved),
-    }
+    delete_dir(&paths.cache)?;
+    Ok(moved)
 }
 
-/// Moves a store without a session file (left by a device whose session was
-/// lost) to `data/store.invalid-<unix seconds>`, so a new login never reuses
-/// another device's crypto store. No-op when there is no store.
+/// Without a session file, the stores belong to a device whose session was
+/// lost, or to another account: moves the state and crypto store to
+/// `data/store.invalid-<unix seconds>`, so a new login never reuses another
+/// device's crypto store, and empties the cache directory (left with mode
+/// 0700), so the new device never shows the old one's decrypted events and
+/// media. Returns the moved store, `None` when there was none. No-op while
+/// the session file exists.
 #[allow(dead_code)] // Used by `main` once the startup flow is wired.
 pub fn set_aside_orphaned_store(paths: &Paths, unix_seconds: u64) -> io::Result<Option<PathBuf>> {
-    let store = paths.store_dir();
     let session_file = paths.session_file();
     let session_exists = session_file
         .try_exists()
         .map_err(|error| with_path(error, &session_file))?;
+    if session_exists {
+        return Ok(None);
+    }
+    // Recreated here: the SDK would create it with the default mode.
+    delete_dir(&paths.cache)?;
+    create_private_dir(&paths.cache)?;
+    let store = paths.store_dir();
     let store_exists = store
         .try_exists()
         .map_err(|error| with_path(error, &store))?;
-    if session_exists || !store_exists {
+    if !store_exists {
         return Ok(None);
     }
     let moved = paths.data.join(format!("store.invalid-{unix_seconds}"));
     rename(&store, &moved)?;
     Ok(Some(moved))
+}
+
+/// `fs::remove_dir_all`; a missing directory is fine.
+fn delete_dir(dir: &Path) -> io::Result<()> {
+    match fs::remove_dir_all(dir) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(with_path(error, dir)),
+        _ => Ok(()),
+    }
 }
 
 fn rename(from: &Path, to: &Path) -> io::Result<()> {
@@ -58,7 +72,10 @@ fn rename(from: &Path, to: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{
+        fs::{self, Permissions},
+        os::unix::fs::PermissionsExt as _,
+    };
 
     use super::*;
     use crate::test_dir::TestDir;
@@ -89,12 +106,21 @@ mod tests {
         assert!(paths.state.exists());
     }
 
+    /// Empty, and private even if it was not before.
+    fn assert_empty_and_private(dir: &Path) {
+        assert_eq!(fs::read_dir(dir).unwrap().count(), 0, "{}", dir.display());
+        let mode = fs::metadata(dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "{}", dir.display());
+    }
+
     #[test]
-    fn an_orphaned_store_is_set_aside() {
+    fn an_orphaned_store_is_set_aside_and_the_cache_emptied() {
         let root = TestDir::new("orphaned-store");
         let paths = paths_in(&root);
         fs::create_dir(paths.store_dir()).unwrap();
         fs::write(paths.store_dir().join("crypto"), "").unwrap();
+        fs::write(paths.cache.join("event-cache"), "").unwrap();
+        fs::set_permissions(&paths.cache, Permissions::from_mode(0o755)).unwrap();
 
         let moved = set_aside_orphaned_store(&paths, 1_700_000_000).unwrap();
 
@@ -102,30 +128,35 @@ mod tests {
         assert_eq!(moved.as_ref(), Some(&expected));
         assert!(expected.join("crypto").is_file());
         assert!(!paths.store_dir().exists());
+        assert_empty_and_private(&paths.cache);
     }
 
     #[test]
-    fn a_store_with_a_session_file_stays() {
+    fn a_store_and_cache_with_a_session_file_stay() {
         let root = TestDir::new("store-with-session");
         let paths = paths_in(&root);
         fs::create_dir(paths.store_dir()).unwrap();
         fs::write(paths.session_file(), "{}").unwrap();
+        fs::write(paths.cache.join("event-cache"), "").unwrap();
 
         assert_eq!(
             set_aside_orphaned_store(&paths, 1_700_000_000).unwrap(),
             None
         );
         assert!(paths.store_dir().exists());
+        assert!(paths.cache.join("event-cache").exists());
     }
 
     #[test]
-    fn no_store_is_a_no_op() {
+    fn without_a_store_the_cache_is_still_emptied() {
         let root = TestDir::new("no-store");
         let paths = paths_in(&root);
+        fs::write(paths.cache.join("event-cache"), "").unwrap();
 
         assert_eq!(
             set_aside_orphaned_store(&paths, 1_700_000_000).unwrap(),
             None
         );
+        assert_empty_and_private(&paths.cache);
     }
 }

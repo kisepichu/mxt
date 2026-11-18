@@ -69,17 +69,26 @@ impl Paths {
         }
     }
 
-    /// Creates the three directories with mode 0700, and tightens an existing
-    /// data directory to 0700. Errors name the directory.
+    /// Creates the three directories with mode 0700, and tightens existing
+    /// ones to 0700: the cache holds decrypted events and media in SQLite
+    /// files without a passphrase. Errors name the directory.
     pub fn create_dirs(&self) -> io::Result<()> {
-        let mut builder = DirBuilder::new();
-        builder.recursive(true).mode(0o700);
         for dir in [&self.data, &self.cache, &self.state] {
-            builder.create(dir).map_err(|error| with_path(error, dir))?;
+            create_private_dir(dir)?;
         }
-        fs::set_permissions(&self.data, Permissions::from_mode(0o700))
-            .map_err(|error| with_path(error, &self.data))
+        Ok(())
     }
+}
+
+/// Creates `dir` and its missing parents with mode 0700, and tightens `dir`
+/// to 0700 when it exists already. Errors name the directory.
+pub fn create_private_dir(dir: &Path) -> io::Result<()> {
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .and_then(|()| fs::set_permissions(dir, Permissions::from_mode(0o700)))
+        .map_err(|error| with_path(error, dir))
 }
 
 /// `error` with `path` in its message, for startup failures that are printed.
@@ -176,15 +185,17 @@ mod tests {
     }
 
     #[test]
-    fn create_dirs_makes_private_directories_and_tightens_the_data_directory() {
+    fn create_dirs_makes_private_directories_and_tightens_existing_ones() {
         let root = TestDir::new("paths-create-dirs");
         let paths = Paths {
             data: root.join("data/mxt"),
             cache: root.join("cache/mxt"),
             state: root.join("state/mxt"),
         };
-        fs::create_dir_all(&paths.data).unwrap();
-        fs::set_permissions(&paths.data, Permissions::from_mode(0o755)).unwrap();
+        for existing in [&paths.data, &paths.cache] {
+            fs::create_dir_all(existing).unwrap();
+            fs::set_permissions(existing, Permissions::from_mode(0o755)).unwrap();
+        }
 
         paths.create_dirs().unwrap();
 
