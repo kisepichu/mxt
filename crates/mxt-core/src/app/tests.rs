@@ -8,6 +8,8 @@ use crate::msg::{EditorMode, Msg, Pane};
 use crate::room::{NotificationMode, RoomKind, RoomName, RoomSummary, UnreadCounts};
 use crate::settings::Settings;
 
+mod timeline;
+
 fn space() -> KeySeq {
     KeySeq::parse("<Space>", &KeySeq::default()).unwrap()
 }
@@ -344,7 +346,7 @@ fn timeout_drops_a_pending_prefix_in_the_room_list() {
 #[test]
 fn a_key_that_ends_a_binding_which_changes_the_context_goes_to_the_new_context() {
     // `g` is also a prefix of `gg`, so `j` ends it and `g` runs first.
-    let open = Binding::new(vec![Action::MessageView, Action::CommandLineOpen]).unwrap();
+    let open = Binding::new(vec![Action::MessageReply, Action::CommandLineOpen]).unwrap();
     let mut app = app_with(vec![(TableId::RoomList, seq("g"), open)]);
     keys(&mut app, "gj");
     assert_eq!(line(&app), Some((LineKind::Command, "j")));
@@ -352,7 +354,7 @@ fn a_key_that_ends_a_binding_which_changes_the_context_goes_to_the_new_context()
     // The status the binding set survives the key that ended it.
     assert_eq!(
         app.status().unwrap().text,
-        "message.view is not available yet"
+        "message.reply is not available yet"
     );
 }
 

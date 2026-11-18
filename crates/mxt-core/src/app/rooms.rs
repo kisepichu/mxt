@@ -2,23 +2,12 @@
 
 use std::cmp::Ordering;
 
-use super::{App, Focus, StatusKind};
+use super::{App, Focus, Motion, StatusKind};
 use crate::effect::{Effect, MatrixEffect};
 use crate::ids::RoomId;
 use crate::msg::Pane;
 use crate::room::RoomSummary;
 use crate::rooms::{RoomTarget, resolve_room};
-
-/// A cursor movement of `cursor.*`, with its count.
-pub(super) enum Motion {
-    Down(u32),
-    Up(u32),
-    /// Half pages of the pane's last viewport.
-    HalfPageDown(u32),
-    HalfPageUp(u32),
-    First,
-    Last,
-}
 
 impl App {
     /// The cursor stays on its room when the order changes.
@@ -41,17 +30,13 @@ impl App {
             };
         }
         if let Some(open) = self.open_room.take_if(|open| *open == id) {
+            self.reset_timeline(effects);
             effects.push(Effect::Matrix(MatrixEffect::UnsubscribeTimeline(open)));
         }
     }
 
-    /// Moves the cursor of the focused pane, clamped, without wrapping.
-    pub(super) fn move_cursor(&mut self, motion: Motion) {
-        // The timeline has no items until phase 2, and the composer has no
-        // cursor of the core.
-        if self.focus != Focus::RoomList {
-            return;
-        }
+    /// Moves the room list cursor, clamped, without wrapping.
+    pub(super) fn move_room_cursor(&mut self, motion: Motion) {
         let (Some(cursor), Some(last)) = (self.room_cursor(), self.rooms.len().checked_sub(1))
         else {
             return;
@@ -67,14 +52,6 @@ impl App {
             Motion::Last => last,
         };
         self.room_cursor = Some(target.min(last));
-    }
-
-    /// Half of the items the pane showed in its last viewport, at least one.
-    fn half_page(&self, pane: Pane) -> usize {
-        let visible = self.viewport(pane).map_or(1, |viewport| {
-            viewport.last.saturating_sub(viewport.first) + 1
-        });
-        (visible / 2).max(1)
     }
 
     pub(super) fn open_selected(&mut self, effects: &mut Vec<Effect>) {
@@ -93,8 +70,8 @@ impl App {
     }
 
     /// Opens the room at `index` of the room list: unsubscribes the previous
-    /// room, subscribes the new one and moves the cursor to it. An open room
-    /// only gets the focus.
+    /// room, subscribes the new one with a new timeline, and moves the cursor
+    /// to it. An open room only gets the focus.
     fn open_at(&mut self, index: usize, effects: &mut Vec<Effect>) {
         let id = &self.rooms.rooms()[index].id;
         if self.open_room.as_ref() != Some(id) {
@@ -102,6 +79,7 @@ impl App {
             if let Some(previous) = self.open_room.replace(id.clone()) {
                 effects.push(Effect::Matrix(MatrixEffect::UnsubscribeTimeline(previous)));
             }
+            self.reset_timeline(effects);
             effects.push(Effect::Matrix(MatrixEffect::SubscribeTimeline(id)));
             self.room_cursor = Some(index);
         }

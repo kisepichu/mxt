@@ -133,7 +133,7 @@ impl App {
                 Ok(None) => {}
                 Err(error) => self.set_status(StatusKind::Error, error.to_string()),
             },
-            LineKind::Search(pane) => self.search_line(pane, text),
+            LineKind::Search(pane) => self.search_line(pane, text, effects),
         }
     }
 
