@@ -27,13 +27,15 @@ pub enum Homeserver {
 /// The directories of the SDK's SQLite stores.
 #[derive(Debug, Clone)]
 pub struct StoreDirs {
-    /// The state and crypto stores.
-    pub data: PathBuf,
+    /// The state and crypto stores: a directory of their own, not the data
+    /// directory itself, so the store can be set aside without the session
+    /// file.
+    pub store: PathBuf,
     /// The event cache and media cache.
     pub cache: PathBuf,
 }
 
-/// SQLite state and crypto stores in `dirs.data` without a passphrase, the
+/// SQLite state and crypto stores in `dirs.store` without a passphrase, the
 /// event cache and media cache in `dirs.cache`. Room keys are fetched from the
 /// key backup when an event fails to decrypt; backups and cross-signing are
 /// never created. Simplified sliding sync is required: for `Discover` and
@@ -55,7 +57,7 @@ pub async fn build_client(homeserver: &Homeserver, dirs: &StoreDirs) -> Result<C
         ),
     };
     let client = builder
-        .sqlite_store_with_cache_path(&dirs.data, &dirs.cache, None)
+        .sqlite_store_with_cache_path(&dirs.store, &dirs.cache, None)
         .with_encryption_settings(EncryptionSettings {
             auto_enable_cross_signing: false,
             backup_download_strategy: BackupDownloadStrategy::AfterDecryptionFailure,

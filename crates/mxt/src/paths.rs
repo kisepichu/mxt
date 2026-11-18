@@ -7,10 +7,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use mxt_matrix::StoreDirs;
+
 /// `$XDG_DATA_HOME/mxt`, `$XDG_CACHE_HOME/mxt` and `$XDG_STATE_HOME/mxt`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
-    /// The session file, the lock file and the SDK's state and crypto stores.
+    /// The session file, the lock file and `store_dir` (the SDK's state and
+    /// crypto stores).
     pub data: PathBuf,
     /// The SDK's event cache and media cache.
     pub cache: PathBuf,
@@ -55,6 +58,15 @@ impl Paths {
 
     pub fn store_dir(&self) -> PathBuf {
         self.data.join("store")
+    }
+
+    /// The SDK's stores: state and crypto in `store_dir`, where
+    /// `set_aside_orphaned_store` looks for them, never in `data` itself.
+    pub fn store_dirs(&self) -> StoreDirs {
+        StoreDirs {
+            store: self.store_dir(),
+            cache: self.cache.clone(),
+        }
     }
 
     /// Creates the three directories with mode 0700, and tightens an existing
