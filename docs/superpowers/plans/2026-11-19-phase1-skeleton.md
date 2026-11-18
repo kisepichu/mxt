@@ -2853,3 +2853,150 @@ ignore = [
 git add Cargo.toml Cargo.lock deny.toml crates/mxt-matrix crates/mxt
 git commit -m "Add the startup building blocks: the SDK client with the design's store and encryption settings, session files, recovery, paths, the data directory lock and logging"
 ```
+
+---
+
+### Task 11: Sync and the room list in the matrix adapter
+
+Starts after Task 10 has merged. It assumes phase 0 question (1) is answered
+with simplified sliding sync: the homeserver advertises
+`org.matrix.simplified_msc3575`, and `RoomListService` needs it. If the
+phase 0 run shows otherwise, this task is rewritten for classic sync before
+it starts.
+
+**Files:**
+- Create: `crates/mxt-matrix/src/adapter.rs` (the `Matrix` handle, effect
+  execution, sync state), `crates/mxt-matrix/src/rooms.rs` (room list stream,
+  facts, summaries), `crates/mxt-matrix/src/bridges.rs` (one-off MSC4186
+  requests and `m.bridge` parsing)
+- Modify: `crates/mxt-matrix/src/lib.rs`, `crates/mxt-matrix/Cargo.toml`
+
+**Interfaces:**
+- Consumes: `RoomSummary`, `RoomName`, `RoomKind`, `UnreadCounts`,
+  `NotificationMode`, `BridgeInfo`, `network_name`, `Timestamp`, `RoomId`,
+  `Msg`, `SyncState`, `MatrixEffect`, `ReceiptKind` (core), `Client` and
+  `Error` (Task 10).
+- Produces:
+
+```rust
+/// Builds the sync service (matrix-sdk-ui `SyncService` with offline mode),
+/// so startup can start it before the UI (the first login waits for the
+/// device keys while it runs).
+pub async fn build_sync_service(client: &Client) -> Result<Arc<SyncService>, Error>;
+
+pub struct Matrix { /* effect channel, task handles */ }
+impl Matrix {
+    /// Starts the sync service if it is not running, and the tasks that turn
+    /// the room list, room info updates, notification settings changes and
+    /// bridge state into `Msg::RoomUpserted` / `Msg::RoomRemoved`, and the
+    /// sync service state into `Msg::SyncState`.
+    pub async fn start(client: Client, sync: Arc<SyncService>, receipts: ReceiptKind, to_core: UnboundedSender<Msg>) -> Result<Matrix, Error>;
+    /// Runs the effect in the background. Failures arrive as `Msg::EffectFailed`.
+    pub fn execute(&self, effect: MatrixEffect);
+    /// Stops the tasks and the sync service.
+    pub async fn stop(self);
+}
+
+// rooms.rs: the pure part, unit-tested with constructed values
+pub(crate) struct RoomFacts {
+    pub id: RoomId,
+    pub display_name: String,
+    pub is_direct: bool,
+    /// Display name of the other member when the room has exactly one direct target.
+    pub dm_partner_name: Option<String>,
+    pub unread: UnreadCounts,
+    pub mode: NotificationMode,
+    pub latest: Option<Timestamp>,
+    pub bridge: Option<BridgeInfo>,
+    pub canonical_parent_name: Option<String>,
+    /// One entry per joined parent space, `""` for unnamed ones.
+    pub joined_parent_names: Vec<String>,
+}
+pub(crate) fn summary(facts: &RoomFacts) -> RoomSummary;
+
+// bridges.rs
+/// `content.network.displayname` and `content.protocol.displayname` of an
+/// `m.bridge` or `uk.half-shot.bridge` state event's content.
+pub(crate) fn parse_bridge(content: &serde_json::Value) -> BridgeInfo;
+```
+
+**Behavior:**
+- Room set: `room_list_service.all_rooms()` and
+  `entries_with_dynamic_adapters(page_size)` with a page size large enough
+  for every room (and `add_one_page` until `maximum_number_of_rooms` is
+  covered, if the SDK pages), filtered with
+  `new_filter_all([new_filter_joined(), new_filter_not(new_filter_space()),
+  new_filter_deduplicate_versions()])`. Keep a mirror of the room IDs by
+  applying each `VectorDiff` batch. After a batch: rooms that left the mirror
+  become `Msg::RoomRemoved`; rooms the batch inserted, set or reset become
+  `Msg::RoomUpserted` with a fresh summary. Room info changes reach the stream
+  as `Set` diffs (the SDK merges `room_info_notable_update_receiver` into it).
+- Facts per room (spike notes): `display_name()` (`RoomDisplayName`),
+  `is_direct()`, `direct_targets()` with `get_member_no_sync` for the partner
+  name, `num_unread_messages()`, `num_unread_notifications()`,
+  `num_unread_mentions()`, `is_marked_unread()`, the user-defined
+  notification mode (`notification_settings().get_user_defined_room_notification_mode`,
+  falling back to `get_default_room_notification_mode(is_encrypted,
+  is_one_to_one)`; `AllMessages` → `Default`, `MentionsAndKeywordsOnly` →
+  `MentionsAndKeywords`, `Mute` → `Mute`), `latest_event_timestamp()`,
+  the bridge info from the adapter's cache, and parent spaces from
+  `get_state_events_static::<SpaceParentEventContent>()` (the `canonical`
+  flag; names of joined spaces from `client.get_room(id)` with
+  `is_space()` and `display_name()`).
+- `summary`: `RoomName { network: network_name(bridge, canonical_parent,
+  joined_parents), room }`, where `room` is the partner's display name for a
+  direct message with one target and the room's display name otherwise;
+  `RoomKind::Direct` when `is_direct`.
+- Notification settings changes (`notification_settings().subscribe_to_changes()`)
+  recompute every room. A change to a space's name recomputes the rooms whose
+  parents include it.
+- Bridge state (design, "Matrix adapter"): after the room list is loaded,
+  one-off `sync_events::v5` requests with `Client::send` and `conn_id`
+  `mxt-bridges`: a list with `timeline_limit` 0 and `required_state`
+  `[("m.bridge", "*"), ("uk.half-shot.bridge", "*")]`, paged by 100 until the
+  list's `count` is covered, then `room_subscriptions` (batches of 100) for
+  joined rooms no page returned. Rooms that appear later are checked with
+  `room_subscriptions` once. Keep, per room, the parsed `BridgeInfo` or the
+  fact that it has none; recompute and upsert the rooms whose bridge info
+  arrived. The responses never reach the SDK's sync processing. Use the
+  paging mode that the phase 0 `rooms` run found to work (fresh requests
+  without `pos`, or `pos` chained); until that run exists, implement fresh
+  requests and fall back to chaining `pos` when a later page comes back
+  empty below `count`, as the spike does.
+- Sync state: `SyncService::state()`: `Running` → `Synced`, `Offline` →
+  `Offline`, `Error` → `Retrying`, then restart with backoff (1 s, doubling,
+  at most 60 s, reset after a successful `Running`); `Idle` before the first
+  start → `Starting`.
+- Effects:
+  - `MarkRoomRead(room)`: the room's latest event from the room list
+    (`room.latest_event()`, the `Remote` value's event ID); send
+    `send_multiple_receipts(Receipts::new().fully_read_marker(id)` plus
+    `public_read_receipt(id)` or `private_read_receipt(id)` per `receipts`),
+    then `set_unread_flag(false)` if the room is marked unread. Without a
+    remote latest event, only clear the flag.
+  - `SubscribeTimeline(room)`: `room_list_service.subscribe_to_rooms(&[room])`
+    (phase 2 adds the `Timeline`). `UnsubscribeTimeline`: nothing until phase 2.
+  - Failures: `Msg::EffectFailed { error }` with a short message (no event
+    contents), and a `warn` log line.
+- Logging: no message bodies; room IDs only at `debug`.
+
+**Tests** (unit, constructed values; the SDK is not mocked):
+- `summary`: a bridged Discord channel (`network` from the bridge), a Discord
+  DM with only `protocol` (`Discord / Alice` from the partner name), a DM
+  without a partner name (the display name), a room named through its
+  canonical parent space, a room with two joined parents and no bridge (no
+  network), counts and mode passed through.
+- `parse_bridge`: network and protocol display names; missing `network`;
+  missing `displayname`; non-object content.
+
+- [ ] **Step 1: Write the failing tests.**
+- [ ] **Step 2: Run them to see them fail** (under the shared lock).
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run the tests, fmt and clippy.** The adapter runs against a
+  homeserver only in Task 12's check.
+- [ ] **Step 5: Commit.**
+
+```bash
+git add crates/mxt-matrix Cargo.toml Cargo.lock
+git commit -m "Add the sync and room list adapter, so room summaries with network names and unread counts reach the core as messages"
+```
