@@ -210,6 +210,10 @@ impl KeySeq {
     /// prefixes (`C-`, `A-` or `M-`, `S-`, case-insensitive, in any order)
     /// followed by one character or a key name (case-insensitive), or it is
     /// `<leader>` without modifiers.
+    ///
+    /// `S-` on a character must leave an uppercase letter (`<S-a>` is `A`).
+    /// Otherwise [`Key::new`] would drop the shift, so `<S-1>` and `<C-S-c>`
+    /// are errors instead of silently meaning `1` and `<C-c>`.
     pub fn parse(text: &str, leader: &KeySeq) -> Result<KeySeq, KeyParseError> {
         if text.is_empty() {
             return Err(KeyParseError::Empty);
@@ -276,7 +280,19 @@ fn parse_group(
         _ => (close, named_key(&body[start..close])),
     };
     match code {
-        Some(code) => keys.push(Key::new(code, mods)),
+        Some(code) => {
+            let key = Key::new(code, mods);
+            if mods.shift
+                && let KeyCode::Char(c) = key.code()
+                && !c.is_uppercase()
+            {
+                return Err(KeyParseError::ShiftIgnored {
+                    name: body[..end].to_owned(),
+                    key,
+                });
+            }
+            keys.push(key);
+        }
         None if mods == Modifiers::default() && body[start..end].eq_ignore_ascii_case("leader") => {
             if leader.is_empty() {
                 return Err(KeyParseError::NoLeader);
@@ -320,6 +336,13 @@ pub enum KeyParseError {
     UnknownModifier {
         name: String,
     },
+    /// `S-` on a character that keeps no shift after normalization: `<S-1>`
+    /// is `1`, `<S-Space>` is `<Space>`, `<C-S-c>` is `<C-c>`. `name` is the
+    /// text inside `<...>`, `key` the key it would have been.
+    ShiftIgnored {
+        name: String,
+        key: Key,
+    },
     /// `<leader>` where no leader is available (inside the leader itself).
     NoLeader,
 }
@@ -335,6 +358,18 @@ impl fmt::Display for KeyParseError {
             KeyParseError::UnknownKey { name } => write!(f, "unknown key <{name}>"),
             KeyParseError::UnknownModifier { name } => write!(f, "unknown modifier \"{name}-\""),
             KeyParseError::NoLeader => f.write_str("<leader> cannot be used in the leader itself"),
+            KeyParseError::ShiftIgnored { name, key } => {
+                write!(f, "<{name}> is the same key as {key}")?;
+                match key.code() {
+                    KeyCode::Char(c) if key.mods().ctrl && shifted(c) != c => {
+                        f.write_str(": with ctrl, letters do not keep their case")
+                    }
+                    _ => f.write_str(
+                        ": shift is kept only as an uppercase letter; write the character \
+                         shift types instead, such as ! for shift+1",
+                    ),
+                }
+            }
         }
     }
 }
@@ -438,6 +473,15 @@ mod tests {
     #[test]
     fn shift_folds_into_characters() {
         assert_eq!(keys("<S-a>"), vec![Key::char('A')]);
+        assert_eq!(keys("<S-A>"), vec![Key::char('A')]);
+        let alt_shift_a = Key::new(
+            KeyCode::Char('A'),
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+        );
+        assert_eq!(keys("<A-S-a>"), vec![alt_shift_a]);
         let shifted = Key::new(
             KeyCode::Char('A'),
             Modifiers {
@@ -446,6 +490,31 @@ mod tests {
             },
         );
         assert_eq!(shifted, Key::char('A'));
+    }
+
+    #[test]
+    fn a_shift_that_normalization_drops_is_an_error() {
+        for text in [
+            "<S-1>",
+            "<S-Space>",
+            "<S-lt>",
+            "<C-S-c>",
+            "<C-S-A>",
+            "<A-S-1>",
+        ] {
+            assert!(
+                matches!(parse(text), Err(KeyParseError::ShiftIgnored { .. })),
+                "{text}"
+            );
+        }
+        // The hints name the key it would have been and what to write instead.
+        let lost = parse("<S-1>").unwrap_err().to_string();
+        assert!(
+            lost.contains("same key as 1") && lost.contains('!'),
+            "{lost}"
+        );
+        let ctrl = parse("<C-S-c>").unwrap_err().to_string();
+        assert!(ctrl.contains("same key as <C-c>"), "{ctrl}");
     }
 
     #[test]

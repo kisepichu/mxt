@@ -86,7 +86,7 @@ impl Action {
     ///
     /// - `room.open`: `filter` (`all`, `unread`, `notify` or `mentions`;
     ///   default `all`), and either `pick` (`first`, `next` or `prev`; default
-    ///   `first`) or `query` (a fuzzy room name query)
+    ///   `first`) or `query` (a fuzzy room name query, non-empty)
     /// - `picker.rooms`: `filter`, as for `room.open`
     /// - `composer.focus`: `mode` (`insert` or `keep`; default `insert`)
     /// - `file.upload`: `path` (non-empty), required
@@ -243,7 +243,7 @@ fn room_open(args: Args<'_>) -> Result<Action, ActionError> {
         });
     }
     let filter = args.filter()?;
-    let target = match args.string("query")? {
+    let target = match args.non_empty_string("query")? {
         Some(query) => RoomTarget::Fuzzy {
             filter,
             query: query.to_owned(),
@@ -264,18 +264,12 @@ fn room_open(args: Args<'_>) -> Result<Action, ActionError> {
 }
 
 fn file_upload(args: Args<'_>) -> Result<Action, ActionError> {
-    let path = args.string("path")?.ok_or(ActionError::MissingArgument {
-        action: args.action,
-        arg: "path",
-    })?;
-    if path.is_empty() {
-        return Err(ActionError::InvalidValue {
+    let path = args
+        .non_empty_string("path")?
+        .ok_or(ActionError::MissingArgument {
             action: args.action,
             arg: "path",
-            value: String::new(),
-            allowed: &[],
-        });
-    }
+        })?;
     Ok(Action::FileUpload {
         path: path.to_owned(),
     })
@@ -319,6 +313,19 @@ impl<'a> Args<'a> {
                 arg,
                 expected: "string",
             }),
+        }
+    }
+
+    /// A string argument that must not be empty when it is given.
+    fn non_empty_string(&self, arg: &'static str) -> Result<Option<&'a str>, ActionError> {
+        match self.string(arg)? {
+            Some("") => Err(ActionError::InvalidValue {
+                action: self.action,
+                arg,
+                value: String::new(),
+                allowed: &[],
+            }),
+            value => Ok(value),
         }
     }
 
@@ -373,7 +380,8 @@ pub enum ActionError {
         arg: &'static str,
         expected: &'static str,
     },
-    /// `allowed` is empty when any non-empty value is allowed.
+    /// `allowed` is empty when any non-empty value is allowed; `value` is
+    /// then the empty string.
     InvalidValue {
         action: &'static str,
         arg: &'static str,
@@ -408,6 +416,9 @@ impl fmt::Display for ActionError {
                 value,
                 allowed,
             } => {
+                if allowed.is_empty() {
+                    return write!(f, "{action}: \"{arg}\" must not be empty");
+                }
                 write!(f, "{action}: invalid \"{arg}\" value \"{value}\"")?;
                 for (index, name) in allowed.iter().enumerate() {
                     let separator = if index == 0 { "; expected one of" } else { "," };
@@ -603,6 +614,28 @@ mod tests {
                 arg: "path"
             })
         );
+    }
+
+    #[test]
+    fn empty_strings_are_rejected() {
+        let empty_query = Action::from_spec("room.open", &[s("query", "")]).unwrap_err();
+        assert_eq!(
+            empty_query,
+            ActionError::InvalidValue {
+                action: "room.open",
+                arg: "query",
+                value: String::new(),
+                allowed: &[]
+            }
+        );
+        assert!(
+            empty_query.to_string().contains("must not be empty"),
+            "{empty_query}"
+        );
+        assert!(matches!(
+            Action::from_spec("file.upload", &[s("path", "")]),
+            Err(ActionError::InvalidValue { arg: "path", .. })
+        ));
     }
 
     #[test]
