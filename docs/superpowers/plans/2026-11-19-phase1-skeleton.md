@@ -2496,3 +2496,187 @@ and the example, status 1), `... -- --version`, and a file with a typo
 git add Cargo.toml Cargo.lock crates/mxt
 git commit -m "Load the configuration into checked core types, so typos and invalid bindings are reported with their line before the UI starts"
 ```
+
+---
+
+### Task 9: Terminal adapter and the event loop
+
+The room list pane, the status line and the command line, drawn from the
+core state, and the event loop in `mxt` that connects terminal input, timers
+and (later) the matrix adapter to `App::update`. The matrix adapter is not
+part of this task: the loop takes a channel of `Msg` from it and a channel
+for `MatrixEffect`s, which stay unused until the sync task.
+
+**Files:**
+- Modify: root `Cargo.toml` (`ratatui = "0.30"`, `crossterm = { version =
+  "0.29", features = ["event-stream"] }`, `tokio = { version = "1", features =
+  ["rt-multi-thread", "macros", "sync", "time"] }`, `futures-util = "0.3"`,
+  `unicode-width = "0.2"` in `[workspace.dependencies]`; use the crossterm
+  version that ratatui 0.30 uses, so there is one crossterm in the tree),
+  `crates/mxt-tui/Cargo.toml`, `crates/mxt/Cargo.toml`, `crates/mxt/src/main.rs`
+- Create: `crates/mxt-tui/src/terminal.rs`, `crates/mxt-tui/src/input.rs`,
+  `crates/mxt-tui/src/view.rs` (layout and drawing), `crates/mxt-tui/src/timers.rs`,
+  `crates/mxt/src/event_loop.rs`
+
+**Interfaces:**
+- Consumes: `App` and its accessors, `Msg`, `Effect`, `UiEffect`,
+  `MatrixEffect`, `Key::new`, `KeyCode`, `Modifiers`, `Badge`,
+  `NotificationMode::label`, `TimerId` (Tasks 2–7).
+- Produces:
+
+```rust
+// mxt-tui
+pub struct Tui { /* private: ratatui terminal, list scroll state, last viewports, timers */ }
+impl Tui {
+    /// Raw mode, alternate screen, focus change reporting, hidden cursor.
+    pub fn new() -> std::io::Result<Tui>;
+    /// Draws the frame and returns `Msg::Viewport` for panes whose visible
+    /// range changed since the last draw.
+    pub fn draw(&mut self, app: &App) -> std::io::Result<Vec<Msg>>;
+    /// Converts one terminal event. Key presses and repeats become `Msg::Key`
+    /// (`editor: None` until the composer exists), focus events become
+    /// `Msg::TerminalFocus`; resizes and releases produce nothing (the loop
+    /// redraws after every event anyway).
+    pub fn handle_event(&mut self, app: &App, event: crossterm::event::Event) -> Vec<Msg>;
+    /// Executes a UI effect. `StartTimer` schedules a deadline; `ReplayKeys`
+    /// goes to the focused editor (no editors exist before phase 3, so it is
+    /// dropped); `Quit` sets `should_quit`.
+    pub fn execute(&mut self, effect: UiEffect, now: std::time::Instant);
+    pub fn should_quit(&self) -> bool;
+    /// The earliest pending timer deadline.
+    pub fn next_deadline(&self) -> Option<std::time::Instant>;
+    /// Removes and returns `Msg::Timeout` for every timer due at `now`.
+    pub fn expired(&mut self, now: std::time::Instant) -> Vec<Msg>;
+    /// Leaves raw mode and the alternate screen. Also run by `Drop`.
+    pub fn restore(&mut self) -> std::io::Result<()>;
+}
+/// Restores the terminal before the default hook prints the panic.
+pub fn install_panic_hook();
+/// crossterm key event to a core key; `None` for releases and keys the core
+/// has no notation for.
+pub fn key_from_crossterm(event: crossterm::event::KeyEvent) -> Option<Key>;
+
+// mxt
+/// Runs until `UiEffect::Quit`. `from_matrix` delivers adapter messages;
+/// matrix effects are sent to `to_matrix`.
+pub async fn run(
+    app: &mut App,
+    tui: &mut Tui,
+    from_matrix: tokio::sync::mpsc::UnboundedReceiver<Msg>,
+    to_matrix: tokio::sync::mpsc::UnboundedSender<MatrixEffect>,
+) -> std::io::Result<()>;
+```
+
+**Layout and drawing** (design, "Layout", "Room names", "Unread badges";
+colors only from the 16-color palette):
+- Bottom row: the status line, or the command line while one is open
+  (`:` or `/` followed by the text; the terminal cursor is shown at the end of
+  the text, placed by display width).
+- Above it, left: the room list when `sidebar_visible` (30 columns, or a
+  third of the width on terminals narrower than 90 columns), with a border on
+  its right. Right: the timeline pane. Until phase 2 the timeline pane shows
+  the open room's displayed name as a header and `No room open` when none is.
+- Room list rows: the displayed name (`network / room`), truncated by display
+  width with `…`; right-aligned the badge (`Badge::from_counts`, `text`) and
+  the mode label. Styles: mentions badge bold red; notification badge bold;
+  message badge dim; marked badge yellow; labels dim. The cursor row is
+  reversed while the room list has focus and underlined otherwise; the open
+  room's name is bold.
+- The room list scrolls so the cursor stays visible (a ratatui `ListState`).
+  After drawing, its first and last visible indices are compared with the
+  last reported ones; a change yields `Msg::Viewport { pane: RoomList, .. }`.
+- Status line: the mode label (reversed), the pending count and keys (like
+  nvim's showcmd), the open room's displayed name, the status message (red
+  for `Error`), and right-aligned the sync state (`starting`, `synced`,
+  `offline`, `retrying`).
+
+**Key conversion:** `KeyEventKind::Press` and `Repeat` only. crossterm
+`Char(c)`, `Enter`, `Esc`, `Tab`, `BackTab` (Tab with shift), `Backspace`,
+`Delete`, `Insert`, arrows, `Home`, `End`, `PageUp`, `PageDown`, `F(n)`, with
+ctrl, alt and shift from the modifiers, through `Key::new` so normalization
+happens in one place. Other codes return `None`.
+
+**Event loop** (`event_loop::run`): draw once, then repeat until
+`tui.should_quit()`: wait with `tokio::select!` for a crossterm
+`EventStream` event, a message from `from_matrix`, or the next timer deadline
+(`tokio::time::sleep_until`, skipped when there is none); turn it into `Msg`s
+(`handle_event`, the received message, or `expired`); feed each to
+`app.update`, and route the effects (`Effect::Ui` to `tui.execute`,
+`Effect::Matrix` to `to_matrix`); then draw and feed the returned viewport
+messages through `update` as well (they produce no effects in this phase, but
+route them the same way). Drain every message already queued on
+`from_matrix` before drawing, so a burst of room updates draws once.
+
+**`main`:** after the configuration loads, build the `App`
+(`App::new(config.keymap, config.settings)`), install the panic hook, create
+the `Tui`, create the two channels (keep the sender of `from_matrix` alive
+in `main` until the sync task uses it), run the loop on a multi-threaded tokio
+runtime, and restore the terminal on exit.
+
+- [ ] **Step 1: Write the failing tests** (`input.rs`; rendering is verified
+by running, per the design)
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode as C, KeyEvent, KeyEventKind, KeyModifiers as M};
+    use mxt_core::keys::{Key, KeySeq};
+
+    fn key(text: &str) -> Key {
+        KeySeq::parse(text, &KeySeq::default()).unwrap().keys()[0]
+    }
+    fn press(code: C, mods: M) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    #[test]
+    fn characters_and_shift() {
+        assert_eq!(key_from_crossterm(press(C::Char('j'), M::NONE)), Some(key("j")));
+        assert_eq!(key_from_crossterm(press(C::Char('G'), M::SHIFT)), Some(key("G")));
+        assert_eq!(key_from_crossterm(press(C::Char('あ'), M::NONE)), Some(key("あ")));
+        assert_eq!(key_from_crossterm(press(C::Char(' '), M::NONE)), Some(key("<Space>")));
+    }
+
+    #[test]
+    fn control_and_special_keys() {
+        assert_eq!(key_from_crossterm(press(C::Char('w'), M::CONTROL)), Some(key("<C-w>")));
+        assert_eq!(key_from_crossterm(press(C::Enter, M::NONE)), Some(key("<CR>")));
+        assert_eq!(key_from_crossterm(press(C::BackTab, M::SHIFT)), Some(key("<S-Tab>")));
+        assert_eq!(key_from_crossterm(press(C::Esc, M::NONE)), Some(key("<Esc>")));
+        assert_eq!(key_from_crossterm(press(C::F(5), M::NONE)), Some(key("<F5>")));
+        assert_eq!(key_from_crossterm(press(C::Char('x'), M::ALT | M::CONTROL)), Some(key("<C-A-x>")));
+    }
+
+    #[test]
+    fn releases_are_ignored() {
+        let mut e = press(C::Char('j'), M::NONE);
+        e.kind = KeyEventKind::Release;
+        assert_eq!(key_from_crossterm(e), None);
+    }
+}
+```
+
+Also unit-test `timers.rs` (deadlines ordered, `expired` returns only due
+timers, in deadline order).
+
+- [ ] **Step 2: Run them to see them fail:** `nix develop -c cargo test -p mxt-tui`
+- [ ] **Step 3: Implement** `mxt-tui` and the loop in `mxt`.
+- [ ] **Step 4: Verify by running.** Write a throwaway example (not
+committed) that feeds a few `Msg::RoomUpserted` with made-up rooms (a muted
+room with unread messages, a room with mentions, a marked room, a
+`network / room` name, a long Japanese name) into the channel and runs the
+loop. Run it in a tmux window of session `mxt` (never session `0`), drive it
+with `tmux send-keys` (`j`, `k`, `G`, `gg`, `<Space>e`, `:open`, `<Tab>`,
+`<Esc>`, `/`, `n`, `<CR>`, `:q<CR>`), and check `tmux capture-pane -p` after
+each step: badges and labels, cursor movement and scrolling with more rooms
+than rows, the hidden sidebar, the command line and its cursor, search, and a
+clean exit that restores the terminal. Put the captured panes in the pull
+request description. Delete the example before committing.
+- [ ] **Step 5: Run all tests**, then fmt and clippy.
+- [ ] **Step 6: Commit**
+
+```bash
+git add Cargo.toml Cargo.lock crates/mxt-tui crates/mxt
+git commit -m "Add the terminal adapter and the event loop, so the room list, status line and command line are drawn from the core state"
+```
