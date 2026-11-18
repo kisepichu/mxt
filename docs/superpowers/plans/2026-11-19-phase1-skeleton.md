@@ -311,8 +311,10 @@ impl RoomList {
     pub fn new(sort: RoomSort) -> Self;
     pub fn sort(&self) -> RoomSort;
     /// Inserts or replaces the room with the same id and restores the order.
-    pub fn upsert(&mut self, summary: RoomSummary);
-    pub fn remove(&mut self, id: &RoomId) -> Option<RoomSummary>;
+    /// Returns the room's old index (if it was present) and its new index.
+    pub fn upsert(&mut self, summary: RoomSummary) -> (Option<usize>, usize);
+    /// Returns the index the room had and its summary.
+    pub fn remove(&mut self, id: &RoomId) -> Option<(usize, RoomSummary)>;
     pub fn rooms(&self) -> &[RoomSummary];
     pub fn get(&self, id: &RoomId) -> Option<&RoomSummary>;
     pub fn position(&self, id: &RoomId) -> Option<usize>;
@@ -2114,8 +2116,10 @@ Both types live in `app/command_line.rs` and are re-exported from `app.rs`
   - text `open <query>`: the displayed names of all rooms ranked with
     `fuzzy::rank(query, names)`, each completed as `open <name>`.
   Each press replaces the text with the next candidate; after the last one the
-  typed text comes back, then the cycle repeats. No candidates: nothing
-  happens.
+  typed text comes back, then the cycle repeats. A single candidate is
+  inserted and ends the completion, so the next press computes fresh
+  candidates (`:o<Tab><Tab>` gives `open `, then room names). No candidates:
+  nothing happens.
 - Search (room list): case-insensitive substring match (`to_lowercase` on
   both sides) on the displayed name, starting after the cursor and wrapping
   around (the cursor's own room is checked last). Found: move the cursor.
