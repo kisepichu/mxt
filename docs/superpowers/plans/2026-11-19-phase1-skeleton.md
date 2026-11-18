@@ -650,3 +650,1003 @@ Expected: all pass. Then the clippy and fmt checks from the global constraints.
 git add Cargo.toml Cargo.lock crates/mxt-core
 git commit -m "Add the core room domain: identifiers, summaries, badges, network names and room targets, so filters and ordering are defined once in the core"
 ```
+
+---
+
+### Task 3: Key notation
+
+**Files:**
+- Create: `crates/mxt-core/src/keys.rs`
+- Modify: `crates/mxt-core/src/lib.rs` (`pub mod keys;`)
+
+**Interfaces:**
+- Produces (used by the keymap, the resolver, the configuration loader and
+  the tui adapter, which converts crossterm events with `Key::new`):
+
+```rust
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum KeyCode {
+    Char(char), Enter, Esc, Tab, Backspace, Delete, Insert,
+    Up, Down, Left, Right, Home, End, PageUp, PageDown, F(u8),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct Modifiers { pub ctrl: bool, pub alt: bool, pub shift: bool }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Key { code: KeyCode, mods: Modifiers }   // fields private: always normalized
+impl Key {
+    /// Normalizes like nvim: for `Char`, shift is folded into the character
+    /// (`a` + shift becomes `A`) and dropped; with ctrl, ASCII letters are
+    /// lowercased (`<C-A>` is `<C-a>`).
+    pub fn new(code: KeyCode, mods: Modifiers) -> Key;
+    /// A plain character without modifiers.
+    pub fn char(c: char) -> Key;
+    pub fn code(self) -> KeyCode;
+    pub fn mods(self) -> Modifiers;
+    /// `Some(c)` for a `Char` without ctrl or alt: text a text input should insert.
+    pub fn text(self) -> Option<char>;
+}
+/// Notation form: `a`, `A`, `<Space>`, `<lt>`, `<CR>`, `<C-x>`, `<A-x>`, `<S-Tab>`, `<C-A-x>`, `<F5>`.
+impl std::fmt::Display for Key;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct KeySeq(Vec<Key>);
+impl KeySeq {
+    /// Parses nvim key notation; `<leader>` expands to `leader`.
+    pub fn parse(text: &str, leader: &KeySeq) -> Result<KeySeq, KeyParseError>;
+    pub fn from_keys(keys: Vec<Key>) -> KeySeq;
+    pub fn keys(&self) -> &[Key];
+    pub fn is_empty(&self) -> bool;
+}
+impl std::fmt::Display for KeySeq;   // concatenated `Key` notation
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KeyParseError {
+    Empty,
+    /// A `<` without a matching `>`. Write `<lt>` for a literal `<`.
+    Unclosed { at: usize },
+    UnknownKey { name: String },
+    UnknownModifier { name: String },
+    /// `<leader>` where no leader is available (inside the leader itself).
+    NoLeader,
+}
+impl std::fmt::Display for KeyParseError;
+impl std::error::Error for KeyParseError {}
+```
+
+**Notation rules:**
+- Any character outside `<...>` is that character (`a`, `:`, `]`, `+`, `/`,
+  `日`). A `<` must start a `<...>` group.
+- Names inside `<...>` are case-insensitive: `CR`, `Enter` and `Return`
+  (Enter); `Esc`; `Tab`; `BS` and `Backspace`; `Del` and `Delete`; `Ins` and
+  `Insert`; `Up`, `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`,
+  `PageDown`; `F1` to `F12`; `Space` (`Char(' ')`); `lt` (`Char('<')`);
+  `Bslash` (`Char('\\')`); `Bar` (`Char('|')`); `leader`.
+- Modifier prefixes inside `<...>`, case-insensitive, in any order and
+  combination: `C-` (ctrl), `A-` and `M-` (alt), `S-` (shift). The part after
+  the modifiers is one character or a name: `<C-x>`, `<C-->`, `<S-Tab>`,
+  `<C-A-x>`, `<M-CR>`. `<leader>` takes no modifiers.
+- The result is normalized with `Key::new`: `<S-a>` equals `A`, `<C-A>` equals
+  `<C-a>`.
+- Leader: `KeySeq::parse(leader_text, &KeySeq::default())`; an empty leader
+  makes `<leader>` fail with `NoLeader`.
+
+- [ ] **Step 1: Write the failing tests** (in `keys.rs`)
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctrl(c: char) -> Key {
+        Key::new(KeyCode::Char(c), Modifiers { ctrl: true, ..Modifiers::default() })
+    }
+    fn code(code: KeyCode) -> Key {
+        Key::new(code, Modifiers::default())
+    }
+    fn parse(text: &str) -> Result<KeySeq, KeyParseError> {
+        KeySeq::parse(text, &KeySeq::from_keys(vec![Key::char(' ')]))
+    }
+    fn keys(text: &str) -> Vec<Key> {
+        parse(text).unwrap().keys().to_vec()
+    }
+
+    #[test]
+    fn plain_characters() {
+        assert_eq!(keys("gg"), vec![Key::char('g'), Key::char('g')]);
+        assert_eq!(keys("]u"), vec![Key::char(']'), Key::char('u')]);
+        assert_eq!(keys("日本"), vec![Key::char('日'), Key::char('本')]);
+    }
+
+    #[test]
+    fn special_names_are_case_insensitive() {
+        assert_eq!(keys("<CR>"), vec![code(KeyCode::Enter)]);
+        assert_eq!(keys("<cr>"), vec![code(KeyCode::Enter)]);
+        assert_eq!(keys("<Enter><Return>"), vec![code(KeyCode::Enter), code(KeyCode::Enter)]);
+        assert_eq!(keys("<Esc><Tab><BS><Del>"), vec![
+            code(KeyCode::Esc), code(KeyCode::Tab), code(KeyCode::Backspace), code(KeyCode::Delete),
+        ]);
+        assert_eq!(keys("<F12>"), vec![code(KeyCode::F(12))]);
+        assert_eq!(keys("<Space><lt><Bslash><Bar>"), vec![
+            Key::char(' '), Key::char('<'), Key::char('\\'), Key::char('|'),
+        ]);
+    }
+
+    #[test]
+    fn modifiers() {
+        assert_eq!(keys("<C-x><C-e>"), vec![ctrl('x'), ctrl('e')]);
+        assert_eq!(keys("<C-X>"), vec![ctrl('x')]);
+        assert_eq!(keys("<c-w>h"), vec![ctrl('w'), Key::char('h')]);
+        assert_eq!(keys("<C-->"), vec![ctrl('-')]);
+        let alt_x = Key::new(KeyCode::Char('x'), Modifiers { alt: true, ..Modifiers::default() });
+        assert_eq!(keys("<A-x>"), vec![alt_x]);
+        assert_eq!(keys("<M-x>"), vec![alt_x]);
+        let ctrl_alt = Key::new(KeyCode::Char('x'), Modifiers { ctrl: true, alt: true, shift: false });
+        assert_eq!(keys("<C-A-x>"), vec![ctrl_alt]);
+        assert_eq!(keys("<A-C-x>"), vec![ctrl_alt]);
+        let shift_tab = Key::new(KeyCode::Tab, Modifiers { shift: true, ..Modifiers::default() });
+        assert_eq!(keys("<S-Tab>"), vec![shift_tab]);
+    }
+
+    #[test]
+    fn shift_folds_into_characters() {
+        assert_eq!(keys("<S-a>"), vec![Key::char('A')]);
+        let shifted = Key::new(KeyCode::Char('A'), Modifiers { shift: true, ..Modifiers::default() });
+        assert_eq!(shifted, Key::char('A'));
+    }
+
+    #[test]
+    fn leader_expands() {
+        let comma = KeySeq::parse(",", &KeySeq::default()).unwrap();
+        let seq = KeySeq::parse("<leader><leader>e", &comma).unwrap();
+        assert_eq!(seq.keys(), &[Key::char(','), Key::char(','), Key::char('e')]);
+        assert_eq!(keys("<Leader>m"), vec![Key::char(' '), Key::char('m')]);
+        assert_eq!(KeySeq::parse("<leader>", &KeySeq::default()), Err(KeyParseError::NoLeader));
+    }
+
+    #[test]
+    fn errors() {
+        assert_eq!(parse(""), Err(KeyParseError::Empty));
+        assert_eq!(parse("a<C-x"), Err(KeyParseError::Unclosed { at: 1 }));
+        assert_eq!(parse("<"), Err(KeyParseError::Unclosed { at: 0 }));
+        assert!(matches!(parse("<Foo>"), Err(KeyParseError::UnknownKey { .. })));
+        assert!(matches!(parse("<X-a>"), Err(KeyParseError::UnknownModifier { .. })));
+        assert!(matches!(parse("<C-leader>"), Err(KeyParseError::UnknownKey { .. })));
+    }
+
+    #[test]
+    fn display_round_trips() {
+        for text in ["gg", "<C-x><C-e>", "<Space>e", "<lt>", "<CR>", "<S-Tab>", "<C-A-x>", "<F5>", "]u"] {
+            let seq = parse(text).unwrap();
+            assert_eq!(parse(&seq.to_string()).unwrap(), seq, "{text}");
+        }
+        assert_eq!(parse("<c-X>").unwrap().to_string(), "<C-x>");
+    }
+
+    #[test]
+    fn text_is_only_unmodified_characters() {
+        assert_eq!(Key::char('a').text(), Some('a'));
+        assert_eq!(Key::char('日').text(), Some('日'));
+        assert_eq!(ctrl('a').text(), None);
+        assert_eq!(code(KeyCode::Enter).text(), None);
+    }
+}
+```
+
+- [ ] **Step 2: Run them to see them fail:** `nix develop -c cargo test -p mxt-core keys`
+- [ ] **Step 3: Implement `keys.rs`.** The parser walks the string by
+`char_indices`; `Unclosed { at }` is the byte offset of the `<`.
+- [ ] **Step 4: Run the tests to see them pass**, then fmt and clippy.
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/mxt-core/src/keys.rs crates/mxt-core/src/lib.rs
+git commit -m "Add nvim key notation parsing so keymaps and the configuration share one normalized key type"
+```
+
+---
+
+### Task 4: Actions, bindings and commands
+
+**Files:**
+- Create: `crates/mxt-core/src/action.rs`, `crates/mxt-core/src/command.rs`
+- Modify: `crates/mxt-core/src/lib.rs` (`pub mod action; pub mod command;`)
+
+**Interfaces:**
+- Consumes: `RoomFilter`, `Pick`, `RoomTarget` (Task 2).
+- Produces:
+
+```rust
+// action.rs
+/// A neutral argument value; the configuration loader converts TOML values into it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ArgValue { String(String), Integer(i64), Boolean(bool) }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FocusMode { #[default] Insert, Keep }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Action {
+    RoomOpen(RoomTarget), RoomOpenSelected, RoomMarkRead, RoomMute, RoomUnmute,
+    MessageReply, MessageEdit, MessageDelete, MessageYank, MessageReact,
+    MessageOpen, MessageGotoReply, MessageResend, MessageView,
+    ComposerFocus(FocusMode), ComposerSend, ComposerNewline, ComposerCancel,
+    ComposerExternalEditor,
+    CompletionNext, CompletionPrev, CompletionAccept, CompletionCancel,
+    PickerRooms(RoomFilter), PickerNext, PickerPrev, PickerAccept, PickerCancel,
+    CommandLineOpen, CommandLineExecute, CommandLineCancel, CommandLineComplete,
+    CursorDown, CursorUp, CursorFirst, CursorLast, CursorHalfPageDown, CursorHalfPageUp,
+    SearchStart, SearchNext, SearchPrev,
+    ViewClose, SidebarToggle, FocusRoomList, FocusTimeline,
+    FileUpload { path: String }, AccountRecover, AppQuit, Nop,
+}
+impl Action {
+    /// Builds a checked action from its name and arguments (see the table below).
+    pub fn from_spec(name: &str, args: &[(String, ArgValue)]) -> Result<Action, ActionError>;
+    /// The registry name, for example "room.open".
+    pub fn name(&self) -> &'static str;
+    /// Movement actions that take a count prefix: cursor.down, cursor.up,
+    /// cursor.half_page_down, cursor.half_page_up.
+    pub fn takes_count(&self) -> bool;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ActionError {
+    UnknownAction { name: String },
+    UnknownArgument { action: &'static str, arg: String },
+    WrongType { action: &'static str, arg: &'static str, expected: &'static str },
+    InvalidValue { action: &'static str, arg: &'static str, value: String, allowed: &'static [&'static str] },
+    Conflict { action: &'static str, args: [&'static str; 2] },
+    MissingArgument { action: &'static str, arg: &'static str },
+}
+impl std::fmt::Display for ActionError;   // for example: `room.open: "pick" and "query" cannot be used together`
+impl std::error::Error for ActionError {}
+
+/// One or more actions run in order. Never empty.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Binding(Vec<Action>);
+impl Binding {
+    /// `None` for an empty list.
+    pub fn new(actions: Vec<Action>) -> Option<Binding>;
+    pub fn single(action: Action) -> Binding;
+    pub fn actions(&self) -> &[Action];
+}
+
+// command.rs
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommandError {
+    Unknown { name: String },
+    MissingArgument { command: &'static str, usage: &'static str },
+    UnexpectedArgument { command: &'static str },
+}
+impl std::fmt::Display for CommandError;
+impl std::error::Error for CommandError {}
+
+/// Command names, in the order completion offers them.
+pub const COMMANDS: &[&str] = &["open", "mute", "unmute", "upload", "recover", "q"];
+/// Whether the command takes an argument (completion appends a space after it).
+pub fn takes_argument(command: &str) -> bool;
+
+/// Parses a command line without the leading `:`. `Ok(None)` for a blank line.
+/// Everything after the command name, trimmed, is one argument.
+pub fn parse_command(line: &str) -> Result<Option<Action>, CommandError>;
+```
+
+**Action arguments** (every other action takes none; any argument given to
+them is `UnknownArgument`):
+
+| Action | Argument | Type | Values | Default |
+|---|---|---|---|---|
+| `room.open` | `filter` | string | `all`, `unread`, `notify`, `mentions` | `all` |
+| `room.open` | `pick` | string | `first`, `next`, `prev` | `first` |
+| `room.open` | `query` | string | any | none |
+| `picker.rooms` | `filter` | string | as above | `all` |
+| `composer.focus` | `mode` | string | `insert`, `keep` | `insert` |
+| `file.upload` | `path` | string | any non-empty | required |
+
+`room.open` with both `pick` and `query` is `Conflict`. With `query` it is
+`RoomTarget::Fuzzy { filter, query }`, otherwise `RoomTarget::Pick { filter,
+pick }`.
+
+**Commands:**
+
+| Command | Action | Argument |
+|---|---|---|
+| `open <room>` | `RoomOpen(Fuzzy { filter: All, query })` | required |
+| `mute`, `unmute` | `RoomMute`, `RoomUnmute` | none |
+| `upload <path>` | `FileUpload { path }` | required |
+| `recover` | `AccountRecover` | none |
+| `q` | `AppQuit` | none |
+
+- [ ] **Step 1: Write the failing tests**
+
+```rust
+// action.rs
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rooms::{Pick, RoomFilter, RoomTarget};
+
+    fn s(k: &str, v: &str) -> (String, ArgValue) {
+        (k.to_owned(), ArgValue::String(v.to_owned()))
+    }
+
+    #[test]
+    fn actions_without_arguments() {
+        assert_eq!(Action::from_spec("cursor.down", &[]), Ok(Action::CursorDown));
+        assert_eq!(Action::from_spec("nop", &[]), Ok(Action::Nop));
+        assert_eq!(Action::from_spec("app.quit", &[]), Ok(Action::AppQuit));
+    }
+
+    #[test]
+    fn every_action_name_round_trips() {
+        let names = [
+            "room.open", "room.open_selected", "room.mark_read", "room.mute", "room.unmute",
+            "message.reply", "message.edit", "message.delete", "message.yank", "message.react",
+            "message.open", "message.goto_reply", "message.resend", "message.view",
+            "composer.focus", "composer.send", "composer.newline", "composer.cancel",
+            "composer.external_editor", "completion.next", "completion.prev",
+            "completion.accept", "completion.cancel", "picker.rooms", "picker.next",
+            "picker.prev", "picker.accept", "picker.cancel", "command_line.open",
+            "command_line.execute", "command_line.cancel", "command_line.complete",
+            "cursor.down", "cursor.up", "cursor.first", "cursor.last",
+            "cursor.half_page_down", "cursor.half_page_up", "search.start", "search.next",
+            "search.prev", "view.close", "sidebar.toggle", "focus.room_list",
+            "focus.timeline", "account.recover", "app.quit", "nop",
+        ];
+        for name in names {
+            let action = Action::from_spec(name, &[]).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(action.name(), name);
+        }
+        let upload = Action::from_spec("file.upload", &[s("path", "/tmp/a b.png")]).unwrap();
+        assert_eq!(upload.name(), "file.upload");
+    }
+
+    #[test]
+    fn room_open_arguments() {
+        assert_eq!(
+            Action::from_spec("room.open", &[s("filter", "unread"), s("pick", "next")]),
+            Ok(Action::RoomOpen(RoomTarget::Pick { filter: RoomFilter::Unread, pick: Pick::Next }))
+        );
+        assert_eq!(
+            Action::from_spec("room.open", &[]),
+            Ok(Action::RoomOpen(RoomTarget::Pick { filter: RoomFilter::All, pick: Pick::First }))
+        );
+        assert_eq!(
+            Action::from_spec("room.open", &[s("query", "general")]),
+            Ok(Action::RoomOpen(RoomTarget::Fuzzy { filter: RoomFilter::All, query: "general".into() }))
+        );
+    }
+
+    #[test]
+    fn pick_and_query_conflict() {
+        assert_eq!(
+            Action::from_spec("room.open", &[s("pick", "next"), s("query", "x")]),
+            Err(ActionError::Conflict { action: "room.open", args: ["pick", "query"] })
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_actions_and_wrong_arguments() {
+        assert_eq!(
+            Action::from_spec("room.opne", &[]),
+            Err(ActionError::UnknownAction { name: "room.opne".into() })
+        );
+        assert_eq!(
+            Action::from_spec("cursor.down", &[s("filter", "all")]),
+            Err(ActionError::UnknownArgument { action: "cursor.down", arg: "filter".into() })
+        );
+        assert_eq!(
+            Action::from_spec("room.open", &[("pick".into(), ArgValue::Integer(1))]),
+            Err(ActionError::WrongType { action: "room.open", arg: "pick", expected: "string" })
+        );
+        assert!(matches!(
+            Action::from_spec("room.open", &[s("filter", "unreads")]),
+            Err(ActionError::InvalidValue { action: "room.open", arg: "filter", .. })
+        ));
+        assert_eq!(
+            Action::from_spec("file.upload", &[]),
+            Err(ActionError::MissingArgument { action: "file.upload", arg: "path" })
+        );
+    }
+
+    #[test]
+    fn composer_focus_mode() {
+        assert_eq!(Action::from_spec("composer.focus", &[]), Ok(Action::ComposerFocus(FocusMode::Insert)));
+        assert_eq!(
+            Action::from_spec("composer.focus", &[s("mode", "keep")]),
+            Ok(Action::ComposerFocus(FocusMode::Keep))
+        );
+    }
+
+    #[test]
+    fn picker_filter() {
+        assert_eq!(
+            Action::from_spec("picker.rooms", &[s("filter", "mentions")]),
+            Ok(Action::PickerRooms(RoomFilter::Mentions))
+        );
+    }
+
+    #[test]
+    fn counts_apply_to_line_movement_only() {
+        assert!(Action::CursorDown.takes_count());
+        assert!(Action::CursorHalfPageUp.takes_count());
+        assert!(!Action::CursorFirst.takes_count());
+        assert!(!Action::RoomMarkRead.takes_count());
+    }
+
+    #[test]
+    fn empty_binding_is_rejected() {
+        assert_eq!(Binding::new(vec![]), None);
+        assert_eq!(Binding::new(vec![Action::Nop]).unwrap().actions(), &[Action::Nop]);
+    }
+}
+
+// command.rs
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::action::Action;
+    use crate::rooms::{RoomFilter, RoomTarget};
+
+    #[test]
+    fn open_takes_the_rest_of_the_line() {
+        assert_eq!(
+            parse_command("open  my room  "),
+            Ok(Some(Action::RoomOpen(RoomTarget::Fuzzy { filter: RoomFilter::All, query: "my room".into() })))
+        );
+    }
+
+    #[test]
+    fn upload_keeps_spaces_in_paths() {
+        assert_eq!(
+            parse_command("upload /tmp/a b.png"),
+            Ok(Some(Action::FileUpload { path: "/tmp/a b.png".into() }))
+        );
+    }
+
+    #[test]
+    fn simple_commands() {
+        assert_eq!(parse_command("q"), Ok(Some(Action::AppQuit)));
+        assert_eq!(parse_command(" mute "), Ok(Some(Action::RoomMute)));
+        assert_eq!(parse_command("unmute"), Ok(Some(Action::RoomUnmute)));
+        assert_eq!(parse_command("recover"), Ok(Some(Action::AccountRecover)));
+        assert_eq!(parse_command("   "), Ok(None));
+    }
+
+    #[test]
+    fn errors() {
+        assert_eq!(parse_command("quit"), Err(CommandError::Unknown { name: "quit".into() }));
+        assert!(matches!(parse_command("open"), Err(CommandError::MissingArgument { command: "open", .. })));
+        assert_eq!(parse_command("mute now"), Err(CommandError::UnexpectedArgument { command: "mute" }));
+    }
+
+    #[test]
+    fn argument_flags() {
+        assert!(takes_argument("open"));
+        assert!(takes_argument("upload"));
+        assert!(!takes_argument("q"));
+    }
+}
+```
+
+- [ ] **Step 2: Run them to see them fail:** `nix develop -c cargo test -p mxt-core action command`
+- [ ] **Step 3: Implement** `action.rs` and `command.rs`. Keep the name table
+in one place (a `match` in `from_spec` and one in `name`, or one static
+table); argument parsing is a small helper per argument kind.
+- [ ] **Step 4: Run the tests to see them pass**, then fmt and clippy.
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/mxt-core/src/action.rs crates/mxt-core/src/command.rs crates/mxt-core/src/lib.rs
+git commit -m "Add the action registry and command parsing so keys and commands resolve to the same checked actions"
+```
+
+---
+
+### Task 5: Keymap and resolver
+
+**Files:**
+- Create: `crates/mxt-core/src/keymap.rs`, `crates/mxt-core/src/resolver.rs`
+- Modify: `crates/mxt-core/src/lib.rs`
+
+**Interfaces:**
+- Consumes: `Key`, `KeySeq` (Task 3); `Action`, `Binding` (Task 4).
+- Produces:
+
+```rust
+// keymap.rs
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TableId {
+    Normal, RoomList, Timeline, ComposerNormal, ComposerVisual, ComposerInsert,
+    ComposerCompletion, MessageView, Picker, CommandLine,
+}
+impl TableId {
+    pub const ALL: [TableId; 10];
+    /// "normal", "room_list", "timeline", "composer.normal", "composer.visual",
+    /// "composer.insert", "composer.completion", "message_view", "picker", "command_line".
+    pub fn config_name(self) -> &'static str;
+    pub fn from_config_name(name: &str) -> Option<TableId>;
+}
+
+/// Where the user is typing; decides the table chain and where released keys go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum InputContext {
+    RoomList, Timeline,
+    ComposerNormal, ComposerVisual, ComposerInsert, ComposerCompletion,
+    /// The message view's editor in normal or visual mode.
+    MessageView,
+    /// An editor in a mode where every key goes to it (search mode; the message
+    /// view's editor in insert mode).
+    EditorPassthrough,
+    Picker, CommandLine,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeySink {
+    /// Panes without text input: released keys are dropped.
+    Drop,
+    /// The composer's or the message view's editor: `Effect::Ui(ReplayKeys)`.
+    Editor,
+    /// The picker query or the command line text, owned by the core.
+    Text,
+}
+
+impl InputContext {
+    /// Tables consulted, earliest wins (design, "Tables and resolution").
+    pub fn chain(self) -> &'static [TableId];
+    pub fn sink(self) -> KeySink;
+    /// Whether digits start a count prefix: RoomList and Timeline only.
+    pub fn counts(self) -> bool;
+}
+
+/// All tables after the user's bindings were merged over the defaults, and one
+/// precomputed effective map per input context.
+#[derive(Clone, Debug)]
+pub struct Keymap { /* private */ }
+impl Keymap {
+    /// The default keymap with `leader` substituted, overlaid key by key by
+    /// `user`: a user binding replaces the default binding of the same table and
+    /// key sequence; `nop` bindings stay in the map and shadow later tables.
+    pub fn new(leader: &KeySeq, user: impl IntoIterator<Item = (TableId, KeySeq, Binding)>) -> Keymap;
+    pub fn effective(&self, context: InputContext) -> &EffectiveMap;
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct EffectiveMap { /* private: BTreeMap<KeySeq, Binding> */ }
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct Lookup<'a> {
+    /// The binding for exactly these keys.
+    pub binding: Option<&'a Binding>,
+    /// Whether a longer binding starts with these keys.
+    pub is_prefix: bool,
+}
+
+impl EffectiveMap {
+    /// Merges the tables in order; for the same key sequence the earlier table wins.
+    pub fn merge<'a>(tables: impl IntoIterator<Item = &'a BTreeMap<KeySeq, Binding>>) -> EffectiveMap;
+    pub fn lookup(&self, keys: &[Key]) -> Lookup<'_>;
+}
+
+// resolver.rs
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TimerId(u64);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Resolved {
+    /// Run the binding; `count` is the count prefix if one was typed.
+    Run { binding: Binding, count: Option<u32> },
+    /// Keys the keymap did not consume, for the context's sink.
+    Release(Vec<Key>),
+    /// Wait for more keys and ask the tui adapter for a timer.
+    StartTimer { id: TimerId, after_ms: u64 },
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Resolver { /* private: pending keys, count, current timer, next timer id */ }
+impl Resolver {
+    pub fn new() -> Resolver;
+    pub fn feed(&mut self, map: &EffectiveMap, counts: bool, timeoutlen_ms: u64, key: Key) -> Vec<Resolved>;
+    /// Stale or unknown ids return nothing.
+    pub fn timeout(&mut self, map: &EffectiveMap, timeoutlen_ms: u64, id: TimerId) -> Vec<Resolved>;
+    /// Drops pending keys and the count (when the input context changes).
+    pub fn reset(&mut self);
+    /// Pending keys, for the status line.
+    pub fn pending(&self) -> &[Key];
+    pub fn count(&self) -> Option<u32>;
+}
+```
+
+**Table chains and sinks:**
+
+| Context | Chain | Sink | Counts |
+|---|---|---|---|
+| `RoomList` | `RoomList`, `Normal` | `Drop` | yes |
+| `Timeline` | `Timeline`, `Normal` | `Drop` | yes |
+| `ComposerNormal` | `ComposerNormal`, `Normal` | `Editor` | no |
+| `ComposerVisual` | `ComposerVisual`, `Normal` | `Editor` | no |
+| `ComposerInsert` | `ComposerInsert` | `Editor` | no |
+| `ComposerCompletion` | `ComposerCompletion`, `ComposerInsert` | `Editor` | no |
+| `MessageView` | `MessageView` | `Editor` | no |
+| `EditorPassthrough` | none | `Editor` | no |
+| `Picker` | `Picker` | `Text` | no |
+| `CommandLine` | `CommandLine` | `Text` | no |
+
+**Default keymap** (design, "Default keymap"):
+
+| Table | Keys | Binding |
+|---|---|---|
+| `normal` | `:` | `command_line.open` |
+| `normal` | `<leader><leader>` | `picker.rooms` |
+| `normal` | `<leader>e` | `sidebar.toggle` |
+| `normal` | `<leader>m` | `picker.rooms` with `filter = mentions` |
+| `normal` | `<C-w>h`, `<C-w>l` | `focus.room_list`, `focus.timeline` |
+| `room_list`, `timeline` | `j`, `k` | `cursor.down`, `cursor.up` |
+| `room_list`, `timeline` | `gg`, `G` | `cursor.first`, `cursor.last` |
+| `room_list`, `timeline` | `<C-d>`, `<C-u>` | `cursor.half_page_down`, `cursor.half_page_up` |
+| `room_list`, `timeline` | `/`, `n`, `N` | `search.start`, `search.next`, `search.prev` |
+| `room_list` | `<CR>` | `room.open_selected` |
+| `timeline` | `i`, `a` | `composer.focus` |
+| `timeline` | `<CR>` | `message.view` |
+| `timeline` | `r`, `e`, `dd`, `yy`, `+`, `gx`, `gd` | `message.reply`, `message.edit`, `message.delete`, `message.yank`, `message.react`, `message.open`, `message.goto_reply` |
+| `composer.insert` | `<CR>`, `<C-j>`, `<C-x><C-e>` | `composer.send`, `composer.newline`, `composer.external_editor` |
+| `composer.normal` | `<C-x><C-e>`, `<Esc>`, `<C-c>` | `composer.external_editor`, `focus.timeline`, `composer.cancel` |
+| `composer.completion` | `<C-n>`, `<C-p>` | `completion.next`, `completion.prev` |
+| `composer.completion` | `<C-y>`, `<Tab>`, `<CR>` | `completion.accept` |
+| `composer.completion` | `<C-e>` | `completion.cancel` |
+| `picker` | `<C-n>`, `<C-p>`, `<CR>`, `<Esc>` | `picker.next`, `picker.prev`, `picker.accept`, `picker.cancel` |
+| `command_line` | `<CR>`, `<Esc>`, `<Tab>` | `command_line.execute`, `command_line.cancel`, `command_line.complete` |
+| `message_view` | `q`, `<Esc>` | `view.close` |
+
+Write the defaults as a table of `(TableId, &str notation, Binding)` parsed
+with the leader in `Keymap::new`; a default that fails to parse is a bug
+(`expect` with the notation in the message), covered by a test.
+
+**Resolution algorithm** (design, "Keymap resolver"):
+
+`feed(key)`:
+1. If `counts`, nothing is pending, `key` is an unmodified digit (`1`–`9`, or
+   `0` once a count has started) and no binding in `map` starts with that key:
+   extend the count (saturating at 9999) and return nothing. No timer runs
+   for a count alone.
+2. Push `key` to the pending keys and look the sequence up.
+   - A longer binding starts with it (`is_prefix`): return
+     `StartTimer { id: <fresh id>, after_ms: timeoutlen_ms }`. Every new key
+     gets a fresh id, so older timers become stale. This applies whether or not
+     the sequence is itself a binding.
+   - It is a binding and nothing longer starts with it: return
+     `Run { binding, count }` and clear the pending keys, the count and the
+     timer.
+   - Neither: let `prev` be the pending keys without `key`.
+     - If some prefix of `prev` is a binding, take the longest one: return
+       `Run` for it (with the count), then feed the rest of `prev` followed by
+       `key` again, one by one, as fresh input (count cleared).
+     - Otherwise return `Release(prev)` if `prev` is not empty, clear the
+       count, and feed `key` again as fresh input. A single key that matches
+       nothing with nothing pending is `Release(vec![key])`.
+
+`timeout(id)`: if `id` is the current timer, take the longest prefix of the
+pending keys that is a binding; `Run` it and feed the rest again as fresh
+input; if there is none, `Release` all pending keys. Clear the count and the
+timer either way.
+
+- [ ] **Step 1: Write the failing tests**
+
+```rust
+// keymap.rs
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::action::{Action, Binding};
+    use crate::keys::{Key, KeySeq};
+
+    fn space() -> KeySeq {
+        KeySeq::parse("<Space>", &KeySeq::default()).unwrap()
+    }
+    fn seq(text: &str) -> KeySeq {
+        KeySeq::parse(text, &space()).unwrap()
+    }
+    fn one(action: Action) -> Binding {
+        Binding::single(action)
+    }
+
+    #[test]
+    fn defaults_parse_and_resolve() {
+        let km = Keymap::new(&space(), []);
+        let tl = km.effective(InputContext::Timeline);
+        assert_eq!(tl.lookup(seq("j").keys()).binding, Some(&one(Action::CursorDown)));
+        assert_eq!(tl.lookup(seq(":").keys()).binding, Some(&one(Action::CommandLineOpen)));
+        assert_eq!(tl.lookup(seq("<Space><Space>").keys()).binding.map(|b| b.actions()[0].name()), Some("picker.rooms"));
+        let g = tl.lookup(seq("g").keys());
+        assert_eq!((g.binding, g.is_prefix), (None, true));
+    }
+
+    #[test]
+    fn insert_mode_does_not_see_normal_or_movement_keys() {
+        let km = Keymap::new(&space(), []);
+        let ins = km.effective(InputContext::ComposerInsert);
+        assert_eq!(ins.lookup(seq("j").keys()).binding, None);
+        assert_eq!(ins.lookup(seq(":").keys()).binding, None);
+        assert_eq!(ins.lookup(seq("<CR>").keys()).binding, Some(&one(Action::ComposerSend)));
+        let normal = km.effective(InputContext::ComposerNormal);
+        assert_eq!(normal.lookup(seq(":").keys()).binding, Some(&one(Action::CommandLineOpen)));
+        assert_eq!(normal.lookup(seq("j").keys()).binding, None);
+    }
+
+    #[test]
+    fn completion_falls_back_to_insert() {
+        let km = Keymap::new(&space(), []);
+        let c = km.effective(InputContext::ComposerCompletion);
+        assert_eq!(c.lookup(seq("<CR>").keys()).binding, Some(&one(Action::CompletionAccept)));
+        assert_eq!(c.lookup(seq("<C-j>").keys()).binding, Some(&one(Action::ComposerNewline)));
+    }
+
+    #[test]
+    fn prefixes_are_judged_on_the_merged_map() {
+        let km = Keymap::new(&space(), [
+            (TableId::Timeline, seq("]"), one(Action::CursorLast)),
+            (TableId::Normal, seq("]u"), one(Action::RoomMarkRead)),
+        ]);
+        let l = km.effective(InputContext::Timeline).lookup(seq("]").keys());
+        assert_eq!(l.binding, Some(&one(Action::CursorLast)));
+        assert!(l.is_prefix);
+    }
+
+    #[test]
+    fn earlier_table_wins_and_user_overrides_defaults() {
+        let km = Keymap::new(&space(), [
+            (TableId::Normal, seq("j"), one(Action::AppQuit)),
+            (TableId::Timeline, seq("<C-w>h"), one(Action::SidebarToggle)),
+        ]);
+        let tl = km.effective(InputContext::Timeline);
+        assert_eq!(tl.lookup(seq("j").keys()).binding, Some(&one(Action::CursorDown)));
+        assert_eq!(tl.lookup(seq("<C-w>h").keys()).binding, Some(&one(Action::SidebarToggle)));
+        let rl = km.effective(InputContext::RoomList);
+        assert_eq!(rl.lookup(seq("<C-w>h").keys()).binding, Some(&one(Action::FocusRoomList)));
+    }
+
+    #[test]
+    fn nop_shadows_the_default() {
+        let km = Keymap::new(&space(), [
+            (TableId::Timeline, seq("dd"), one(Action::Nop)),
+            (TableId::Timeline, seq("D"), one(Action::MessageDelete)),
+        ]);
+        let tl = km.effective(InputContext::Timeline);
+        assert_eq!(tl.lookup(seq("dd").keys()).binding, Some(&one(Action::Nop)));
+        assert_eq!(tl.lookup(seq("D").keys()).binding, Some(&one(Action::MessageDelete)));
+    }
+
+    #[test]
+    fn leader_is_substituted_in_defaults() {
+        let comma = KeySeq::parse(",", &KeySeq::default()).unwrap();
+        let km = Keymap::new(&comma, []);
+        let tl = km.effective(InputContext::Timeline);
+        assert_eq!(tl.lookup(&[Key::char(','), Key::char('e')]).binding, Some(&one(Action::SidebarToggle)));
+        assert_eq!(tl.lookup(seq("<Space>e").keys()).binding, None);
+    }
+
+    #[test]
+    fn chains_and_sinks() {
+        assert_eq!(InputContext::EditorPassthrough.chain(), &[] as &[TableId]);
+        assert_eq!(InputContext::Picker.sink(), KeySink::Text);
+        assert_eq!(InputContext::RoomList.sink(), KeySink::Drop);
+        assert!(InputContext::Timeline.counts());
+        assert!(!InputContext::ComposerNormal.counts());
+        for t in TableId::ALL {
+            assert_eq!(TableId::from_config_name(t.config_name()), Some(t));
+        }
+    }
+}
+
+// resolver.rs
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::action::{Action, Binding};
+    use crate::keymap::{InputContext, Keymap, TableId};
+    use crate::keys::{Key, KeySeq};
+
+    const T: u64 = 1000;
+
+    fn space() -> KeySeq {
+        KeySeq::parse("<Space>", &KeySeq::default()).unwrap()
+    }
+    fn seq(text: &str) -> KeySeq {
+        KeySeq::parse(text, &space()).unwrap()
+    }
+    fn k(text: &str) -> Key {
+        seq(text).keys()[0]
+    }
+    fn run(action: Action, count: Option<u32>) -> Resolved {
+        Resolved::Run { binding: Binding::single(action), count }
+    }
+    fn release(text: &str) -> Resolved {
+        Resolved::Release(seq(text).keys().to_vec())
+    }
+    /// Feeds keys and returns all outputs, with timer ids erased for comparison.
+    fn feed_all(r: &mut Resolver, km: &Keymap, ctx: InputContext, text: &str) -> Vec<Resolved> {
+        seq(text)
+            .keys()
+            .iter()
+            .flat_map(|&key| r.feed(km.effective(ctx), ctx.counts(), T, key))
+            .map(erase)
+            .collect()
+    }
+    fn erase(r: Resolved) -> Resolved {
+        match r {
+            Resolved::StartTimer { after_ms, .. } => Resolved::StartTimer { id: TimerId(0), after_ms },
+            other => other,
+        }
+    }
+    fn timer() -> Resolved {
+        Resolved::StartTimer { id: TimerId(0), after_ms: T }
+    }
+    fn last_timer(outputs: &[Resolved]) -> TimerId {
+        outputs.iter().rev().find_map(|o| match o {
+            Resolved::StartTimer { id, .. } => Some(*id),
+            _ => None,
+        }).expect("a timer")
+    }
+    fn defaults() -> Keymap {
+        Keymap::new(&space(), [])
+    }
+
+    #[test]
+    fn complete_binding_runs_immediately() {
+        let km = defaults();
+        let mut r = Resolver::new();
+        assert_eq!(feed_all(&mut r, &km, InputContext::Timeline, "j"), vec![run(Action::CursorDown, None)]);
+        assert!(r.pending().is_empty());
+    }
+
+    #[test]
+    fn prefix_waits_then_completes() {
+        let km = defaults();
+        let mut r = Resolver::new();
+        assert_eq!(feed_all(&mut r, &km, InputContext::Timeline, "g"), vec![timer()]);
+        assert_eq!(r.pending(), seq("g").keys());
+        assert_eq!(feed_all(&mut r, &km, InputContext::Timeline, "g"), vec![run(Action::CursorFirst, None)]);
+    }
+
+    #[test]
+    fn count_prefix() {
+        let km = defaults();
+        let mut r = Resolver::new();
+        assert_eq!(feed_all(&mut r, &km, InputContext::Timeline, "5j"), vec![run(Action::CursorDown, Some(5))]);
+        assert_eq!(feed_all(&mut r, &km, InputContext::Timeline, "10k"), vec![run(Action::CursorUp, Some(10))]);
+        // `0` without a count is an ordinary (unbound) key.
+        assert_eq!(feed_all(&mut r, &km, InputContext::Timeline, "0"), vec![release("0")]);
+        assert_eq!(r.count(), None);
+    }
+
+    #[test]
+    fn no_counts_in_text_contexts() {
+        let km = defaults();
+        let mut r = Resolver::new();
+        assert_eq!(feed_all(&mut r, &km, InputContext::ComposerNormal, "5"), vec![release("5")]);
+    }
+
+    #[test]
+    fn bound_digits_are_not_counts() {
+        let km = Keymap::new(&space(), [(TableId::Timeline, seq("1"), Binding::single(Action::FocusRoomList))]);
+        let mut r = Resolver::new();
+        assert_eq!(feed_all(&mut r, &km, InputContext::Timeline, "1"), vec![run(Action::FocusRoomList, None)]);
+    }
+
+    #[test]
+    fn timeout_releases_an_incomplete_prefix() {
+        let km = defaults();
+        let mut r = Resolver::new();
+        let out = r.feed(km.effective(InputContext::Timeline), true, T, k("g"));
+        let id = last_timer(&out);
+        assert_eq!(r.timeout(km.effective(InputContext::Timeline), T, id), vec![release("g")]);
+        assert!(r.pending().is_empty());
+    }
+
+    #[test]
+    fn timeout_runs_a_complete_prefix() {
+        let km = Keymap::new(&space(), [
+            (TableId::Timeline, seq("]"), Binding::single(Action::CursorLast)),
+            (TableId::Normal, seq("]u"), Binding::single(Action::RoomMarkRead)),
+        ]);
+        let ctx = InputContext::Timeline;
+        let mut r = Resolver::new();
+        let out = r.feed(km.effective(ctx), true, T, k("]"));
+        let id = last_timer(&out);
+        assert_eq!(r.timeout(km.effective(ctx), T, id), vec![run(Action::CursorLast, None)]);
+    }
+
+    #[test]
+    fn stale_timers_are_ignored() {
+        let km = defaults();
+        let ctx = InputContext::Timeline;
+        let mut r = Resolver::new();
+        let first = last_timer(&r.feed(km.effective(ctx), true, T, k("g")));
+        assert_eq!(feed_all(&mut r, &km, ctx, "g"), vec![run(Action::CursorFirst, None)]);
+        assert_eq!(r.timeout(km.effective(ctx), T, first), vec![]);
+    }
+
+    #[test]
+    fn mismatch_runs_the_pending_complete_binding_then_resolves_the_new_key() {
+        let km = Keymap::new(&space(), [
+            (TableId::Timeline, seq("]"), Binding::single(Action::CursorLast)),
+            (TableId::Normal, seq("]u"), Binding::single(Action::RoomMarkRead)),
+        ]);
+        let mut r = Resolver::new();
+        assert_eq!(
+            feed_all(&mut r, &km, InputContext::Timeline, "]j"),
+            vec![timer(), run(Action::CursorLast, None), run(Action::CursorDown, None)]
+        );
+    }
+
+    #[test]
+    fn mismatch_without_binding_releases_pending_keys() {
+        let km = defaults();
+        let mut r = Resolver::new();
+        // composer.insert has <C-x><C-e>; <C-x> then `a` goes to the editor.
+        assert_eq!(
+            feed_all(&mut r, &km, InputContext::ComposerInsert, "<C-x>a"),
+            vec![timer(), release("<C-x>"), release("a")]
+        );
+    }
+
+    #[test]
+    fn new_key_after_a_release_can_start_a_sequence() {
+        let km = defaults();
+        let mut r = Resolver::new();
+        // `gq` is unbound: release `g`, then `q` is unbound too. `gg` after a
+        // released `g` still works.
+        assert_eq!(
+            feed_all(&mut r, &km, InputContext::Timeline, "gqgg"),
+            vec![timer(), release("g"), release("q"), timer(), run(Action::CursorFirst, None)]
+        );
+    }
+
+    #[test]
+    fn count_is_kept_through_a_pending_sequence() {
+        let km = defaults();
+        let mut r = Resolver::new();
+        assert_eq!(
+            feed_all(&mut r, &km, InputContext::Timeline, "3gg"),
+            vec![timer(), run(Action::CursorFirst, Some(3))]
+        );
+    }
+
+    #[test]
+    fn nop_runs_and_consumes_the_keys() {
+        let km = Keymap::new(&space(), [(TableId::Timeline, seq("dd"), Binding::single(Action::Nop))]);
+        let mut r = Resolver::new();
+        assert_eq!(
+            feed_all(&mut r, &km, InputContext::Timeline, "dd"),
+            vec![timer(), run(Action::Nop, None)]
+        );
+    }
+
+    #[test]
+    fn reset_drops_pending_keys() {
+        let km = defaults();
+        let mut r = Resolver::new();
+        feed_all(&mut r, &km, InputContext::Timeline, "4g");
+        r.reset();
+        assert!(r.pending().is_empty());
+        assert_eq!(r.count(), None);
+    }
+}
+```
+
+- [ ] **Step 2: Run them to see them fail:** `nix develop -c cargo test -p mxt-core keymap resolver`
+- [ ] **Step 3: Implement** `keymap.rs` and `resolver.rs`. `EffectiveMap`
+uses a `BTreeMap<KeySeq, Binding>`; `is_prefix` is a range query starting
+just after the looked-up sequence (`KeySeq` orders lexicographically by keys,
+so every longer sequence with that prefix follows it directly). Feeding the
+rest again "as fresh input" is a loop over the keys through the same `feed`
+logic, appending outputs in order.
+- [ ] **Step 4: Run the tests to see them pass**, then fmt and clippy.
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/mxt-core/src/keymap.rs crates/mxt-core/src/resolver.rs crates/mxt-core/src/lib.rs
+git commit -m "Add the keymap with its default tables and the deterministic resolver, so fallback chains, nop shadowing, pending keys and counts are defined and tested in the core"
+```
