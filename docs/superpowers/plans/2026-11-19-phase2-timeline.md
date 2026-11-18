@@ -383,11 +383,11 @@ text.
 
 **Behavior:**
 - `ui.time_format` check: `mxt-tui` exports `pub fn check_time_format(format: &str) -> Result<(), String>`
-  (formats a fixed timestamp with `jiff::fmt::strtime`), and the configuration
-  loader in `mxt` calls it at load time with the value's span
-  (`dto::Ui::time_format` becomes `Spanned<String>`), so an invalid directive
-  or an empty format is reported with its line before the UI starts (design:
-  a typo is never silently ignored). Tests for a valid and an invalid format.
+  (formats a fixed timestamp with `jiff::fmt::strtime`; an invalid directive
+  or an empty format is an error), with tests for a valid and an invalid
+  format. Task 6 calls it from the configuration loader, so the error is
+  reported with its line before the UI starts (design: a typo is never
+  silently ignored).
 - Timeline pane: items oldest at the top, newest at the bottom; each item has
   a header (local time with `ui.time_format`, jiff, and the sender name) and
   the body: `RichText` mapped to ratatui lines (bold, italic, crossed out,
@@ -428,6 +428,11 @@ text.
 
 ### Task 6: Wire the timeline and check against the account
 
+- The configuration loader in `crates/mxt` calls
+  `mxt_tui::check_time_format` for `ui.time_format` with the value's span
+  (`dto::Ui::time_format` becomes `Spanned<String>`), with tests for a valid
+  and an invalid format. This builds `mxt`, so it runs in the worktree that
+  holds the matrix-sdk build.
 - `mxt` routes the new effects (already generic) and messages; run mxt
   against the account (the orchestrator does this) and check: a bridged room
   reads correctly, back pagination loads history, undecryptable messages

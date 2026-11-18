@@ -2941,10 +2941,11 @@ pub(crate) fn parse_bridge(content: &serde_json::Value) -> BridgeInfo;
   `is_direct()`, `direct_targets()` with `get_member_no_sync` for the partner
   name, `num_unread_messages()`, `num_unread_notifications()`,
   `num_unread_mentions()`, `is_marked_unread()`, the user-defined
-  notification mode (`notification_settings().get_user_defined_room_notification_mode`,
-  falling back to `get_default_room_notification_mode(is_encrypted,
-  is_one_to_one)`; `AllMessages` → `Default`, `MentionsAndKeywordsOnly` →
-  `MentionsAndKeywords`, `Mute` → `Mute`), `latest_event_timestamp()`,
+  notification mode (`notification_settings().get_user_defined_room_notification_mode`;
+  no room rule is `Default`, as the design says: the account default applies
+  and the badge counts already follow the push rules; `AllMessages` →
+  `Default`, `MentionsAndKeywordsOnly` → `MentionsAndKeywords`, `Mute` →
+  `Mute`), `latest_event_timestamp()`,
   the bridge info from the adapter's cache, and parent spaces from
   `get_state_events_static::<SpaceParentEventContent>()` (the `canonical`
   flag; names of joined spaces from `client.get_room(id)` with
