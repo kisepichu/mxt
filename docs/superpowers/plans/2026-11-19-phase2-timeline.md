@@ -382,6 +382,12 @@ text.
   features = ["system-editor"] }`, `jiff = "1"`)
 
 **Behavior:**
+- `ui.time_format` check: `mxt-tui` exports `pub fn check_time_format(format: &str) -> Result<(), String>`
+  (formats a fixed timestamp with `jiff::fmt::strtime`), and the configuration
+  loader in `mxt` calls it at load time with the value's span
+  (`dto::Ui::time_format` becomes `Spanned<String>`), so an invalid directive
+  or an empty format is reported with its line before the UI starts (design:
+  a typo is never silently ignored). Tests for a valid and an invalid format.
 - Timeline pane: items oldest at the top, newest at the bottom; each item has
   a header (local time with `ui.time_format`, jiff, and the sender name) and
   the body: `RichText` mapped to ratatui lines (bold, italic, crossed out,
