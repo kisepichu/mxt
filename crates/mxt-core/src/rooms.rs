@@ -112,13 +112,15 @@ impl RoomList {
     }
 
     /// Inserts or replaces the room with the same id and restores the order.
-    pub fn upsert(&mut self, summary: RoomSummary) {
+    /// Returns the room's new index.
+    pub fn upsert(&mut self, summary: RoomSummary) -> usize {
         self.remove(&summary.id);
         let sort = self.sort;
         let index = self
             .rooms
             .partition_point(|room| sort.compare(room, &summary) == Ordering::Less);
         self.rooms.insert(index, summary);
+        index
     }
 
     pub fn remove(&mut self, id: &RoomId) -> Option<RoomSummary> {
@@ -326,7 +328,8 @@ mod tests {
                 room("!b:example.org", None, "b", Some(20), unread(0)),
             ],
         );
-        l.upsert(room("!a:example.org", None, "a", Some(30), unread(1)));
+        let index = l.upsert(room("!a:example.org", None, "a", Some(30), unread(1)));
+        assert_eq!(index, 0);
         assert_eq!(ids(&l), ["!a:example.org", "!b:example.org"]);
         assert_eq!(l.len(), 2);
     }

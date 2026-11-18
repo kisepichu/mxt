@@ -1,0 +1,305 @@
+//! The application state and `update`: keys and adapter messages in, effects
+//! out, without I/O.
+
+mod rooms;
+#[cfg(test)]
+mod tests;
+
+use crate::action::{Action, Binding};
+use crate::effect::{Effect, UiEffect};
+use crate::ids::RoomId;
+use crate::keymap::{InputContext, KeySink, Keymap};
+use crate::keys::Key;
+use crate::msg::{EditorMode, Msg, Pane, SyncState};
+use crate::resolver::{Resolved, Resolver, TimerId};
+use crate::rooms::RoomList;
+use crate::settings::Settings;
+
+use rooms::Motion;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Focus {
+    RoomList,
+    Timeline,
+    Composer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusKind {
+    Info,
+    Error,
+}
+
+/// The message in the status line; the next key clears it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StatusMessage {
+    pub kind: StatusKind,
+    pub text: String,
+}
+
+/// The items a pane showed in its last render, inclusive.
+#[derive(Clone, Copy, Debug)]
+struct Viewport {
+    first: usize,
+    last: usize,
+}
+
+/// The UI state (design, "Domain model"), changed only by [`App::update`].
+pub struct App {
+    keymap: Keymap,
+    settings: Settings,
+    resolver: Resolver,
+    /// The input context of the last key, where the resolver's pending keys
+    /// started.
+    key_context: InputContext,
+    rooms: RoomList,
+    /// The room list cursor, once a cursor action or opening a room placed
+    /// it. Until then, and while the list is empty, it is `None` and the
+    /// cursor is on the first room, whichever room that is, so rooms that
+    /// arrive in any order at startup leave it at the top.
+    room_cursor: Option<usize>,
+    open_room: Option<RoomId>,
+    focus: Focus,
+    sidebar_visible: bool,
+    sync_state: SyncState,
+    terminal_focused: bool,
+    status: Option<StatusMessage>,
+    room_list_viewport: Option<Viewport>,
+    timeline_viewport: Option<Viewport>,
+}
+
+impl App {
+    pub fn new(keymap: Keymap, settings: Settings) -> App {
+        let (focus, key_context) = if settings.room_list_visible {
+            (Focus::RoomList, InputContext::RoomList)
+        } else {
+            (Focus::Timeline, InputContext::Timeline)
+        };
+        App {
+            keymap,
+            resolver: Resolver::new(),
+            key_context,
+            rooms: RoomList::new(settings.room_sort),
+            room_cursor: None,
+            open_room: None,
+            focus,
+            sidebar_visible: settings.room_list_visible,
+            sync_state: SyncState::default(),
+            terminal_focused: true,
+            status: None,
+            room_list_viewport: None,
+            timeline_viewport: None,
+            settings,
+        }
+    }
+
+    /// Deterministic and free of I/O.
+    pub fn update(&mut self, msg: Msg) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        match msg {
+            Msg::Key { key, editor } => self.key(key, editor, &mut effects),
+            Msg::Timeout { id } => self.timeout(id, &mut effects),
+            Msg::RoomUpserted(summary) => self.upsert_room(summary),
+            Msg::RoomRemoved(id) => self.remove_room(id, &mut effects),
+            Msg::SyncState(state) => self.sync_state = state,
+            Msg::Viewport { pane, first, last } => {
+                let viewport = Some(Viewport { first, last });
+                match pane {
+                    Pane::RoomList => self.room_list_viewport = viewport,
+                    Pane::Timeline => self.timeline_viewport = viewport,
+                }
+            }
+            Msg::TerminalFocus(focused) => self.terminal_focused = focused,
+            Msg::EffectFailed { error } => self.set_status(StatusKind::Error, error),
+        }
+        effects
+    }
+
+    pub fn rooms(&self) -> &RoomList {
+        &self.rooms
+    }
+
+    /// Index of the room list cursor in `rooms().rooms()`.
+    pub fn room_cursor(&self) -> Option<usize> {
+        self.room_cursor
+            .or_else(|| (!self.rooms.is_empty()).then_some(0))
+    }
+
+    pub fn open_room(&self) -> Option<&RoomId> {
+        self.open_room.as_ref()
+    }
+
+    pub fn focus(&self) -> Focus {
+        self.focus
+    }
+
+    pub fn sidebar_visible(&self) -> bool {
+        self.sidebar_visible
+    }
+
+    pub fn sync_state(&self) -> SyncState {
+        self.sync_state
+    }
+
+    pub fn terminal_focused(&self) -> bool {
+        self.terminal_focused
+    }
+
+    pub fn status(&self) -> Option<&StatusMessage> {
+        self.status.as_ref()
+    }
+
+    /// Pending keys, for the status line (like nvim's showcmd).
+    pub fn pending_keys(&self) -> &[Key] {
+        self.resolver.pending()
+    }
+
+    /// The pending count prefix, for the status line.
+    pub fn pending_count(&self) -> Option<u32> {
+        self.resolver.count()
+    }
+
+    /// "NORMAL", or for the composer's editor "INSERT", "NORMAL", "VISUAL"
+    /// or "SEARCH".
+    pub fn mode_label(&self, editor: Option<EditorMode>) -> &'static str {
+        match (self.focus, editor) {
+            (Focus::Composer, Some(EditorMode::Insert)) => "INSERT",
+            (Focus::Composer, Some(EditorMode::Visual)) => "VISUAL",
+            (Focus::Composer, Some(EditorMode::Search)) => "SEARCH",
+            _ => "NORMAL",
+        }
+    }
+
+    /// Stands in for `composer.focus` (phase 3) in tests.
+    #[cfg(test)]
+    pub(crate) fn focus_composer_for_test(&mut self) {
+        if self.open_room.is_some() {
+            self.focus = Focus::Composer;
+        }
+    }
+
+    /// Where `key` goes (design, "Tables and resolution").
+    fn input_context(&self, editor: Option<EditorMode>) -> InputContext {
+        match self.focus {
+            Focus::RoomList => InputContext::RoomList,
+            Focus::Timeline => InputContext::Timeline,
+            Focus::Composer => match editor {
+                None | Some(EditorMode::Normal) => InputContext::ComposerNormal,
+                Some(EditorMode::Visual) => InputContext::ComposerVisual,
+                Some(EditorMode::Insert) => InputContext::ComposerInsert,
+                Some(EditorMode::Search) => InputContext::EditorPassthrough,
+            },
+        }
+    }
+
+    fn key(&mut self, key: Key, editor: Option<EditorMode>, effects: &mut Vec<Effect>) {
+        self.status = None;
+        let context = self.input_context(editor);
+        if context != self.key_context {
+            self.resolver.reset();
+            self.key_context = context;
+        }
+        let map = self.keymap.effective(context);
+        let timeoutlen_ms = self.settings.timeoutlen_ms;
+        let resolved = self
+            .resolver
+            .feed(map, context.counts(), timeoutlen_ms, key);
+        for resolved in resolved {
+            self.resolved(context.sink(), resolved, effects);
+        }
+    }
+
+    /// Resolves the pending keys in the context they started in.
+    fn timeout(&mut self, id: TimerId, effects: &mut Vec<Effect>) {
+        let context = self.key_context;
+        if let Some(resolved) = self.resolver.timeout(self.keymap.effective(context), id) {
+            self.resolved(context.sink(), resolved, effects);
+        }
+    }
+
+    fn resolved(&mut self, sink: KeySink, resolved: Resolved, effects: &mut Vec<Effect>) {
+        match resolved {
+            Resolved::Run { binding, count } => self.run_binding(&binding, count, effects),
+            Resolved::Release(keys) => self.release(sink, keys, effects),
+            Resolved::StartTimer { id, after_ms } => {
+                effects.push(Effect::Ui(UiEffect::StartTimer { id, after_ms }));
+            }
+        }
+    }
+
+    /// Runs the actions in order, each against the state the previous one left.
+    fn run_binding(&mut self, binding: &Binding, count: Option<u32>, effects: &mut Vec<Effect>) {
+        for action in binding.actions() {
+            let count = if action.takes_count() {
+                count.unwrap_or(1)
+            } else {
+                1
+            };
+            self.run(action, count, effects);
+        }
+    }
+
+    fn release(&mut self, sink: KeySink, keys: Vec<Key>, effects: &mut Vec<Effect>) {
+        match sink {
+            KeySink::Drop => {}
+            KeySink::Editor => {
+                // `effects` belongs to one feed or timeout, so consecutive
+                // releases become one effect.
+                if let Some(Effect::Ui(UiEffect::ReplayKeys(replay))) = effects.last_mut() {
+                    replay.extend(keys);
+                } else {
+                    effects.push(Effect::Ui(UiEffect::ReplayKeys(keys)));
+                }
+            }
+            // No text input is owned by the core yet: no picker or command line
+            // is ever open, so this context is never entered.
+            KeySink::Text => {}
+        }
+    }
+
+    fn run(&mut self, action: &Action, count: u32, effects: &mut Vec<Effect>) {
+        match action {
+            Action::CursorDown => self.move_cursor(Motion::Down(count)),
+            Action::CursorUp => self.move_cursor(Motion::Up(count)),
+            Action::CursorFirst => self.move_cursor(Motion::First),
+            Action::CursorLast => self.move_cursor(Motion::Last),
+            Action::CursorHalfPageDown => self.move_cursor(Motion::HalfPageDown(count)),
+            Action::CursorHalfPageUp => self.move_cursor(Motion::HalfPageUp(count)),
+            Action::RoomOpen(target) => self.open_target(target, effects),
+            Action::RoomOpenSelected => self.open_selected(effects),
+            Action::RoomMarkRead => self.mark_read(effects),
+            Action::SidebarToggle => {
+                self.sidebar_visible = !self.sidebar_visible;
+                if !self.sidebar_visible && self.focus == Focus::RoomList {
+                    self.focus = Focus::Timeline;
+                }
+            }
+            Action::FocusRoomList => {
+                self.sidebar_visible = true;
+                self.focus = Focus::RoomList;
+            }
+            Action::FocusTimeline => self.focus = Focus::Timeline,
+            Action::AppQuit => effects.push(Effect::Ui(UiEffect::Quit)),
+            Action::Nop => {}
+            // The phase that implements an action replaces this.
+            _ => self.set_status(
+                StatusKind::Info,
+                format!("{} is not available yet", action.name()),
+            ),
+        }
+    }
+
+    fn set_status(&mut self, kind: StatusKind, text: impl Into<String>) {
+        self.status = Some(StatusMessage {
+            kind,
+            text: text.into(),
+        });
+    }
+
+    fn viewport(&self, pane: Pane) -> Option<Viewport> {
+        match pane {
+            Pane::RoomList => self.room_list_viewport,
+            Pane::Timeline => self.timeline_viewport,
+        }
+    }
+}
