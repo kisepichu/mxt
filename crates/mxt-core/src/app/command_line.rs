@@ -34,7 +34,7 @@ pub(super) struct OpenLine {
 struct Completion {
     /// The text before the first press.
     typed: String,
-    /// Never empty.
+    /// At least two; a single candidate ends the completion at once.
     candidates: Vec<String>,
     /// The candidate in the text; `candidates.len()` stands for `typed`.
     shown: usize,
@@ -138,7 +138,9 @@ impl App {
     }
 
     /// Replaces the text with the next candidate; after the last one the
-    /// typed text comes back, then the cycle repeats.
+    /// typed text comes back, then the cycle repeats. A single candidate ends
+    /// the completion, so the next press completes the new text (`open `
+    /// goes on to room names), like vim.
     pub(super) fn complete_line(&mut self) {
         let Some(open) = &mut self.command_line else {
             return;
@@ -149,8 +151,11 @@ impl App {
         let completion = match &mut open.completion {
             Some(completion) => completion,
             None => {
-                let candidates = candidates(&open.line.text, &self.rooms);
-                if candidates.is_empty() {
+                let mut candidates = candidates(&open.line.text, &self.rooms);
+                if candidates.len() <= 1 {
+                    if let Some(only) = candidates.pop() {
+                        open.line.text = only;
+                    }
                     return;
                 }
                 open.completion.insert(Completion {

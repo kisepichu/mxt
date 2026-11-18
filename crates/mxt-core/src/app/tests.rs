@@ -477,6 +477,26 @@ fn completes_room_names_for_open() {
 }
 
 #[test]
+fn a_single_candidate_ends_the_completion() {
+    let mut app = app();
+    keys(&mut app, ":o<Tab>");
+    assert_eq!(line(&app), Some((LineKind::Command, "open ")));
+    keys(&mut app, "<Tab>");
+    assert_eq!(line(&app), Some((LineKind::Command, "open c:example.org")));
+    keys(&mut app, "<Tab>");
+    assert_eq!(line(&app), Some((LineKind::Command, "open b:example.org")));
+}
+
+#[test]
+fn an_edit_after_tab_starts_a_new_completion() {
+    let mut app = app();
+    keys(&mut app, ":u<Tab><BS>");
+    assert_eq!(line(&app), Some((LineKind::Command, "unmut")));
+    keys(&mut app, "<Tab>");
+    assert_eq!(line(&app), Some((LineKind::Command, "unmute")));
+}
+
+#[test]
 fn search_moves_the_cursor_and_repeats() {
     let mut app = app();
     keys(&mut app, "/A:<CR>");
