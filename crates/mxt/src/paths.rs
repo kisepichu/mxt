@@ -22,27 +22,14 @@ pub struct Paths {
     pub state: PathBuf,
 }
 
-#[allow(dead_code)] // Used by `main` once the startup flow is wired.
 impl Paths {
     /// `$XDG_DATA_HOME/mxt`, `$XDG_CACHE_HOME/mxt`, `$XDG_STATE_HOME/mxt`, with
     /// `~/.local/share`, `~/.cache`, `~/.local/state` when a variable is unset,
-    /// empty or relative (the XDG base directory specification ignores
-    /// relative paths); the same on macOS. `None` when a directory falls back
-    /// to `HOME` and `HOME` is unset, empty or relative. `env` is
-    /// `std::env::var_os`, so a value that is not UTF-8 is used as it is
-    /// instead of falling back to another directory.
+    /// empty or relative (see `base_dir`); the same on macOS. `None` when a
+    /// directory falls back to `HOME` and `HOME` is unset, empty or relative.
     pub fn from_env(env: &impl Fn(&str) -> Option<OsString>) -> Option<Paths> {
-        let absolute = |name: &str| {
-            env(name)
-                .map(PathBuf::from)
-                .filter(|path| path.is_absolute())
-        };
         let dir = |variable: &str, fallback: &str| {
-            let base = match absolute(variable) {
-                Some(base) => base,
-                None => absolute("HOME")?.join(fallback),
-            };
-            Some(base.join("mxt"))
+            base_dir(env, variable, fallback).map(|base| base.join("mxt"))
         };
         Some(Paths {
             data: dir("XDG_DATA_HOME", ".local/share")?,
@@ -81,6 +68,24 @@ impl Paths {
         }
         Ok(())
     }
+}
+
+/// An XDG base directory: `$variable`, or `$HOME/<fallback>` when the variable
+/// is unset, empty or relative (the XDG base directory specification ignores
+/// relative paths). `None` when that falls back to `HOME` and `HOME` is unset,
+/// empty or relative. `env` is `std::env::var_os`, so a value that is not UTF-8
+/// is used as it is instead of falling back to another directory.
+pub fn base_dir(
+    env: &impl Fn(&str) -> Option<OsString>,
+    variable: &str,
+    fallback: &str,
+) -> Option<PathBuf> {
+    let absolute = |name: &str| {
+        env(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    absolute(variable).or_else(|| Some(absolute("HOME")?.join(fallback)))
 }
 
 /// Creates `dir` and its missing parents with mode 0700, and tightens `dir`

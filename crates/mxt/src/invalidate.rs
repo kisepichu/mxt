@@ -4,6 +4,7 @@
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::paths::{Paths, create_private_dir, with_path};
@@ -13,7 +14,6 @@ use crate::paths::{Paths, create_private_dir, with_path};
 /// path. The cache goes first because it can always be rebuilt: an error
 /// always means the data directory has not moved. The caller has dropped the
 /// SDK client before, so the stores are closed.
-#[allow(dead_code)] // Used by `main` once the startup flow is wired.
 pub fn invalidate(paths: &Paths, unix_seconds: u64) -> io::Result<PathBuf> {
     delete_dir(&paths.cache)?;
     let moved = paths
@@ -30,7 +30,6 @@ pub fn invalidate(paths: &Paths, unix_seconds: u64) -> io::Result<PathBuf> {
 /// 0700), so the new device never shows the old one's decrypted events and
 /// media. Returns the moved store, `None` when there was none. No-op while
 /// the session file exists.
-#[allow(dead_code)] // Used by `main` once the startup flow is wired.
 pub fn set_aside_orphaned_store(paths: &Paths, unix_seconds: u64) -> io::Result<Option<PathBuf>> {
     let session_file = paths.session_file();
     let session_exists = session_file
@@ -52,6 +51,13 @@ pub fn set_aside_orphaned_store(paths: &Paths, unix_seconds: u64) -> io::Result<
     let moved = paths.data.join(format!("store.invalid-{unix_seconds}"));
     rename(&store, &moved)?;
     Ok(Some(moved))
+}
+
+/// The current time for the names of set-aside directories.
+pub fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
 }
 
 /// `fs::remove_dir_all`; a missing directory is fine.

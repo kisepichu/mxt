@@ -56,12 +56,6 @@ impl TableId {
             TableId::CommandLine => "command_line",
         }
     }
-
-    pub fn from_config_name(name: &str) -> Option<TableId> {
-        TableId::ALL
-            .into_iter()
-            .find(|table| table.config_name() == name)
-    }
 }
 
 /// Where the user is typing; decides the table chain and where released keys go.
@@ -490,8 +484,5 @@ mod tests {
         assert_eq!(InputContext::RoomList.sink(), KeySink::Drop);
         assert!(InputContext::Timeline.counts());
         assert!(!InputContext::ComposerNormal.counts());
-        for t in TableId::ALL {
-            assert_eq!(TableId::from_config_name(t.config_name()), Some(t));
-        }
     }
 }

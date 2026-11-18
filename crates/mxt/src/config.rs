@@ -8,11 +8,12 @@ mod tests;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use mxt_core::action::{Action, Binding};
+use mxt_core::action::{Action, ActionError, Binding};
 use mxt_core::ids::UserId;
 use mxt_core::keymap::{Keymap, TableId};
 use mxt_core::keys::{Key, KeyParseError, KeySeq};
@@ -20,15 +21,10 @@ use mxt_core::settings::Settings;
 use toml::Spanned;
 use toml::de::{DeTable, DeValue};
 
+use crate::paths;
+
 /// The configuration with every value checked and every default applied.
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the startup tasks (plan Tasks 9 to 12) read the fields"
-    )
-)]
 pub struct Config {
     pub user_id: UserId,
     /// `None`: discovered from the user ID's server name via .well-known.
@@ -36,8 +32,21 @@ pub struct Config {
     pub keymap: Keymap,
     pub settings: Settings,
     /// strftime format, applied in the local time zone by `mxt-tui`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the timeline (phase 2) formats times with it")
+    )]
     pub time_format: String,
+    /// Absolute.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "file downloads (phase 4) save here")
+    )]
     pub download_dir: PathBuf,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "opening files (phase 4) runs it")
+    )]
     pub opener: Vec<String>,
 }
 
@@ -53,13 +62,10 @@ const DEFAULT_OPENER: &str = if cfg!(target_os = "macos") {
 };
 
 /// `$XDG_CONFIG_HOME/mxt/config.toml`, or `$HOME/.config/mxt/config.toml` when
-/// `XDG_CONFIG_HOME` is unset or empty (the same on macOS).
-pub fn default_path(env: &impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    let var = |name: &str| env(name).filter(|value| !value.is_empty());
-    match var("XDG_CONFIG_HOME") {
-        Some(config) => Some(Path::new(&config).join("mxt/config.toml")),
-        None => var("HOME").map(|home| Path::new(&home).join(".config/mxt/config.toml")),
-    }
+/// `XDG_CONFIG_HOME` is unset, empty or relative (the same on macOS). `env` is
+/// `std::env::var_os`, like for `Paths::from_env`.
+pub fn default_path(env: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    paths::base_dir(env, "XDG_CONFIG_HOME", ".config").map(|base| base.join("mxt/config.toml"))
 }
 
 /// Reads and converts the file. `home` expands a leading `~` in paths.
@@ -123,10 +129,17 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Config, ConfigError
     };
 
     let download_dir = match files.download_dir {
-        Some(dir) if dir.get_ref().is_empty() => {
-            return Err(source.invalid(&dir, "files.download_dir: must not be empty".into()));
+        Some(dir) => {
+            let path = expand_home(dir.get_ref(), home);
+            if !path.is_absolute() {
+                let message = format!(
+                    "files.download_dir: {:?} must be an absolute path or start with ~/",
+                    dir.get_ref()
+                );
+                return Err(source.invalid(&dir, message));
+            }
+            path
         }
-        Some(dir) => expand_home(dir.get_ref(), home),
         None => expand_home(DEFAULT_DOWNLOAD_DIR, home),
     };
     let opener = match files.opener {
@@ -250,8 +263,11 @@ fn binding(
     let actions = specs
         .into_iter()
         .map(|spec| {
-            Action::from_spec(&spec.get_ref().name, &spec.get_ref().args)
-                .map_err(|error| source.invalid(&spec, format!("{setting}: {error}")))
+            let spec_ref = spec.get_ref();
+            Action::from_spec(&spec_ref.name, &spec_ref.args).map_err(|error| {
+                let at = argument_start(spec_ref, &error).unwrap_or(spec.span().start);
+                source.invalid_at(at, format!("{setting}: {error}"))
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
     Binding::new(actions).ok_or_else(|| {
@@ -259,6 +275,25 @@ fn binding(
             format!("{setting}: an empty array binds nothing; write \"nop\" to remove a binding");
         source.invalid_at(span.start, message)
     })
+}
+
+/// Where the name of the argument that `error` is about starts, so a binding
+/// written as a `[header]` table gets the argument's line. For a conflict,
+/// the later of the two arguments in the file.
+fn argument_start(spec: &dto::ActionSpec, error: &ActionError) -> Option<usize> {
+    let start = |arg: &str| {
+        let index = spec.args.iter().position(|(name, _)| name == arg)?;
+        Some(spec.arg_starts[index])
+    };
+    match error {
+        ActionError::UnknownArgument { arg, .. } => start(arg),
+        ActionError::WrongType { arg, .. } | ActionError::InvalidValue { arg, .. } => start(arg),
+        ActionError::Conflict {
+            args: [first, second],
+            ..
+        } => start(first).max(start(second)),
+        ActionError::UnknownAction { .. } | ActionError::MissingArgument { .. } => None,
+    }
 }
 
 fn key_error(setting: &str, text: &Spanned<String>, error: &KeyParseError) -> String {
