@@ -16,10 +16,16 @@ mxt-core = { path = "crates/mxt-core" }
 mxt-matrix = { path = "crates/mxt-matrix" }
 mxt-tui = { path = "crates/mxt-tui" }
 
+# The version ratatui 0.30 uses, so there is one crossterm in the tree.
+crossterm = { version = "0.29", features = ["event-stream"] }
+futures-util = "0.3"
 nucleo-matcher = "0.3"
+ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 # Reading only: the `display` feature (serialization) is left out.
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
+unicode-width = "0.2"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
