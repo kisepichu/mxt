@@ -23,6 +23,8 @@ crossterm = { version = "0.29", features = ["event-stream"] }
 # The composer and the message view. The system clipboard (arboard), mouse
 # support and syntax highlighting are left out.
 edtui = { version = "0.11", default-features = false, features = ["system-editor"] }
+# The reaction picker's emoji and shortcodes; also what matrix-sdk-ui uses.
+emojis = "0.9"
 futures-util = "0.3"
 jiff = "1"
 matrix-sdk = { version = "0.19", default-features = false, features = ["e2e-encryption", "sqlite", "rustls-aws-lc-rs"] }

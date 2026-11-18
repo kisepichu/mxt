@@ -177,6 +177,21 @@ impl OwnEvent {
     }
 }
 
+/// What the composer's text becomes when it is sent (design, "Functional
+/// core"). Replying and editing at the same time, and editing another
+/// user's message, cannot be expressed.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum Draft {
+    #[default]
+    New,
+    Reply {
+        to: ItemRef,
+    },
+    Edit {
+        target: OwnEvent,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

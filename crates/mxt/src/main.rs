@@ -65,7 +65,7 @@ fn main() -> ExitCode {
 
 /// The terminal UI until `:q`.
 fn run_ui(config: Config) -> ExitCode {
-    let mut app = App::new(config.keymap, config.settings);
+    let mut app = App::new(config.keymap, config.settings, config.user_id);
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

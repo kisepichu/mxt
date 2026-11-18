@@ -7,6 +7,7 @@ pub mod action;
 pub mod app;
 pub mod command;
 pub mod effect;
+pub mod emoji;
 pub mod fuzzy;
 pub mod ids;
 pub mod keymap;

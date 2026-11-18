@@ -2,26 +2,33 @@
 //! out, without I/O.
 
 mod command_line;
+mod composer;
+mod picker;
 mod rooms;
 mod search;
 #[cfg(test)]
 mod tests;
 mod timeline;
 
+use std::collections::HashMap;
+
 use crate::action::{Action, Binding};
-use crate::effect::{Effect, UiEffect};
-use crate::ids::RoomId;
+use crate::effect::{Effect, MatrixEffect, UiEffect};
+use crate::ids::{RoomId, UserId};
 use crate::keymap::{InputContext, KeySink, Keymap};
 use crate::keys::Key;
 use crate::msg::{EditorMode, Msg, Pane, SyncState};
 use crate::resolver::{Resolved, Resolver, TimerId};
 use crate::rooms::RoomList;
 use crate::settings::Settings;
-use crate::timeline::TimelineEntry;
+use crate::timeline::{ItemRef, TimelineEntry};
 
 pub use command_line::{CommandLine, LineKind};
+pub use picker::{Picker, PickerItem, PickerKind};
 
 use command_line::OpenLine;
+use composer::{Composer, MentionMenu};
+use picker::OpenPicker;
 use search::Direction;
 use timeline::Timeline;
 
@@ -63,10 +70,25 @@ enum Motion {
     Last,
 }
 
+/// An action waiting for `y` in `CONFIRM` mode.
+enum Confirm {
+    Redact { room: RoomId, item: ItemRef },
+}
+
+impl Confirm {
+    fn question(&self) -> &'static str {
+        match self {
+            Confirm::Redact { .. } => "Delete this message? (y/n)",
+        }
+    }
+}
+
 /// The UI state (design, "Domain model"), changed only by [`App::update`].
 pub struct App {
     keymap: Keymap,
     settings: Settings,
+    /// The user's own ID, for `OwnEvent` and mention ranking.
+    me: UserId,
     resolver: Resolver,
     /// The input context of the last key, where the resolver's pending keys
     /// started.
@@ -92,10 +114,16 @@ pub struct App {
     command_line: Option<OpenLine>,
     /// The pattern `search.next` and `search.prev` repeat.
     last_search: Option<String>,
+    /// Per room, created when first used.
+    composers: HashMap<RoomId, Composer>,
+    mention_menu: Option<MentionMenu>,
+    picker: Option<OpenPicker>,
+    /// `CONFIRM` mode: the next key answers.
+    confirm: Option<Confirm>,
 }
 
 impl App {
-    pub fn new(keymap: Keymap, settings: Settings) -> App {
+    pub fn new(keymap: Keymap, settings: Settings, me: UserId) -> App {
         let (focus, key_context) = if settings.room_list_visible {
             (Focus::RoomList, InputContext::RoomList)
         } else {
@@ -103,6 +131,7 @@ impl App {
         };
         App {
             keymap,
+            me,
             resolver: Resolver::new(),
             key_context,
             rooms: RoomList::new(settings.room_sort),
@@ -119,6 +148,10 @@ impl App {
             timeline_viewport: None,
             command_line: None,
             last_search: None,
+            composers: HashMap::new(),
+            mention_menu: None,
+            picker: None,
+            confirm: None,
             settings,
         }
     }
@@ -153,6 +186,10 @@ impl App {
                 self.check_receipt(&mut effects);
             }
             Msg::EffectFailed { error } => self.set_status(StatusKind::Error, error),
+            Msg::Submit { room, body } => self.submit(room, body, &mut effects),
+            Msg::ComposerEdited { room, empty } => self.composer_edited(room, empty),
+            Msg::MentionQuery { room, query } => self.mention_query(room, query),
+            Msg::MembersLoaded { room, members } => self.members_loaded(room, members),
         }
         effects
     }
@@ -210,6 +247,11 @@ impl App {
         self.status.as_ref()
     }
 
+    /// The question while in `CONFIRM` mode.
+    pub fn confirmation(&self) -> Option<&str> {
+        self.confirm.as_ref().map(Confirm::question)
+    }
+
     /// Pending keys, for the status line (like nvim's showcmd).
     pub fn pending_keys(&self) -> &[Key] {
         self.resolver.pending()
@@ -220,12 +262,19 @@ impl App {
         self.resolver.count()
     }
 
-    /// "COMMAND" while a command or search line is open, "VIEW" while the
-    /// message view is open, "NORMAL", or for the composer's editor
-    /// "INSERT", "NORMAL", "VISUAL" or "SEARCH".
+    /// "CONFIRM" while an action asks for confirmation, "COMMAND" while a
+    /// command or search line is open, "PICKER" while a picker is open,
+    /// "VIEW" while the message view is open, "NORMAL", or for the
+    /// composer's editor "INSERT", "NORMAL", "VISUAL" or "SEARCH".
     pub fn mode_label(&self, editor: Option<EditorMode>) -> &'static str {
+        if self.confirm.is_some() {
+            return "CONFIRM";
+        }
         if self.command_line.is_some() {
             return "COMMAND";
+        }
+        if self.picker.is_some() {
+            return "PICKER";
         }
         if self.view_open {
             return "VIEW";
@@ -238,18 +287,14 @@ impl App {
         }
     }
 
-    /// Stands in for `composer.focus` (phase 3) in tests.
-    #[cfg(test)]
-    pub(crate) fn focus_composer_for_test(&mut self) {
-        if self.open_room.is_some() {
-            self.focus = Focus::Composer;
-        }
-    }
-
-    /// Where `key` goes (design, "Tables and resolution").
+    /// Where `key` goes (design, "Tables and resolution"); `CONFIRM` mode
+    /// takes keys before the keymap.
     fn input_context(&self, editor: Option<EditorMode>) -> InputContext {
         if self.command_line.is_some() {
             return InputContext::CommandLine;
+        }
+        if self.picker.is_some() {
+            return InputContext::Picker;
         }
         if self.view_open {
             return match editor {
@@ -263,6 +308,9 @@ impl App {
             Focus::Composer => match editor {
                 None | Some(EditorMode::Normal) => InputContext::ComposerNormal,
                 Some(EditorMode::Visual) => InputContext::ComposerVisual,
+                Some(EditorMode::Insert) if self.mention_menu().is_some() => {
+                    InputContext::ComposerCompletion
+                }
                 Some(EditorMode::Insert) => InputContext::ComposerInsert,
                 Some(EditorMode::Search) => InputContext::EditorPassthrough,
             },
@@ -278,9 +326,15 @@ impl App {
 
     /// Resolves `key` in the current input context. When a binding that ran
     /// before `key` was resolved (the pending keys `key` ended) changes the
-    /// context, the rest of the outputs belong to the old context, so `key`
-    /// is resolved afresh in the new one (design, "Keymap resolver").
+    /// context or asks for confirmation, the rest of the outputs belong to
+    /// the old context, so `key` is resolved afresh in the new one (design,
+    /// "Keymap resolver").
     fn feed(&mut self, key: Key, editor: Option<EditorMode>, effects: &mut Vec<Effect>) {
+        if let Some(confirm) = self.confirm.take() {
+            // Keys pending from before the question go with it.
+            self.resolver.reset();
+            return self.answer(confirm, key, effects);
+        }
         let context = self.input_context(editor);
         if context != self.key_context {
             self.resolver.reset();
@@ -298,10 +352,23 @@ impl App {
             // `key` was not part of the run when outputs follow it, or when
             // `key` started a count after it (a run takes the count).
             let key_left = resolved.len() > 0 || self.resolver.count().is_some();
-            if ran && key_left && self.input_context(editor) != context {
+            let moved = self.confirm.is_some() || self.input_context(editor) != context;
+            if ran && key_left && moved {
                 // The reset in the new context drops the old outputs and the
                 // count. Nothing is pending then, so this does not come back.
                 return self.feed(key, editor, effects);
+            }
+        }
+    }
+
+    /// `y` runs the confirmed action; any other key cancels it.
+    fn answer(&mut self, confirm: Confirm, key: Key, effects: &mut Vec<Effect>) {
+        if key.text() != Some('y') {
+            return;
+        }
+        match confirm {
+            Confirm::Redact { room, item } => {
+                effects.push(Effect::Matrix(MatrixEffect::Redact { room, item }));
             }
         }
     }
@@ -348,10 +415,14 @@ impl App {
                     effects.push(Effect::Ui(UiEffect::ReplayKeys(keys)));
                 }
             }
-            // The command line; the picker query arrives with the picker.
+            // The command line or the picker query, whichever has the keys.
             KeySink::Text => {
                 for key in keys {
-                    self.type_into_line(key);
+                    if self.command_line.is_some() {
+                        self.type_into_line(key);
+                    } else {
+                        self.type_into_picker(key);
+                    }
                 }
             }
         }
@@ -372,6 +443,26 @@ impl App {
             Action::ViewClose => self.close_view(effects),
             Action::MessageYank => self.yank_message(effects),
             Action::MessageGotoReply => self.goto_reply(effects),
+            Action::MessageReply => self.reply(effects),
+            Action::MessageEdit => self.edit_message(effects),
+            Action::MessageDelete => self.delete_message(),
+            Action::MessageReact => self.react(),
+            Action::MessageResend => self.resend_message(effects),
+            Action::ComposerFocus(mode) => self.focus_composer(*mode, effects),
+            Action::ComposerSend => self.composer_effect(UiEffect::RequestSubmit, effects),
+            Action::ComposerNewline => self.composer_effect(UiEffect::InsertNewline, effects),
+            Action::ComposerExternalEditor => {
+                self.composer_effect(UiEffect::ExternalEditor, effects);
+            }
+            Action::ComposerCancel => self.cancel_draft(effects),
+            Action::CompletionNext => self.move_completion(true),
+            Action::CompletionPrev => self.move_completion(false),
+            Action::CompletionAccept => self.accept_completion(effects),
+            Action::CompletionCancel => self.cancel_completion(),
+            Action::PickerNext => self.move_picker(true),
+            Action::PickerPrev => self.move_picker(false),
+            Action::PickerAccept => self.accept_picker(effects),
+            Action::PickerCancel => self.cancel_picker(),
             Action::CommandLineOpen => self.open_line(LineKind::Command),
             Action::CommandLineExecute => self.execute_line(effects),
             Action::CommandLineCancel => self.cancel_line(),

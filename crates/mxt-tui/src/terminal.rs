@@ -150,7 +150,8 @@ impl Tui {
     /// not exist yet, so it is dropped otherwise); `OpenView` replaces the
     /// message view and `CloseView` drops it with its edits; `Yank` copies
     /// into the register, and the next draw sends it to the terminal
-    /// clipboard; `Quit` sets `should_quit`.
+    /// clipboard; `Quit` sets `should_quit`. The composer effects are
+    /// dropped until the composer exists.
     pub fn execute(&mut self, effect: UiEffect, now: Instant) {
         match effect {
             UiEffect::StartTimer { id, after_ms } => {
@@ -169,6 +170,14 @@ impl Tui {
             }
             UiEffect::CloseView => self.view = None,
             UiEffect::Yank(text) => self.register.copy(text),
+            // The composer arrives in phase 3 Task 4.
+            UiEffect::FocusComposer { .. }
+            | UiEffect::RequestSubmit(_)
+            | UiEffect::InsertNewline(_)
+            | UiEffect::LoadComposer { .. }
+            | UiEffect::ClearComposer(_)
+            | UiEffect::ReplaceMentionToken { .. }
+            | UiEffect::ExternalEditor(_) => {}
             UiEffect::Quit => self.should_quit = true,
         }
     }
