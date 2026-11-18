@@ -210,7 +210,17 @@ impl App {
     }
 
     fn key(&mut self, key: Key, editor: Option<EditorMode>, effects: &mut Vec<Effect>) {
+        // Outside `feed`, so a status set by a binding that `key` ended
+        // survives when `key` is fed again.
         self.status = None;
+        self.feed(key, editor, effects);
+    }
+
+    /// Resolves `key` in the current input context. When a binding that ran
+    /// before `key` was resolved (the pending keys `key` ended) changes the
+    /// context, the rest of the outputs belong to the old context, so `key`
+    /// is resolved afresh in the new one (design, "Keymap resolver").
+    fn feed(&mut self, key: Key, editor: Option<EditorMode>, effects: &mut Vec<Effect>) {
         let context = self.input_context(editor);
         if context != self.key_context {
             self.resolver.reset();
@@ -218,11 +228,21 @@ impl App {
         }
         let map = self.keymap.effective(context);
         let timeoutlen_ms = self.settings.timeoutlen_ms;
-        let resolved = self
+        let mut resolved = self
             .resolver
-            .feed(map, context.counts(), timeoutlen_ms, key);
-        for resolved in resolved {
-            self.resolved(context.sink(), resolved, effects);
+            .feed(map, context.counts(), timeoutlen_ms, key)
+            .into_iter();
+        while let Some(next) = resolved.next() {
+            let ran = matches!(next, Resolved::Run { .. });
+            self.resolved(context.sink(), next, effects);
+            // `key` was not part of the run when outputs follow it, or when
+            // `key` started a count after it (a run takes the count).
+            let key_left = resolved.len() > 0 || self.resolver.count().is_some();
+            if ran && key_left && self.input_context(editor) != context {
+                // The reset in the new context drops the old outputs and the
+                // count. Nothing is pending then, so this does not come back.
+                return self.feed(key, editor, effects);
+            }
         }
     }
 

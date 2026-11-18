@@ -302,7 +302,7 @@ fn status_clears_on_the_next_key() {
 }
 
 #[test]
-fn timeout_releases_through_the_original_context() {
+fn timeout_drops_a_pending_prefix_in_the_room_list() {
     let mut app = app();
     let fx = keys(&mut app, "g");
     let Some(Effect::Ui(UiEffect::StartTimer { id, .. })) = fx.last().cloned() else {
@@ -311,6 +311,36 @@ fn timeout_releases_through_the_original_context() {
     assert_eq!(app.pending_keys(), seq("g").keys());
     assert_eq!(app.update(Msg::Timeout { id }), vec![]);
     assert!(app.pending_keys().is_empty());
+}
+
+#[test]
+fn a_key_that_ends_a_binding_which_changes_the_context_goes_to_the_new_context() {
+    // `g` is also a prefix of `gg`, so `j` ends it and `g` runs first.
+    let open = Binding::new(vec![Action::MessageView, Action::CommandLineOpen]).unwrap();
+    let mut app = app_with(vec![(TableId::RoomList, seq("g"), open)]);
+    keys(&mut app, "gj");
+    assert_eq!(line(&app), Some((LineKind::Command, "j")));
+    assert_eq!(cursor_id(&app), "!c:example.org");
+    // The status the binding set survives the key that ended it.
+    assert_eq!(
+        app.status().unwrap().text,
+        "message.view is not available yet"
+    );
+}
+
+#[test]
+fn a_count_or_prefix_after_a_binding_which_changes_the_context_goes_to_the_new_context() {
+    let open = Binding::single(Action::CommandLineOpen);
+    let mut app = app_with(vec![(TableId::RoomList, seq("g"), open)]);
+    // `1` would start a count in the room list.
+    keys(&mut app, "g1");
+    assert_eq!(line(&app), Some((LineKind::Command, "1")));
+    assert_eq!(app.pending_count(), None);
+    // `<C-w>` would start a timer for `<C-w>h` in the room list.
+    keys(&mut app, "<Esc>g");
+    assert_eq!(keys(&mut app, "<C-w>"), vec![]);
+    assert!(app.pending_keys().is_empty());
+    assert_eq!(line(&app), Some((LineKind::Command, "")));
 }
 
 #[test]
