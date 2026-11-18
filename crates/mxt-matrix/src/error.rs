@@ -40,6 +40,8 @@ pub enum Error {
     Sync(sync_service::Error),
     /// An effect names a room this client does not know.
     UnknownRoom,
+    /// An effect names an event with an ID that is not a Matrix event ID.
+    InvalidEventId,
 }
 
 impl Error {
@@ -120,6 +122,7 @@ impl fmt::Display for Error {
             }
             Error::Sync(error) => error.fmt(f),
             Error::UnknownRoom => f.write_str("the room is not known to this client"),
+            Error::InvalidEventId => f.write_str("the event ID is not valid"),
         }
     }
 }
@@ -133,9 +136,10 @@ impl std::error::Error for Error {
             Error::Io { error, .. } => error.source(),
             Error::Json { error, .. } => error.source(),
             Error::Sync(error) => error.source(),
-            Error::PasswordLoginUnsupported { .. } | Error::UnknownToken | Error::UnknownRoom => {
-                None
-            }
+            Error::PasswordLoginUnsupported { .. }
+            | Error::UnknownToken
+            | Error::UnknownRoom
+            | Error::InvalidEventId => None,
         }
     }
 }

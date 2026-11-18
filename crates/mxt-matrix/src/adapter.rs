@@ -7,7 +7,7 @@ use matrix_sdk::{
     Client, HttpError, Room,
     latest_events::LatestEventValue,
     room::Receipts,
-    ruma::{self, OwnedRoomId},
+    ruma::{self, OwnedEventId, OwnedRoomId},
 };
 use matrix_sdk_ui::{
     RoomListService, room_list_service,
@@ -15,7 +15,7 @@ use matrix_sdk_ui::{
 };
 use mxt_core::{
     effect::MatrixEffect,
-    ids::RoomId,
+    ids::{EventId, RoomId},
     msg::{Msg, SyncState},
     settings::ReceiptKind,
 };
@@ -136,6 +136,23 @@ async fn run_effects(
                         }
                     });
                 }
+                Some(MatrixEffect::SendReceipt { room, event }) => {
+                    let (client, to_core) = (client.clone(), to_core.clone());
+                    running.spawn(async move {
+                        if let Err(error) = send_receipt(&client, &room, &event, receipts).await {
+                            report(&to_core, "Sending the read receipt failed", &error);
+                        }
+                    });
+                }
+                // The adapter keeps no timeline yet (phase 2 Task 4 adds it),
+                // so there is nothing to paginate. The answer ends the core's
+                // request.
+                Some(MatrixEffect::PaginateBackwards(room)) => {
+                    let _ = to_core.send(Msg::PaginationFailed {
+                        room,
+                        error: "older messages cannot be loaded yet: mxt keeps no timeline".to_owned(),
+                    });
+                }
                 None => break,
             },
             Some(finished) = running.join_next(), if !running.is_empty() => {
@@ -158,16 +175,35 @@ async fn mark_read(client: &Client, room: &RoomId, receipts: ReceiptKind) -> Res
     };
     let sent = match latest {
         Some(event) => {
-            let marker = Receipts::new().fully_read_marker(event.clone());
-            let receipts = match receipts {
-                ReceiptKind::Public => marker.public_read_receipt(event),
-                ReceiptKind::Private => marker.private_read_receipt(event),
-            };
-            room.send_multiple_receipts(receipts).await
+            room.send_multiple_receipts(read_up_to(event, receipts))
+                .await
         }
         None => room.set_unread_flag(false).await,
     };
     sent.map_err(|error| without_url(error).into())
+}
+
+/// A receipt of the configured kind and the fully read marker for `event`.
+async fn send_receipt(
+    client: &Client,
+    room: &RoomId,
+    event: &EventId,
+    receipts: ReceiptKind,
+) -> Result<(), Error> {
+    let room = sdk_room(client, room)?;
+    let event = ruma::EventId::parse(event.as_str()).map_err(|_| Error::InvalidEventId)?;
+    room.send_multiple_receipts(read_up_to(event, receipts))
+        .await
+        .map_err(|error| without_url(error).into())
+}
+
+/// The fully read marker and a receipt of the configured kind, both on `event`.
+fn read_up_to(event: OwnedEventId, kind: ReceiptKind) -> Receipts {
+    let marker = Receipts::new().fully_read_marker(event.clone());
+    match kind {
+        ReceiptKind::Public => marker.public_read_receipt(event),
+        ReceiptKind::Private => marker.private_read_receipt(event),
+    }
 }
 
 /// A failed request names its URL, which holds the room ID; the status line
