@@ -5,15 +5,19 @@ name: Nix package
 on:
   push:
     branches: [main]
-    paths: [flake.nix, flake.lock, Cargo.lock, "**/Cargo.toml"]
+    paths: [flake.nix, flake.lock, Cargo.lock, "**/Cargo.toml", .github/workflows/nix.yml]
   pull_request:
-    paths: [flake.nix, flake.lock, Cargo.lock, "**/Cargo.toml"]
+    paths: [flake.nix, flake.lock, Cargo.lock, "**/Cargo.toml", .github/workflows/nix.yml]
   schedule:
     - cron: "17 3 * * 1"
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: nix-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:

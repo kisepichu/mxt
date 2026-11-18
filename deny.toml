@@ -28,4 +28,8 @@ ignore = true
 
 [advisories]
 version = 2
+# Unmaintained crates are reported only when mxt depends on them directly;
+# replacing transitive ones (for example in matrix-sdk) is upstream's job.
+# Vulnerabilities and yanked crates are denied everywhere.
+unmaintained = "workspace"
 yanked = "deny"
