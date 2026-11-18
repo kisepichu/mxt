@@ -5,5 +5,6 @@
 
 pub mod fuzzy;
 pub mod ids;
+pub mod keys;
 pub mod room;
 pub mod rooms;
