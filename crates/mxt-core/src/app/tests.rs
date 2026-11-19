@@ -461,6 +461,15 @@ fn editor_contexts_release_keys_to_the_editor() {
             seq("<Esc>").keys().to_vec()
         )),]
     );
+    // The character after `f` or `r` goes to edtui, also `:` and `<Esc>`,
+    // which `normal` and `composer.normal` bind.
+    for key in [":", "<Esc>"] {
+        assert_eq!(
+            keys_in(&mut app, key, Some(EditorMode::AwaitingChar)),
+            vec![Effect::Ui(UiEffect::ReplayKeys(seq(key).keys().to_vec()))]
+        );
+    }
+    assert_eq!(app.focus(), Focus::Composer);
     assert_eq!(app.mode_label(Some(EditorMode::Insert)), "INSERT");
 }
 

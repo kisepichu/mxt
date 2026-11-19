@@ -294,6 +294,8 @@ impl App {
     /// "VIEW" and the mode of its editor while the message view is open
     /// ("VIEW INSERT": keys go to the editor, `q` included), "NORMAL", or
     /// for the composer's editor "INSERT", "NORMAL", "VISUAL" or "SEARCH".
+    /// `EditorMode::AwaitingChar` only comes with keys, and counts as normal
+    /// mode here.
     pub fn mode_label(&self, editor: Option<EditorMode>) -> &'static str {
         if self.confirm.is_some() {
             return "CONFIRM";
@@ -307,7 +309,7 @@ impl App {
         if self.view.is_some() {
             return match editor {
                 None => "VIEW",
-                Some(EditorMode::Normal) => "VIEW NORMAL",
+                Some(EditorMode::Normal | EditorMode::AwaitingChar) => "VIEW NORMAL",
                 Some(EditorMode::Insert) => "VIEW INSERT",
                 Some(EditorMode::Visual) => "VIEW VISUAL",
                 Some(EditorMode::Search) => "VIEW SEARCH",
@@ -333,7 +335,9 @@ impl App {
         if self.view.is_some() {
             return match editor {
                 None | Some(EditorMode::Normal | EditorMode::Visual) => InputContext::MessageView,
-                Some(EditorMode::Insert | EditorMode::Search) => InputContext::EditorPassthrough,
+                Some(EditorMode::Insert | EditorMode::Search | EditorMode::AwaitingChar) => {
+                    InputContext::EditorPassthrough
+                }
             };
         }
         match self.focus {
@@ -346,7 +350,9 @@ impl App {
                     InputContext::ComposerCompletion
                 }
                 Some(EditorMode::Insert) => InputContext::ComposerInsert,
-                Some(EditorMode::Search) => InputContext::EditorPassthrough,
+                Some(EditorMode::Search | EditorMode::AwaitingChar) => {
+                    InputContext::EditorPassthrough
+                }
             },
         }
     }

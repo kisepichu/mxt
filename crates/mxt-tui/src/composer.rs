@@ -88,6 +88,11 @@ impl Composer {
         self.editor.mode()
     }
 
+    /// The mode the core resolves the next key in (see [`Editor::key_mode`]).
+    pub(crate) fn key_mode(&self) -> EditorMode {
+        self.editor.key_mode()
+    }
+
     /// The search pattern while the editor is in search mode.
     pub(crate) fn search(&self) -> Option<String> {
         self.editor.search()

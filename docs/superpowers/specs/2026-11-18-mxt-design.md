@@ -1042,12 +1042,14 @@ separate device) and the edtui check program. Counts are from that account.
    start of a line, after wide characters and on a wrapped second row;
    committing inserts the text with the cursor after it; `<Esc>` while a
    preedit is open is consumed by the input method, and edtui stays in insert
-   mode. The composer choice stands. Not working in edtui 0.11.8: the cursor
-   after emoji grapheme clusters (skin tones, ZWJ sequences, VS16; drawn up to
-   4 columns off, `h`/`l` step into clusters), CJK word motions (`w`, `e`,
-   `b` treat every non-ASCII character as its own word), `F`/`T`/`;`/`,`, and
-   a linewise `p` on the last line (pastes above). `r` is unbound rather than
-   redo.
+   mode. The composer choice stands. edtui 0.11.8 has no `F`, `T`, `;` or `,`,
+   leaves `r` unbound rather than redo, and its `h`/`l` step into emoji
+   grapheme clusters; `mxt-tui` now handles these keys itself (see "edtui
+   differences from vim"). Still wrong in edtui 0.11.8 and needing patches:
+   the cursor drawn after emoji grapheme clusters (skin tones, ZWJ sequences,
+   VS16; up to 4 columns off), CJK word motions (`w`, `e`, `b` treat every
+   non-ASCII character as its own word), operators with `F`, `T`, `;` and `,`,
+   and a linewise `p` on the last line (pastes above).
 6. **Mentions on the remote network:** answered for the Discord bridge. A
    mention sent from mxt in a bridged guild channel (a `matrix.to` link and
    `m.mentions`) arrived on Discord as a real mention of that user, with a
@@ -1077,11 +1079,23 @@ asking for the recovery key ("Startup").
   the receipt, and until then the count can be too low. The server's
   `unread_notification_counts()` follow push rules and are zero in muted
   rooms, so they cannot replace it. Measured with mxt (phase 0 finding 3).
-- **edtui differences from vim.** edtui has no count prefixes; `r`, `F`, `T`,
-  `;` and `,` are missing, CJK word motions and emoji clusters are wrong (see
-  "Phase 0 findings"). Rebinding through edtui's keybinding API and small
-  workarounds in `mxt-tui` cover what they can; the rest needs edtui patches
-  or is accepted for the first release.
+- **edtui differences from vim.** edtui has no count prefixes. In normal and
+  visual mode, `mxt-tui` handles some keys before edtui, computed from the
+  editor's lines and cursor: `f`, `F`, `t` and `T` with their character
+  (on the cursor's line, by grapheme cluster) and `;` and `,` repeating them
+  (after `t` and `T`, `;` does not stay before the match it stopped at);
+  `r{char}` in normal mode, one undo step; and `h`, `l`, `<Left>` and
+  `<Right>` over whole grapheme clusters (skin tones, ZWJ sequences, VS16).
+  The key after `f`, `t` or `r` goes to the editor without the keymap (`f:`
+  finds a colon, `<Esc>` cancels). edtui's own `df`, `dt`, `cf` and `ct`
+  still work; other operators with these motions (`dF`, `cT`, `d;`) are not
+  supported, and `dF` and its character do nothing. Still needing edtui
+  patches, or accepted for the first release: the cursor drawn after emoji
+  clusters (edtui sums the widths of single characters, so it is up to 4
+  columns off), `x`, `r`, `a`, insert-mode arrows and visual selections that
+  work on single characters inside a cluster, CJK word classes for `w`, `e`
+  and `b`, operators with `F`, `T`, `;` and `,`, a linewise `p` on the last
+  line, `.` repeating `r`, and `r` in visual mode.
 - **Mentions on the remote network.** mxt relies on bridges turning
   `matrix.to` user links and `m.mentions` into remote mentions. Phase 0
   confirmed it for the Discord bridge in both directions; other bridges are

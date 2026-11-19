@@ -416,6 +416,11 @@ fn message_view_opens_and_closes() {
         keys_in(&mut app, "q", Some(EditorMode::Insert)),
         vec![Effect::Ui(UiEffect::ReplayKeys(seq("q").keys().to_vec()))]
     );
+    // So does the character after `f` or `r`, `q` included.
+    assert_eq!(
+        keys_in(&mut app, "q", Some(EditorMode::AwaitingChar)),
+        vec![Effect::Ui(UiEffect::ReplayKeys(seq("q").keys().to_vec()))]
+    );
     assert!(app.view_open());
     assert_eq!(
         keys_in(&mut app, "q", Some(EditorMode::Normal)),
