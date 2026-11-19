@@ -139,11 +139,17 @@ impl RichText {
 }
 
 /// The `http://` or `https://` URL in `word`, without the brackets and quotes
-/// around it and the punctuation of the sentence after it.
+/// around it and the punctuation of the sentence after it, ASCII or
+/// full-width, as in `（https://example.org/x）。`.
 fn bare_url(word: &str) -> Option<&str> {
     let url = word
-        .trim_start_matches(['(', '[', '{', '<', '"', '\''])
-        .trim_end_matches(['.', ',', ';', ':', '!', '?', '\'', '"', ')', ']', '}', '>']);
+        .trim_start_matches([
+            '(', '[', '{', '<', '"', '\'', '（', '「', '『', '【', '〈', '《',
+        ])
+        .trim_end_matches([
+            '.', ',', ';', ':', '!', '?', '\'', '"', ')', ']', '}', '>', '。', '、', '，', '．',
+            '！', '？', '）', '」', '』', '】', '〉', '》',
+        ]);
     let rest = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))?;
@@ -417,5 +423,19 @@ mod tests {
                 ("Bob", &user("@bob:example.org")),
             ]
         );
+    }
+
+    #[test]
+    fn links_leave_out_full_width_punctuation_around_bare_urls() {
+        let rich = RichText::plain(
+            "見て （https://example.org/a）。 https://example.org/b。\n\
+             「https://example.org/c」、 『https://example.org/d』！ \
+             【https://example.org/e】？ 〈https://example.org/f〉， 《https://example.org/g》．",
+        );
+        let urls: Vec<String> = "abcdefg"
+            .chars()
+            .map(|c| format!("https://example.org/{c}"))
+            .collect();
+        assert_eq!(rich.links(), urls);
     }
 }
