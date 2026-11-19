@@ -563,11 +563,13 @@ fn message_content(msgtype: &MessageType, body: &str) -> MessageContent {
 /// with nothing but blank lines falls back to the plain body, so the message
 /// is not blank.
 fn rich_body(body: &str, formatted: Option<&FormattedBody>) -> RichText {
-    let html = formatted.filter(|formatted| formatted.format == MessageFormat::Html);
-    match html.map(|html| render_html(&html.body)) {
-        Some(rich) if !is_blank(&rich) => rich,
-        _ => RichText::plain(body),
-    }
+    html_body(formatted).unwrap_or_else(|| RichText::plain(body))
+}
+
+/// `formatted` as rich text when it is HTML with more than blank lines.
+fn html_body(formatted: Option<&FormattedBody>) -> Option<RichText> {
+    let html = formatted.filter(|formatted| formatted.format == MessageFormat::Html)?;
+    Some(render_html(&html.body)).filter(|rich| !is_blank(rich))
 }
 
 fn is_blank(rich: &RichText) -> bool {
@@ -577,7 +579,7 @@ fn is_blank(rich: &RichText) -> bool {
     })
 }
 
-/// The replied-to event's sender and plain body, once the SDK has them.
+/// The replied-to event's sender and text, once the SDK has them.
 fn reply_preview(reply: &InReplyToDetails) -> ReplyPreview {
     let (sender_name, body) = match &reply.event {
         TimelineDetails::Ready(event) => (
@@ -598,9 +600,27 @@ fn reply_body(content: &TimelineItemContent) -> Option<String> {
         return None;
     };
     Some(match &msg_like.kind {
-        MsgLikeKind::Message(message) => message.body().to_owned(),
+        MsgLikeKind::Message(message) => message_preview(message.msgtype(), message.body()),
         kind => msg_like_content(kind).plain_text(),
     })
+}
+
+/// A replied-to message's text: its HTML body (or a caption's) as the
+/// timeline shows it, with every spoiler as `[spoiler]`, since the plain
+/// body has the spoiler text in the clear; the plain body without HTML.
+/// `body` is `Message::body()`, as for `message_content`.
+fn message_preview(msgtype: &MessageType, body: &str) -> String {
+    let formatted = match msgtype {
+        MessageType::Text(content) => content.formatted.as_ref(),
+        MessageType::Notice(content) => content.formatted.as_ref(),
+        MessageType::Emote(content) => content.formatted.as_ref(),
+        MessageType::Image(content) => content.formatted.as_ref(),
+        MessageType::File(content) => content.formatted.as_ref(),
+        MessageType::Video(content) => content.formatted.as_ref(),
+        MessageType::Audio(content) => content.formatted.as_ref(),
+        _ => None,
+    };
+    html_body(formatted).map_or_else(|| body.to_owned(), |rich| rich.to_plain_hiding_spoilers())
 }
 
 /// One group per key, in the SDK's order.
@@ -924,6 +944,39 @@ mod tests {
             reply_preview(&reply(replied(TimelineDetails::Unavailable))),
             preview(Some("@bob:example.org"), Some("(deleted)"))
         );
+    }
+
+    /// As the SDK's `Message::body()` is its `msgtype().body()`.
+    fn preview_of(msgtype: MessageType) -> String {
+        message_preview(&msgtype, msgtype.body())
+    }
+
+    #[test]
+    fn reply_previews_hide_the_spoilers_of_html_bodies_and_keep_plain_bodies() {
+        // Text, a mention and an emoticon in one spoiler are one
+        // placeholder; the plain body would show all of them.
+        let spoilers = MessageType::text_html(
+            "the end: Bob was @Alice :cat:, and more",
+            "the end: <span data-mx-spoiler>Bob <b>was</b> \
+             <a href=\"https://matrix.to/#/@alice:example.org\">@Alice</a> \
+             <img data-mx-emoticon src=\"mxc://example.org/cat\" alt=\":cat:\"></span>, \
+             and <span data-mx-spoiler=\"plot\">more</span>",
+        );
+        assert_eq!(preview_of(spoilers), "the end: [spoiler], and [spoiler]");
+        // A caption's spoiler too.
+        let mut image = ImageMessageEventContent::plain("a secret caption".into(), mxc());
+        image.filename = Some("cat.png".into());
+        image.formatted = Some(FormattedBody::html(
+            "a <span data-mx-spoiler>secret</span> caption",
+        ));
+        assert_eq!(preview_of(MessageType::Image(image)), "a [spoiler] caption");
+        // Without HTML, the plain body as sent.
+        assert_eq!(
+            preview_of(MessageType::text_plain("**hi** there\nsecond line")),
+            "**hi** there\nsecond line"
+        );
+        let image = ImageMessageEventContent::plain("dog.jpg".into(), mxc());
+        assert_eq!(preview_of(MessageType::Image(image)), "dog.jpg");
     }
 
     #[test]
