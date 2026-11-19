@@ -321,6 +321,11 @@ impl App {
         // Outside `feed`, so a status set by a binding that `key` ended
         // survives when `key` is fed again.
         self.status = None;
+        // The mention menu belongs to insert mode, and the tui reports the
+        // editor mode with every key.
+        if editor != Some(EditorMode::Insert) {
+            self.cancel_completion();
+        }
         self.feed(key, editor, effects);
     }
 

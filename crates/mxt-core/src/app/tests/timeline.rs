@@ -21,7 +21,10 @@ pub(super) fn item(id: ItemRef, body: &str) -> TimelineEntry {
         sender: UserId::new("@alice:example.org"),
         sender_name: "Alice".into(),
         timestamp: Timestamp::from_millis(0),
-        content: MessageContent::Text(RichText::plain(body)),
+        content: MessageContent::Text {
+            body: body.into(),
+            rich: RichText::plain(body),
+        },
         reply: None,
         reactions: Vec::new(),
         edited: false,
@@ -429,18 +432,21 @@ fn yy_yields_the_plain_text() {
     };
     let mut entry = msg(1);
     if let TimelineEntry::Item(item) = &mut entry {
-        item.content = MessageContent::Text(RichText {
-            blocks: vec![Block::Paragraph(vec![
-                Inline::Text {
-                    text: "hello ".into(),
-                    style: Style::default(),
-                },
-                Inline::Text {
-                    text: "world".into(),
-                    style: bold,
-                },
-            ])],
-        });
+        item.content = MessageContent::Text {
+            body: "hello **world**".into(),
+            rich: RichText {
+                blocks: vec![Block::Paragraph(vec![
+                    Inline::Text {
+                        text: "hello ".into(),
+                        style: Style::default(),
+                    },
+                    Inline::Text {
+                        text: "world".into(),
+                        style: bold,
+                    },
+                ])],
+            },
+        };
     }
     reset(&mut app, vec![entry]);
     assert_eq!(

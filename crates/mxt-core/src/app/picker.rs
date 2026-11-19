@@ -3,13 +3,13 @@
 
 use std::collections::HashSet;
 
-use super::App;
 use super::command_line::Edit;
+use super::{App, StatusKind};
 use crate::effect::{Effect, MatrixEffect};
 use crate::emoji::{self, Emoji};
 use crate::ids::RoomId;
 use crate::keys::Key;
-use crate::timeline::ItemRef;
+use crate::timeline::{ItemRef, MessageContent};
 
 /// The open picker (`PICKER` mode).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,11 +47,15 @@ impl App {
         self.picker.as_ref().map(|open| &open.picker)
     }
 
-    /// `message.react`: the emoji picker for the item under the cursor.
+    /// `message.react`: the emoji picker for the item under the cursor,
+    /// unless it is deleted.
     pub(super) fn react(&mut self) {
         let (Some(room), Some(item)) = (&self.open_room, self.timeline.cursor_item()) else {
             return;
         };
+        if item.content == MessageContent::Redacted {
+            return self.set_status(StatusKind::Error, "The message is deleted");
+        }
         let reacted: Vec<String> = item
             .reactions
             .iter()

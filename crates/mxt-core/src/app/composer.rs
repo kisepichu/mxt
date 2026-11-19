@@ -10,6 +10,10 @@ use crate::mention::{
 };
 use crate::timeline::{Draft, ItemRef, MessageContent, OwnEvent, TimelineEntry};
 
+/// The most candidates the mention menu keeps, so a lone `@` in a room with
+/// thousands of members does not copy all of them on every key.
+const MENU_CANDIDATES: usize = 50;
+
 /// A room's composer as the core knows it; the tui adapter owns the text.
 /// Kept when switching rooms.
 pub(super) struct Composer {
@@ -56,10 +60,14 @@ impl App {
     /// The open mention menu: candidates and the selected index. Open while
     /// the composer has focus and the `@` token has candidates.
     pub fn mention_menu(&self) -> Option<(&[Member], usize)> {
+        self.open_menu()
+            .map(|menu| (menu.candidates.as_slice(), menu.selected))
+    }
+
+    fn open_menu(&self) -> Option<&MentionMenu> {
         self.mention_menu
             .as_ref()
             .filter(|menu| self.focus == Focus::Composer && !menu.candidates.is_empty())
-            .map(|menu| (menu.candidates.as_slice(), menu.selected))
     }
 
     /// `composer.focus`: the open room's composer gets the keys. The first
@@ -102,19 +110,11 @@ impl App {
         }
         let composer = self.composers.entry(room.clone()).or_default();
         let kind = match &composer.draft {
-            Draft::New => Some(OutgoingKind::New),
-            Draft::Reply {
-                to: ItemRef::Remote(event),
-            } => Some(OutgoingKind::Reply { to: event.clone() }),
-            Draft::Reply {
-                to: ItemRef::Local(_),
-            } => None,
-            Draft::Edit { target } => Some(OutgoingKind::Edit {
+            Draft::New => OutgoingKind::New,
+            Draft::Reply { to } => OutgoingKind::Reply { to: to.clone() },
+            Draft::Edit { target } => OutgoingKind::Edit {
                 target: target.item().clone(),
-            }),
-        };
-        let Some(kind) = kind else {
-            return self.set_status(StatusKind::Error, "Wait until the message is sent");
+            },
         };
         let body = render_mentions(&body, &composer.mentions);
         effects.push(Effect::Matrix(MatrixEffect::Send {
@@ -154,18 +154,31 @@ impl App {
         self.composers.entry(room).or_default().empty = empty;
     }
 
-    /// `message.reply`: a reply to the item under the cursor, in the composer.
+    /// `message.reply`: a reply to the remote item under the cursor, in the
+    /// composer. A local echo is refused: the SDK replaces it with its remote
+    /// event, which a draft would not follow. An edit draft is refused too:
+    /// the composer holds the edit's text.
     pub(super) fn reply(&mut self, effects: &mut Vec<Effect>) {
         let (Some(room), Some(item)) = (&self.open_room, self.timeline.cursor_item()) else {
             return;
         };
-        let to = item.id.clone();
+        let ItemRef::Remote(to) = &item.id else {
+            return self.set_status(StatusKind::Error, "Wait until the message is sent");
+        };
+        if self
+            .composers
+            .get(room)
+            .is_some_and(|composer| matches!(composer.draft, Draft::Edit { .. }))
+        {
+            return self.set_status(StatusKind::Error, "Cancel the edit first");
+        }
+        let to = to.clone();
         self.composers.entry(room.clone()).or_default().draft = Draft::Reply { to };
         self.focus_composer(FocusMode::Insert, effects);
     }
 
-    /// `message.edit`: the user's own text message under the cursor, loaded
-    /// into the empty composer with its mentions rebuilt.
+    /// `message.edit`: the user's own text message under the cursor, its
+    /// plain body loaded into the empty composer with its mentions rebuilt.
     pub(super) fn edit_message(&mut self, effects: &mut Vec<Effect>) {
         let (Some(room), Some(item)) = (&self.open_room, self.timeline.cursor_item()) else {
             return;
@@ -174,7 +187,7 @@ impl App {
             return self.set_status(StatusKind::Error, "You can only edit your own messages");
         };
         // Other messages cannot become text without losing what they are.
-        let MessageContent::Text(content) = &item.content else {
+        let MessageContent::Text { body, rich } = &item.content else {
             return self.set_status(StatusKind::Error, "Only text messages can be edited");
         };
         if self
@@ -184,8 +197,10 @@ impl App {
         {
             return self.set_status(StatusKind::Error, "Clear the composer first");
         }
-        let text = content.to_plain();
-        let mentions = mentions_for_edit(content, &text);
+        // The plain body, not `rich.to_plain()`: for messages mxt sent it is
+        // the Markdown that was typed, with its links and code intact.
+        let text = body.clone();
+        let mentions = mentions_for_edit(rich, body);
         let room = room.clone();
         let composer = self.composers.entry(room.clone()).or_default();
         composer.draft = Draft::Edit { target };
@@ -227,8 +242,9 @@ impl App {
     }
 
     /// The room's members ranked against `query`, the senders of the loaded
-    /// messages first. The user is not ranked as a sender: their own
-    /// messages say nothing about whom they want to mention.
+    /// messages first, at most [`MENU_CANDIDATES`]. The user is not ranked
+    /// as a sender: their own messages say nothing about whom they want to
+    /// mention.
     fn candidates(&self, room: &RoomId, query: &str) -> Vec<Member> {
         let members = self
             .composers
@@ -245,38 +261,43 @@ impl App {
         }
         rank_members(query, members, &senders)
             .into_iter()
+            .take(MENU_CANDIDATES)
             .cloned()
             .collect()
     }
 
     /// `completion.next` / `completion.prev`, wrapping around.
     pub(super) fn move_completion(&mut self, forward: bool) {
-        if let Some(menu) = &mut self.mention_menu
-            && let Some(last) = menu.candidates.len().checked_sub(1)
-        {
-            menu.selected = match (forward, menu.selected) {
-                (true, selected) if selected >= last => 0,
-                (true, selected) => selected + 1,
-                (false, 0) => last,
-                (false, selected) => selected - 1,
-            };
+        let Some(menu) = self.open_menu() else {
+            return;
+        };
+        // An open menu has candidates.
+        let last = menu.candidates.len() - 1;
+        let selected = match (forward, menu.selected) {
+            (true, selected) if selected >= last => 0,
+            (true, selected) => selected + 1,
+            (false, 0) => last,
+            (false, selected) => selected - 1,
+        };
+        if let Some(menu) = &mut self.mention_menu {
+            menu.selected = selected;
         }
     }
 
     /// `completion.accept`: records the selected member's mention and has
     /// the tui replace the token with its text.
     pub(super) fn accept_completion(&mut self, effects: &mut Vec<Effect>) {
-        let Some(menu) = &self.mention_menu else {
+        let Some(menu) = self.open_menu() else {
             return;
         };
-        let Some(member) = menu.candidates.get(menu.selected) else {
+        let Some(member) = menu.candidates.get(menu.selected).cloned() else {
             return;
         };
         let room = menu.room.clone();
         let composer = self.composers.entry(room.clone()).or_default();
         let mention = MentionRef {
-            user: member.user.clone(),
-            text: mention_text(member, &composer.members),
+            text: mention_text(&member, &composer.members),
+            user: member.user,
         };
         let text = mention.text.clone();
         if !composer.mentions.contains(&mention) {

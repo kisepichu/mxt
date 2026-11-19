@@ -6,7 +6,8 @@ use crate::effect::{Effect, MatrixEffect, UiEffect, ViewContent};
 use crate::ids::{EventId, RoomId};
 use crate::msg::Pane;
 use crate::timeline::{
-    ItemRef, OwnEvent, SendState, TimelineDiff, TimelineEntry, TimelineItem, apply_diff,
+    ItemRef, MessageContent, OwnEvent, SendState, TimelineDiff, TimelineEntry, TimelineItem,
+    apply_diff,
 };
 
 /// Back pagination starts when the cursor has at most this many older items
@@ -322,11 +323,15 @@ impl App {
     }
 
     /// `message.delete`: the user's own item under the cursor, after `y` in
-    /// `CONFIRM` mode, because a redaction cannot be undone.
+    /// `CONFIRM` mode, because a redaction cannot be undone. A deleted item
+    /// is refused.
     pub(super) fn delete_message(&mut self) {
         let (Some(room), Some(item)) = (&self.open_room, self.timeline.cursor_item()) else {
             return;
         };
+        if item.content == MessageContent::Redacted {
+            return self.set_status(StatusKind::Error, "The message is deleted");
+        }
         let Some(own) = OwnEvent::new(item, &self.me) else {
             return self.set_status(StatusKind::Error, "You can only delete your own messages");
         };

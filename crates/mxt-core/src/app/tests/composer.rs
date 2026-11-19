@@ -6,6 +6,7 @@ use crate::emoji;
 use crate::ids::{TxnId, UserId};
 use crate::mention::{Member, MentionRef, RenderedBody, render_mentions};
 use crate::rich::{Block, Inline, MentionTarget, RichText, Style};
+use crate::rooms::{Pick, RoomFilter, RoomTarget};
 use crate::timeline::{
     Draft, ItemRef, MessageContent, ReactionGroup, SendState, TimelineDiff, TimelineEntry,
     TimelineItem,
@@ -13,6 +14,7 @@ use crate::timeline::{
 
 const C: &str = "!c:example.org";
 const B: &str = "!b:example.org";
+const A: &str = "!a:example.org";
 const ALICE: &str = "@alice:example.org";
 
 /// Changes the item of `entry`.
@@ -145,7 +147,7 @@ fn drafts_are_kept_per_room_across_room_switches() {
     reset(&mut app, vec![msg(1)]);
     assert_eq!(app.draft(&id(C)), None);
     assert_eq!(keys(&mut app, "r"), vec![focus(C), load_members(C)]);
-    assert_eq!(app.draft(&id(C)), Some(&Draft::Reply { to: remote(1) }));
+    assert_eq!(app.draft(&id(C)), Some(&Draft::Reply { to: event(1) }));
     edited(&mut app, C, false);
 
     normal(&mut app, "<Esc>");
@@ -163,7 +165,7 @@ fn drafts_are_kept_per_room_across_room_switches() {
     normal(&mut app, "<Esc>");
     keys(&mut app, "<C-w>hk<CR>");
     assert_eq!(app.open_room(), Some(&id(C)));
-    assert_eq!(app.draft(&id(C)), Some(&Draft::Reply { to: remote(1) }));
+    assert_eq!(app.draft(&id(C)), Some(&Draft::Reply { to: event(1) }));
     assert_eq!(edit_target(&app, B), Some(&remote(5)));
 }
 
@@ -189,17 +191,27 @@ fn composer_cancel_keeps_a_reply_text_and_clears_an_edit() {
 }
 
 #[test]
-fn message_edit_takes_an_own_text_message_into_an_empty_composer_with_its_mentions() {
+fn message_edit_loads_the_plain_body_of_an_own_text_message_with_its_mentions() {
     let alice = UserId::new(ALICE);
-    let content = RichText {
+    let italic = Style {
+        italic: true,
+        ..Style::default()
+    };
+    // `@Alice *hi*` as sent, its formatted body shown as a pill and an
+    // italic `hi`.
+    let rich = RichText {
         blocks: vec![Block::Paragraph(vec![
             Inline::Mention {
                 text: "@Alice".into(),
                 target: MentionTarget::User(alice.clone()),
             },
             Inline::Text {
-                text: " hi".into(),
+                text: " ".into(),
                 style: Style::default(),
+            },
+            Inline::Text {
+                text: "hi".into(),
+                style: italic,
             },
         ])],
     };
@@ -213,7 +225,10 @@ fn message_edit_takes_an_own_text_message_into_an_empty_composer_with_its_mentio
         &mut app,
         vec![
             with(own(remote(1), ""), |item| {
-                item.content = MessageContent::Text(content);
+                item.content = MessageContent::Text {
+                    body: "@Alice *hi*".into(),
+                    rich,
+                };
             }),
             with(own(remote(2), ""), |item| item.content = image),
             msg(3),
@@ -238,7 +253,7 @@ fn message_edit_takes_an_own_text_message_into_an_empty_composer_with_its_mentio
             load_members(C),
             ui(UiEffect::LoadComposer {
                 room: id(C),
-                text: "@Alice hi".into(),
+                text: "@Alice *hi*".into(),
             }),
         ]
     );
@@ -250,10 +265,10 @@ fn message_edit_takes_an_own_text_message_into_an_empty_composer_with_its_mentio
         text: "@Alice".into(),
     }];
     assert_eq!(
-        submit(&mut app, "@Alice hi again"),
+        submit(&mut app, "@Alice *hi* again"),
         vec![
             send(
-                render_mentions("@Alice hi again", &mentions),
+                render_mentions("@Alice *hi* again", &mentions),
                 OutgoingKind::Edit { target: remote(1) }
             ),
             clear(C),
@@ -265,7 +280,7 @@ fn message_edit_takes_an_own_text_message_into_an_empty_composer_with_its_mentio
 #[test]
 fn submit_sends_by_the_draft_and_clears_the_composer() {
     let mut app = opened();
-    reset(&mut app, vec![msg(1), own(local("t1"), "pending")]);
+    reset(&mut app, vec![msg(1)]);
     keys(&mut app, "i");
     assert_eq!(submit(&mut app, " \n "), vec![]);
     assert_eq!(
@@ -273,16 +288,8 @@ fn submit_sends_by_the_draft_and_clears_the_composer() {
         vec![send(plain("hello"), OutgoingKind::New), clear(C)]
     );
 
-    // A reply to a local echo waits until the echo has its event ID.
     normal(&mut app, "<Esc>");
     keys(&mut app, "r");
-    assert_eq!(app.draft(&id(C)), Some(&Draft::Reply { to: local("t1") }));
-    assert_eq!(submit(&mut app, "re"), vec![]);
-    assert_eq!(status(&app), Some("Wait until the message is sent"));
-    assert_eq!(app.draft(&id(C)), Some(&Draft::Reply { to: local("t1") }));
-
-    normal(&mut app, "<Esc>");
-    keys(&mut app, "kr");
     assert_eq!(
         submit(&mut app, "re"),
         vec![
@@ -291,6 +298,29 @@ fn submit_sends_by_the_draft_and_clears_the_composer() {
         ]
     );
     assert_eq!(app.draft(&id(C)), Some(&Draft::New));
+}
+
+#[test]
+fn message_reply_refuses_a_local_echo_and_an_edit_draft() {
+    let mut app = opened();
+    reset(
+        &mut app,
+        vec![own(remote(1), "mine"), own(local("t1"), "pending")],
+    );
+    // The echo's remote event replaces it, so a reply to it could never be
+    // sent.
+    assert_eq!(keys(&mut app, "r"), vec![]);
+    assert_eq!(status(&app), Some("Wait until the message is sent"));
+    assert_eq!(app.draft(&id(C)), None);
+    assert_eq!(app.focus(), Focus::Timeline);
+
+    // The composer holds the edit's text, which must not become a reply.
+    keys(&mut app, "ke");
+    normal(&mut app, "<Esc>");
+    assert_eq!(keys(&mut app, "r"), vec![]);
+    assert_eq!(status(&app), Some("Cancel the edit first"));
+    assert_eq!(edit_target(&app, C), Some(&remote(1)));
+    assert_eq!(app.focus(), Focus::Timeline);
 }
 
 #[test]
@@ -356,12 +386,48 @@ fn the_mention_menu_ranks_members_and_records_accepted_mentions() {
     assert_eq!(menu(&app), None);
     query(&mut app, Some("zzz"));
     assert_eq!(menu(&app), None);
+    // A key outside insert mode closes it, so `<CR>` sends afterwards.
+    query(&mut app, Some("b"));
+    normal(&mut app, "x");
+    assert_eq!(menu(&app), None);
+    assert_eq!(
+        insert(&mut app, "<CR>"),
+        vec![ui(UiEffect::RequestSubmit(id(C)))]
+    );
     // Only the focused composer has a menu.
     normal(&mut app, "<Esc>");
     query(&mut app, Some("b"));
     assert_eq!(menu(&app), None);
     keys(&mut app, "i");
     assert_eq!(menu(&app), None);
+}
+
+#[test]
+fn the_mention_menu_keeps_the_best_candidates() {
+    let mut app = opened();
+    keys(&mut app, "i");
+    let all: Vec<Member> = (0..60)
+        .map(|n| member(&format!("@user{n:02}:example.org"), &format!("User {n:02}")))
+        .collect();
+    members(&mut app, all);
+    query(&mut app, Some(""));
+    let (candidates, _) = menu(&app).unwrap();
+    assert_eq!(candidates.len(), 50);
+    assert_eq!(candidates[0], "@user00:example.org");
+    assert_eq!(candidates[49], "@user49:example.org");
+}
+
+#[test]
+fn completion_accept_needs_the_menu_of_the_focused_composer() {
+    let away = Binding::new(vec![Action::FocusTimeline, Action::CompletionAccept]).unwrap();
+    let mut app = app_with(vec![(TableId::ComposerCompletion, seq("<C-t>"), away)]);
+    keys(&mut app, "<CR>i");
+    members(&mut app, vec![member(ALICE, "Alice")]);
+    query(&mut app, Some("al"));
+    assert!(menu(&app).is_some());
+    // The token is in an editor without focus, so it is not replaced.
+    assert_eq!(insert(&mut app, "<C-t>"), vec![]);
+    assert_eq!(app.focus(), Focus::Timeline);
 }
 
 #[test]
@@ -383,14 +449,87 @@ fn message_delete_asks_for_confirmation() {
             item: remote(1),
         })]
     );
-    assert_eq!(app.confirmation(), None);
-
     // Any other key cancels, and goes nowhere else.
     keys(&mut app, "dd");
     assert_eq!(keys(&mut app, "j"), vec![]);
     assert_eq!(app.confirmation(), None);
     assert_eq!(app.timeline_cursor(), Some(0));
     assert_eq!(app.mode_label(None), "NORMAL");
+}
+
+#[test]
+fn a_key_that_ends_a_binding_which_asks_for_confirmation_answers_it() {
+    // `g` is also a prefix of `gg`, so the next key ends it: `message.delete`
+    // runs, and the key answers its question.
+    let delete = Binding::single(Action::MessageDelete);
+    let mut app = app_with(vec![(TableId::Timeline, seq("g"), delete)]);
+    keys(&mut app, "<CR>");
+    reset(&mut app, vec![own(remote(1), "one"), own(remote(2), "two")]);
+    assert_eq!(
+        no_timers(keys(&mut app, "gy")),
+        vec![matrix(MatrixEffect::Redact {
+            room: id(C),
+            item: remote(2),
+        })]
+    );
+    assert_eq!(app.confirmation(), None);
+    assert_eq!(no_timers(keys(&mut app, "gk")), vec![]);
+    assert_eq!(app.confirmation(), None);
+    assert_eq!(app.timeline_cursor(), Some(1));
+}
+
+#[test]
+fn deleted_messages_cannot_be_deleted_or_reacted_to() {
+    let mut app = opened();
+    reset(
+        &mut app,
+        vec![with(own(remote(1), ""), |item| {
+            item.content = MessageContent::Redacted;
+        })],
+    );
+    assert_eq!(no_timers(keys(&mut app, "dd")), vec![]);
+    assert_eq!(status(&app), Some("The message is deleted"));
+    assert_eq!(app.confirmation(), None);
+    keys(&mut app, "+");
+    assert_eq!(status(&app), Some("The message is deleted"));
+    assert!(app.picker().is_none());
+}
+
+#[test]
+fn opening_another_room_or_losing_the_open_room_closes_what_belongs_to_it() {
+    let next = Binding::single(Action::RoomOpen(RoomTarget::Pick {
+        filter: RoomFilter::All,
+        pick: Pick::Next,
+    }));
+    let mut app = app_with(vec![
+        (TableId::ComposerInsert, seq("<C-o>"), next.clone()),
+        (TableId::Picker, seq("<C-o>"), next),
+    ]);
+    let timeline = |app: &mut App, room: &str, entry: TimelineEntry| {
+        app.update(Msg::Timeline {
+            room: id(room),
+            diffs: vec![TimelineDiff::Reset(vec![entry])],
+        });
+    };
+    // `!c`: the composer has focus.
+    keys(&mut app, "<CR>i");
+    insert(&mut app, "<C-o>");
+    assert_eq!(app.open_room(), Some(&id(B)));
+    assert_eq!(app.focus(), Focus::Timeline);
+    // `!b`: the emoji picker is open.
+    timeline(&mut app, B, msg(1));
+    keys(&mut app, "+");
+    keys(&mut app, "<C-o>");
+    assert_eq!(app.open_room(), Some(&id(A)));
+    assert!(app.picker().is_none());
+    assert_eq!(app.mode_label(None), "NORMAL");
+    // `!a`: a question is asked, and the room goes away.
+    timeline(&mut app, A, own(remote(2), "mine"));
+    keys(&mut app, "dd");
+    assert!(app.confirmation().is_some());
+    app.update(Msg::RoomRemoved(id(A)));
+    assert_eq!(app.open_room(), None);
+    assert_eq!(app.confirmation(), None);
 }
 
 #[test]
@@ -423,9 +562,21 @@ fn the_emoji_picker_lists_reacted_and_common_emoji_first_and_toggles_one() {
     );
     assert_eq!(app.mode_label(None), "PICKER");
     let first: Vec<&str> = picker.items[..9].iter().map(|i| i.key.as_str()).collect();
+    // The common reactions, then every other emoji in `emojis` order.
+    let first_other = emoji::all().next().unwrap().as_str();
     assert_eq!(
         first,
-        ["🎉", "\u{2764}", "👍", "😂", "😮", "😢", "👀", "🙏", "😀"]
+        [
+            "🎉",
+            "\u{2764}",
+            "👍",
+            "😂",
+            "😮",
+            "😢",
+            "👀",
+            "🙏",
+            first_other
+        ]
     );
     assert_eq!(picker.items[1].label, ":heart: ❤️");
     assert_eq!(picker.items.len(), emoji::all().count());

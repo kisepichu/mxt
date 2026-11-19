@@ -39,7 +39,14 @@ pub struct ReactionGroup {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MessageContent {
-    Text(RichText),
+    Text {
+        /// The event's plain `body`, without a reply fallback. For messages
+        /// mxt sent, it is the Markdown the user typed; `message.edit` loads
+        /// it.
+        body: String,
+        /// The formatted body, or `body` as plain text without one.
+        rich: RichText,
+    },
     Notice(RichText),
     Emote(RichText),
     Image {
@@ -64,12 +71,13 @@ pub enum MessageContent {
 }
 
 impl MessageContent {
-    /// Searchable and yankable text: the rich text's plain form, the file or
+    /// Searchable and yankable text: the rich text's plain form (what the
+    /// timeline shows, not a text message's Markdown `body`), the file or
     /// image name, the sticker body; `(deleted)`, `(unable to decrypt)`,
     /// `(unsupported: <kind>)` for the others.
     pub fn plain_text(&self) -> String {
         match self {
-            MessageContent::Text(rich)
+            MessageContent::Text { rich, .. }
             | MessageContent::Notice(rich)
             | MessageContent::Emote(rich) => rich.to_plain(),
             MessageContent::Image { name, .. } | MessageContent::File { name, .. } => name.clone(),
@@ -178,14 +186,15 @@ impl OwnEvent {
 }
 
 /// What the composer's text becomes when it is sent (design, "Functional
-/// core"). Replying and editing at the same time, and editing another
-/// user's message, cannot be expressed.
+/// core"). Replying and editing at the same time, editing another user's
+/// message, and replying to a local echo (which has no event ID to reply to)
+/// cannot be expressed.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum Draft {
     #[default]
     New,
     Reply {
-        to: ItemRef,
+        to: EventId,
     },
     Edit {
         target: OwnEvent,
@@ -202,7 +211,10 @@ mod tests {
             sender: UserId::new(sender),
             sender_name: sender.into(),
             timestamp: Timestamp::from_millis(0),
-            content: MessageContent::Text(RichText::plain("hi")),
+            content: MessageContent::Text {
+                body: "hi".into(),
+                rich: RichText::plain("hi"),
+            },
             reply: None,
             reactions: Vec::new(),
             edited: false,
@@ -227,7 +239,21 @@ mod tests {
     #[test]
     fn plain_text_of_each_content_variant() {
         let cases = [
-            (MessageContent::Text(RichText::plain("a\nb")), "a\nb"),
+            (
+                MessageContent::Text {
+                    body: "a\nb".into(),
+                    rich: RichText::plain("a\nb"),
+                },
+                "a\nb",
+            ),
+            // The rendered text, not the Markdown source.
+            (
+                MessageContent::Text {
+                    body: "**bold**".into(),
+                    rich: RichText::plain("bold"),
+                },
+                "bold",
+            ),
             (MessageContent::Notice(RichText::plain("notice")), "notice"),
             (MessageContent::Emote(RichText::plain("waves")), "waves"),
             (
