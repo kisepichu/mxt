@@ -925,17 +925,21 @@ separate device) and the edtui check program. Counts are from that account.
 4. **`/notifications`:** answers 200 with an empty list and no `next_token`
    on an account with hundreds of rooms. Treated as unsupported; there is no
    event-level mention list ("Mentions").
-5. **edtui with CJK text:** cursor columns, the drawn cell under the cursor,
-   committed input method text (simulated with tmux `send-keys`), wrapping of
-   wide characters at the pane edge and the internal register all work, so the
-   composer choice stands. Input method preedit placement needs `mxt-tui` to
-   put the terminal cursor at the editor's `cursor_screen_position()`; seeing
-   the preedit itself is a check by a person, still open. Not working in edtui
-   0.11.8: the cursor after emoji grapheme clusters (skin tones, ZWJ
-   sequences, VS16; drawn up to 4 columns off, `h`/`l` step into clusters),
-   CJK word motions (`w`, `e`, `b` treat every non-ASCII character as its own
-   word), `F`/`T`/`;`/`,`, and a linewise `p` on the last line (pastes above).
-   `r` is unbound rather than redo.
+5. **edtui with CJK text and input methods:** cursor columns, the drawn cell
+   under the cursor, committed input method text (simulated with tmux
+   `send-keys`), wrapping of wide characters at the pane edge and the internal
+   register all work. With the terminal cursor at the editor's
+   `cursor_screen_position()`, a real input method over SSH (from WSL and from
+   macOS) shows the preedit and the candidate window at the cursor at the
+   start of a line, after wide characters and on a wrapped second row;
+   committing inserts the text with the cursor after it; `<Esc>` while a
+   preedit is open is consumed by the input method, and edtui stays in insert
+   mode. The composer choice stands. Not working in edtui 0.11.8: the cursor
+   after emoji grapheme clusters (skin tones, ZWJ sequences, VS16; drawn up to
+   4 columns off, `h`/`l` step into clusters), CJK word motions (`w`, `e`,
+   `b` treat every non-ASCII character as its own word), `F`/`T`/`;`/`,`, and
+   a linewise `p` on the last line (pastes above). `r` is unbound rather than
+   redo.
 6. **Mentions on the remote network:** open; needs a bridged channel, a
    second person, and mxt with classic sync and sending (phase 3).
 7. **Key backup with `AfterDecryptionFailure`:** recovery imported the
