@@ -46,7 +46,7 @@ use tracing::{debug, warn};
 
 use crate::{
     Error,
-    error::{brief_sdk, timeline_error},
+    error::{brief_sdk, timeline_error, without_url},
     html::render_html,
 };
 
@@ -275,7 +275,22 @@ pub(crate) async fn send_message(timeline: &Timeline, message: Outgoing) -> Resu
             .await
             .map(drop),
         OutgoingKind::Reply { to } => timeline.send_reply(content, event_id(&to)?).await.map(drop),
-        OutgoingKind::Edit { target } => {
+        // What `Timeline::edit` does for a sent message, without looking for
+        // it in the timeline's items, which may no longer hold it.
+        OutgoingKind::Edit {
+            target: ItemRef::Remote(target),
+        } => {
+            let edit = timeline
+                .room()
+                .make_edit_event(&event_id(&target)?, EditedContent::RoomMessage(content))
+                .await
+                .map_err(|error| timeline_error(sdk::EditError::RoomError(error).into()))?;
+            timeline.send(edit).await.map(drop)
+        }
+        // A local echo is replaced in the send queue.
+        OutgoingKind::Edit {
+            target: target @ ItemRef::Local(_),
+        } => {
             let content = EditedContent::RoomMessage(content);
             timeline.edit(&item_id(&target)?, content).await
         }
@@ -298,14 +313,28 @@ pub(crate) async fn toggle_reaction(
         .map_err(timeline_error)
 }
 
-/// Redacts the user's own `item`, or stops sending it while it is a local
-/// echo.
+/// Redacts the user's own sent `item`, or stops sending it while it is a
+/// local echo. A sent item is redacted at once, not through the room's send
+/// queue as `Timeline::redact` does: the SDK would show it deleted before
+/// the homeserver accepts the redaction, and a refused redaction would hold
+/// back the room's later requests. The item changes when the redaction
+/// arrives with the sync.
 pub(crate) async fn redact(timeline: &Timeline, item: &ItemRef) -> Result<(), Error> {
-    enable_sending(timeline);
-    timeline
-        .redact(&item_id(item)?, None)
-        .await
-        .map_err(timeline_error)
+    match item {
+        ItemRef::Remote(event) => timeline
+            .room()
+            .redact(&event_id(event)?, None, None)
+            .await
+            .map(drop)
+            .map_err(|error| without_url(error.into()).into()),
+        ItemRef::Local(_) => {
+            enable_sending(timeline);
+            timeline
+                .redact(&item_id(item)?, None)
+                .await
+                .map_err(timeline_error)
+        }
+    }
 }
 
 /// Sends the failed local echo `txn` again, from its place in the room's
@@ -327,12 +356,13 @@ pub(crate) async fn resend(timeline: &Timeline, txn: &TxnId) -> Result<(), Error
 }
 
 /// The SDK disables a room's send queue after any failed request, and only
-/// `Client::resume` enables it again, so every write the user starts enables
-/// it; otherwise later messages, reactions and redactions would wait for
-/// good. A request that failed with a recoverable error (the network, for
-/// example) stays queued and goes out first, which keeps the order; one that
-/// failed otherwise holds back the ones after it until it is resent or
-/// deleted.
+/// `Client::resume` enables it again, so every request the user queues or
+/// deletes enables it (the adapter also enables every queue when the sync
+/// connects); otherwise later messages, reactions and redactions would wait
+/// for good. A request that failed with a recoverable error (the network,
+/// for example) stays queued and goes out first, which keeps the order; one
+/// that failed otherwise holds back the ones after it until it is resent or
+/// deleted, or, for an edit or a reaction, dropped (see `send_queue`).
 fn enable_sending(timeline: &Timeline) {
     timeline.room().send_queue().set_enabled(true);
 }
@@ -340,15 +370,15 @@ fn enable_sending(timeline: &Timeline) {
 /// The content of a message from the composer (design, "Matrix adapter",
 /// Sending): an HTML body from the Markdown when it has any formatting, the
 /// plain body alone otherwise, and `m.mentions` with the users still
-/// mentioned.
+/// mentioned. `m.mentions` is there also when it is empty: the push rules
+/// from before it apply only to events without it, and would notify the
+/// members whose display name the message contains, or the whole room for
+/// `@room`.
 fn outgoing_content(body: &RenderedBody) -> RoomMessageEventContentWithoutRelation {
     let content = match FormattedBody::markdown(&body.markdown) {
         Some(html) => RoomMessageEventContentWithoutRelation::text_html(&body.plain, html.body),
         None => RoomMessageEventContentWithoutRelation::text_plain(&body.plain),
     };
-    if body.user_ids.is_empty() {
-        return content;
-    }
     // The core's user IDs come from the SDK's members, so they parse.
     let users = body
         .user_ids
@@ -893,10 +923,11 @@ mod tests {
 
     #[test]
     fn text_without_formatting_is_sent_plain_and_markdown_with_an_html_body() {
-        // Line breaks alone are no formatting.
+        // Line breaks alone are no formatting. Without mentions, `m.mentions`
+        // is empty, which keeps the legacy push rules from notifying anyone.
         assert_eq!(
             sent("hello\nworld", &[]),
-            json!({ "msgtype": "m.text", "body": "hello\nworld" })
+            json!({ "msgtype": "m.text", "body": "hello\nworld", "m.mentions": {} })
         );
         // The plain body stays as typed, and line breaks stay in the HTML.
         assert_eq!(
@@ -906,6 +937,7 @@ mod tests {
                 "body": "**hi**\nthere",
                 "format": "org.matrix.custom.html",
                 "formatted_body": "<strong>hi</strong><br />\nthere",
+                "m.mentions": {},
             })
         );
     }

@@ -1,7 +1,7 @@
 //! The `Matrix` handle: runs the tasks that report to the core while the
 //! sync loop runs, and executes matrix effects.
 
-use std::sync::Arc;
+use std::{fmt::Display, sync::Arc};
 
 use matrix_sdk::{
     Client, Room, RoomMemberships,
@@ -11,7 +11,7 @@ use matrix_sdk::{
 };
 use matrix_sdk_ui::Timeline;
 use mxt_core::{
-    effect::MatrixEffect,
+    effect::{MatrixEffect, Outgoing},
     ids::{EventId, RoomId, UserId},
     mention::Member,
     msg::{Msg, SyncState},
@@ -19,7 +19,7 @@ use mxt_core::{
 };
 use tokio::{
     sync::{
-        mpsc::{UnboundedReceiver, UnboundedSender},
+        mpsc::{self, UnboundedReceiver, UnboundedSender},
         watch,
     },
     task::{JoinError, JoinSet},
@@ -29,7 +29,7 @@ use tracing::{debug, warn};
 use crate::{
     Error, SyncLoop,
     error::without_url,
-    rooms,
+    rooms, send_queue,
     timeline::{Subscription, event_id, redact, resend, send_message, toggle_reaction},
 };
 
@@ -42,9 +42,11 @@ pub struct Matrix {
 impl Matrix {
     /// Starts the tasks that turn the joined rooms, the sync responses, room
     /// info updates and notification settings changes into
-    /// `Msg::RoomUpserted` / `Msg::RoomRemoved`, and the sync loop's state
-    /// into `Msg::SyncState`. The effects sent to `effects` run in the
-    /// background; failures arrive as `Msg::EffectFailed`.
+    /// `Msg::RoomUpserted` / `Msg::RoomRemoved`, the sync loop's state into
+    /// `Msg::SyncState`, and edits, reactions and redactions that fail for
+    /// good into `Msg::EffectFailed` (see `send_queue`). The effects sent to
+    /// `effects` run in the background; failures arrive as
+    /// `Msg::EffectFailed`.
     pub async fn start(
         client: Client,
         sync: SyncLoop,
@@ -54,9 +56,15 @@ impl Matrix {
     ) -> Matrix {
         let settings = client.notification_settings().await;
         let rooms = rooms::Rooms::new(client.clone(), settings, to_core.clone());
+        let send_updates = client.send_queue().subscribe();
         let mut tasks = JoinSet::new();
-        tasks.spawn(watch_sync(sync.state(), to_core.clone()));
+        tasks.spawn(watch_sync(client.clone(), sync.state(), to_core.clone()));
         tasks.spawn(rooms::run(rooms, sync.rooms()));
+        tasks.spawn(send_queue::drop_failed_aggregations(
+            client.clone(),
+            send_updates,
+            to_core.clone(),
+        ));
         tasks.spawn(run_effects(client, receipts, to_core, effects));
         Matrix { tasks, sync }
     }
@@ -92,8 +100,16 @@ pub(crate) async fn first_panic(tasks: &mut JoinSet<()>) -> JoinError {
     std::future::pending().await
 }
 
-/// Reports the sync loop's state when it changes; ends with the loop.
-async fn watch_sync(mut state: watch::Receiver<SyncState>, to_core: UnboundedSender<Msg>) {
+/// Reports the sync loop's state when it changes; ends with the loop. When
+/// the sync connects, the first time and after being offline or retrying,
+/// every room's send queue is enabled: the requests that failed with a
+/// recoverable error meanwhile go out, in every room, and so do those left
+/// from the previous session, also in rooms that are not open.
+async fn watch_sync(
+    client: Client,
+    mut state: watch::Receiver<SyncState>,
+    to_core: UnboundedSender<Msg>,
+) {
     // The core starts with `Starting`.
     let mut reported = SyncState::Starting;
     loop {
@@ -101,6 +117,9 @@ async fn watch_sync(mut state: watch::Receiver<SyncState>, to_core: UnboundedSen
         if current != reported {
             reported = current;
             let _ = to_core.send(Msg::SyncState(current));
+            if current == SyncState::Synced {
+                client.send_queue().set_enabled(true).await;
+            }
         }
         if state.changed().await.is_err() {
             return;
@@ -108,9 +127,8 @@ async fn watch_sync(mut state: watch::Receiver<SyncState>, to_core: UnboundedSen
     }
 }
 
-/// Subscriptions and sends run in order, so the last subscription wins and
-/// messages are queued in the order they were sent; the rest runs
-/// concurrently.
+/// Subscriptions run in order, so the last one wins; messages are queued in
+/// the order they were sent, by `send_messages`; the rest runs concurrently.
 async fn run_effects(
     client: Client,
     receipts: ReceiptKind,
@@ -118,6 +136,8 @@ async fn run_effects(
     mut queue: UnboundedReceiver<MatrixEffect>,
 ) {
     let mut running = JoinSet::new();
+    let (sends, to_send) = mpsc::unbounded_channel();
+    running.spawn(send_messages(to_send, to_core.clone()));
     // The open room's timeline; at most one.
     let mut timeline: Option<Subscription> = None;
     loop {
@@ -157,16 +177,12 @@ async fn run_effects(
                         }
                     }
                 }
-                // Awaited here: queueing is quick unless a reply or an edit
-                // has to fetch its target event, and a later message must not
-                // overtake it.
                 Some(MatrixEffect::Send { room, message }) => {
-                    let sent = match open_timeline(&timeline, &room) {
-                        Ok(open) => send_message(&open, message).await,
-                        Err(error) => Err(error),
-                    };
-                    if let Err(error) = sent {
-                        report(&to_core, "Sending the message failed", &error);
+                    match open_timeline(&timeline, &room) {
+                        Ok(open) => {
+                            let _ = sends.send((open, message));
+                        }
+                        Err(error) => report(&to_core, "Sending the message failed", &error),
                     }
                 }
                 Some(MatrixEffect::ToggleReaction { room, item, key }) => {
@@ -215,6 +231,22 @@ where
     async move {
         if let Err(error) = effect.await {
             report(&to_core, what, &error);
+        }
+    }
+}
+
+/// Queues the messages one at a time, in the order they were sent. A reply
+/// or an edit of a sent message fetches its target event first when the
+/// event cache lacks it, which can take up to three attempts of the client's
+/// request timeout, and a later message must not overtake it; meanwhile the
+/// other effects (switching rooms, pagination, receipts) do not wait.
+async fn send_messages(
+    mut messages: UnboundedReceiver<(Arc<Timeline>, Outgoing)>,
+    to_core: UnboundedSender<Msg>,
+) {
+    while let Some((timeline, message)) = messages.recv().await {
+        if let Err(error) = send_message(&timeline, message).await {
+            report(&to_core, "Sending the message failed", &error);
         }
     }
 }
@@ -358,9 +390,19 @@ fn sdk_room(client: &Client, room: &RoomId) -> Result<Room, Error> {
 /// The status line and the `warn` log get the brief error, without event
 /// contents or room IDs; `debug` gets the full one.
 fn report(to_core: &UnboundedSender<Msg>, what: &str, error: &Error) {
-    let brief = error.brief();
+    report_brief(to_core, what, &error.brief(), error);
+}
+
+/// `report`, for an error that is not an `Error`: `brief` names no room and
+/// holds no event contents.
+pub(crate) fn report_brief(
+    to_core: &UnboundedSender<Msg>,
+    what: &str,
+    brief: &dyn Display,
+    full: &dyn Display,
+) {
     warn!("{what}: {brief}");
-    debug!("{what}: {error}");
+    debug!("{what}: {full}");
     let _ = to_core.send(Msg::EffectFailed {
         error: format!("{what}: {brief}"),
     });

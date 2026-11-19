@@ -15,6 +15,7 @@ mod error;
 mod html;
 mod recovery;
 mod rooms;
+mod send_queue;
 mod session;
 mod sync;
 mod timeline;

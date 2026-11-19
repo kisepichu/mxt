@@ -85,8 +85,17 @@ impl Error {
     }
 }
 
-/// An SDK error for the status line and `warn` logs, see `Brief`.
+/// An SDK error for the status line and `warn` logs, see `Brief`. The send
+/// queue shares its errors, so `without_url` cannot take a failed request's
+/// URL out; such a request shows no more than that it failed, as in
+/// `Error::brief`.
 pub(crate) fn brief_sdk(error: &matrix_sdk::Error) -> Brief<'_> {
+    if is_unreachable(error) {
+        return Brief {
+            error: &"the request failed",
+            response: None,
+        };
+    }
     Brief {
         error,
         response: sdk_response(error),
@@ -128,11 +137,15 @@ pub(crate) fn timeline_error(error: timeline::Error) -> Error {
             }
         }
         // Replies and edits fetch their target event when the event cache
-        // lacks it; as an SDK error, `Error::brief` shortens the homeserver's
-        // answer like any other.
+        // lacks it, and removing a reaction redacts it at once; as an SDK
+        // error, `Error::brief` shortens the homeserver's answer like any
+        // other.
         timeline::Error::ReplyError(ReplyError::Fetch(error))
         | timeline::Error::EditError(timeline::EditError::RoomError(EditError::Fetch(error))) => {
             without_url(*error).into()
+        }
+        timeline::Error::RedactError(timeline::RedactError::HttpError(error)) => {
+            without_url(error.into()).into()
         }
         error => Error::Timeline(error),
     }
@@ -374,25 +387,51 @@ mod tests {
         assert_eq!(shared.brief().to_string(), "the request failed");
     }
 
-    #[test]
-    fn brief_errors_of_fetching_the_replied_to_or_edited_event_name_no_room() {
+    /// A request that failed in the network layer, with a URL that names
+    /// `!room:example.org`.
+    fn failed_request() -> HttpError {
         let url = "https://example.org/_matrix/client/v3/rooms/!room:example.org/event/$event";
-        let failed_request = || {
-            let error = matrix_sdk::reqwest::Proxy::all("http://[").unwrap_err();
-            let error = error.with_url(matrix_sdk::reqwest::Url::parse(url).unwrap());
-            Box::new(matrix_sdk::Error::from(HttpError::Reqwest(error)))
+        let error = matrix_sdk::reqwest::Proxy::all("http://[").unwrap_err();
+        HttpError::Reqwest(error.with_url(matrix_sdk::reqwest::Url::parse(url).unwrap()))
+    }
+
+    #[test]
+    fn brief_errors_of_fetching_targets_and_removing_reactions_name_no_room() {
+        let reply = |error: HttpError| {
+            timeline::Error::ReplyError(ReplyError::Fetch(Box::new(error.into())))
         };
-        let reply = |error| timeline::Error::ReplyError(ReplyError::Fetch(error));
-        let edit = |error| {
-            timeline::Error::EditError(timeline::EditError::RoomError(EditError::Fetch(error)))
+        let edit = |error: HttpError| {
+            let fetch = EditError::Fetch(Box::new(error.into()));
+            timeline::Error::EditError(timeline::EditError::RoomError(fetch))
         };
-        for error in [reply(failed_request()), edit(failed_request())] {
+        let unreact = |error| timeline::Error::RedactError(timeline::RedactError::HttpError(error));
+        for error in [
+            reply(failed_request()),
+            edit(failed_request()),
+            unreact(failed_request()),
+        ] {
             let error = timeline_error(error);
             assert!(!error.brief().to_string().contains("!room"), "{error}");
         }
-        let refused = timeline_error(reply(Box::new(server_error("M_FORBIDDEN").into())));
+        for refused in [
+            reply(server_error("M_FORBIDDEN")),
+            unreact(server_error("M_FORBIDDEN")),
+        ] {
+            assert_eq!(
+                timeline_error(refused).brief().to_string(),
+                "the homeserver answered 403 M_FORBIDDEN"
+            );
+        }
+    }
+
+    #[test]
+    fn brief_send_queue_errors_name_no_room() {
+        // The send queue's errors are shared, so the URL stays in them.
+        let failed = matrix_sdk::Error::from(failed_request());
+        assert_eq!(brief_sdk(&failed).to_string(), "the request failed");
+        let refused = matrix_sdk::Error::from(server_error("M_FORBIDDEN"));
         assert_eq!(
-            refused.brief().to_string(),
+            brief_sdk(&refused).to_string(),
             "the homeserver answered 403 M_FORBIDDEN"
         );
     }
