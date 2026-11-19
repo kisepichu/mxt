@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use matrix_sdk::{
     Client,
+    config::RequestConfig,
     encryption::{BackupDownloadStrategy, EncryptionSettings},
     sliding_sync::VersionBuilder,
 };
@@ -37,6 +38,14 @@ pub struct StoreDirs {
 /// key backup when an event fails to decrypt; backups and cross-signing are
 /// never created. mxt syncs with classic `/sync`, so the client neither
 /// checks nor uses sliding sync. No refresh tokens.
+///
+/// Requests that use the client's request config, the sync among them, are
+/// sent at most 3 times. The SDK's default retries 5xx and 429 answers for up
+/// to 15 min within one request, so the sync state would show `synced` while
+/// the homeserver is down behind its proxy. With a limit, the SDK also
+/// retries network failures, which it otherwise reports at once. No
+/// `max_retry_time`: matrix-sdk 0.19 caps each delay between attempts with
+/// it, not their sum, and the delays of 3 attempts are 0.5 s and 1 s.
 pub async fn build_client(homeserver: &Homeserver, dirs: &StoreDirs) -> Result<Client, Error> {
     let builder = match homeserver {
         Homeserver::Discover(server_name) => {
@@ -52,6 +61,7 @@ pub async fn build_client(homeserver: &Homeserver, dirs: &StoreDirs) -> Result<C
             auto_enable_backups: false,
         })
         .sliding_sync_version_builder(VersionBuilder::None)
+        .request_config(RequestConfig::new().retry_limit(3))
         .build()
         .await?;
     Ok(client)
