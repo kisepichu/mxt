@@ -9,20 +9,25 @@ use crossterm::cursor::{Hide, Show};
 use crossterm::event::{DisableFocusChange, EnableFocusChange, Event};
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
-use mxt_core::app::App;
+use edtui::{EditorState, system_editor};
+use mxt_core::app::{App, Focus};
 use mxt_core::effect::{UiEffect, ViewContent};
-use mxt_core::msg::{Msg, Pane};
+use mxt_core::msg::{EditorMode, Msg, Pane};
 use mxt_core::resolver::TimerId;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::ListState;
 
 use crate::clipboard::SharedRegister;
+use crate::composer::{Composer, Composers};
+use crate::editor::Editor;
 use crate::input::key_from_crossterm;
-use crate::message_view::MessageView;
+use crate::overlay::Overlays;
 use crate::timeline_view::{TimeFormat, TimelinePane};
 use crate::timers::Timers;
 use crate::view::{self, Panes};
+
+type Backend = CrosstermBackend<Stdout>;
 
 /// Whether the terminal is in raw mode and on the alternate screen. Shared by
 /// [`Tui::restore`] and the panic hook, so the terminal is restored once: a
@@ -30,7 +35,7 @@ use crate::view::{self, Panes};
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub struct Tui {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
+    terminal: Terminal<Backend>,
     /// The room list's cursor and scroll offset between frames.
     room_list: ListState,
     /// The room list range last reported with `Msg::Viewport`.
@@ -38,8 +43,10 @@ pub struct Tui {
     timeline: TimelinePane,
     /// The timeline range last reported with `Msg::Viewport`.
     timeline_viewport: Option<(usize, usize)>,
-    /// The message view while it is open.
-    view: Option<MessageView>,
+    /// The message view's scratch editor while it is open.
+    view: Option<Editor>,
+    composers: Composers,
+    overlays: Overlays,
     register: SharedRegister,
     timers: Timers<TimerId>,
     should_quit: bool,
@@ -54,17 +61,22 @@ impl Tui {
             .and_then(|()| Terminal::new(CrosstermBackend::new(io::stdout())))
             .and_then(|mut terminal| terminal.clear().map(|()| terminal));
         match setup {
-            Ok(terminal) => Ok(Tui {
-                terminal,
-                room_list: ListState::default(),
-                room_list_viewport: None,
-                timeline: TimelinePane::new(),
-                timeline_viewport: None,
-                view: None,
-                register: SharedRegister::default(),
-                timers: Timers::new(),
-                should_quit: false,
-            }),
+            Ok(terminal) => {
+                let register = SharedRegister::default();
+                Ok(Tui {
+                    terminal,
+                    room_list: ListState::default(),
+                    room_list_viewport: None,
+                    timeline: TimelinePane::new(),
+                    timeline_viewport: None,
+                    view: None,
+                    composers: Composers::new(register.clone()),
+                    overlays: Overlays::default(),
+                    register,
+                    timers: Timers::new(),
+                    should_quit: false,
+                })
+            }
             Err(error) => {
                 // The setup error is the one worth reporting.
                 let _ = restore_terminal();
@@ -98,14 +110,19 @@ impl Tui {
             room_list,
             timeline,
             view,
+            composers,
+            overlays,
             ..
         } = self;
+        let composer = app.open_room().and_then(|room| composers.get_mut(room));
         let mut visible = view::Visible::default();
         terminal.draw(|frame| {
             let panes = Panes {
                 room_list,
                 timeline,
                 view: view.as_mut(),
+                composer,
+                overlays,
             };
             visible = view::draw(frame, app, panes);
         })?;
@@ -134,15 +151,16 @@ impl Tui {
     }
 
     /// Converts one terminal event. Key presses and repeats become `Msg::Key`
-    /// with the message view's editor mode while it is open (`editor: None`
-    /// otherwise until the composer exists); focus events become
-    /// `Msg::TerminalFocus`; resizes produce nothing (the loop redraws after
-    /// every event anyway). Mouse and paste events are not enabled.
-    pub fn handle_event(&mut self, event: Event) -> Vec<Msg> {
+    /// with the mode of the editor that has the keys: the message view's
+    /// while it is open, otherwise the open room's composer's while it has
+    /// focus. Focus events become `Msg::TerminalFocus`; resizes produce
+    /// nothing (the loop redraws after every event anyway). Mouse and paste
+    /// events are not enabled.
+    pub fn handle_event(&mut self, app: &App, event: Event) -> Vec<Msg> {
         let msg = match event {
             Event::Key(event) => key_from_crossterm(event).map(|key| Msg::Key {
                 key,
-                editor: self.view.as_ref().map(MessageView::mode),
+                editor: self.editor_mode(app),
             }),
             Event::FocusGained => Some(Msg::TerminalFocus(true)),
             Event::FocusLost => Some(Msg::TerminalFocus(false)),
@@ -151,14 +169,38 @@ impl Tui {
         msg.into_iter().collect()
     }
 
-    /// Executes a UI effect. `StartTimer` schedules a deadline; `ReplayKeys`
-    /// goes to the message view's editor while it is open (the composer does
-    /// not exist yet, so it is dropped otherwise); `OpenView` replaces the
-    /// message view and `CloseView` drops it with its edits; `Yank` copies
-    /// into the register, and the next draw sends it to the terminal
-    /// clipboard; `Quit` sets `should_quit`. The composer effects are
-    /// dropped until the composer exists.
-    pub fn execute(&mut self, effect: UiEffect, now: Instant) {
+    fn editor_mode(&self, app: &App) -> Option<EditorMode> {
+        if let Some(view) = &self.view {
+            return Some(view.mode());
+        }
+        if app.focus() != Focus::Composer {
+            return None;
+        }
+        let room = app.open_room()?;
+        self.composers.get(room).map(Composer::mode)
+    }
+
+    /// Executes a UI effect and returns what it reports to the core.
+    ///
+    /// - `StartTimer` schedules a deadline.
+    /// - `ReplayKeys` goes to the message view's editor while it is open,
+    ///   otherwise to the composer that last got the focus.
+    /// - `OpenView` replaces the message view and `CloseView` drops it with
+    ///   its edits.
+    /// - `Yank` copies into the register, and the next draw sends it to the
+    ///   terminal clipboard.
+    /// - `FocusComposer` creates the room's composer on first focus.
+    ///   `RequestSubmit` answers `Msg::Submit` with the composer's text.
+    /// - A composer reports `Msg::ComposerEdited` when edits change whether
+    ///   it is empty and, in insert mode, `Msg::MentionQuery` when they
+    ///   change the `@` token; `ClearComposer` and `LoadComposer` leave the
+    ///   emptiness to the core.
+    /// - `ExternalEditor` runs `$VISUAL` or `$EDITOR` on the main screen,
+    ///   and so does edtui's own `<C-e>` when a replayed key reaches it. A
+    ///   failure becomes `Msg::EffectFailed`.
+    /// - `Quit` sets `should_quit`.
+    pub fn execute(&mut self, effect: UiEffect, now: Instant) -> Vec<Msg> {
+        let mut msgs = Vec::new();
         match effect {
             UiEffect::StartTimer { id, after_ms } => {
                 // A deadline beyond `Instant`'s range never comes.
@@ -168,24 +210,51 @@ impl Tui {
             }
             UiEffect::ReplayKeys(keys) => {
                 if let Some(view) = &mut self.view {
-                    view.replay(&keys);
+                    keys.into_iter().for_each(|key| view.feed(key));
+                } else if let Some(composer) = self.composers.focused_mut() {
+                    composer.replay(&keys, &mut msgs);
+                    edit_externally(&mut self.terminal, composer, &mut msgs);
                 }
             }
             UiEffect::OpenView(ViewContent::Text(text)) => {
-                self.view = Some(MessageView::new(&text, self.register.clone()));
+                self.view = Some(Editor::new(&text, self.register.clone()));
             }
             UiEffect::CloseView => self.view = None,
             UiEffect::Yank(text) => self.register.copy(text),
-            // The composer arrives in phase 3 Task 4.
-            UiEffect::FocusComposer { .. }
-            | UiEffect::RequestSubmit(_)
-            | UiEffect::InsertNewline(_)
-            | UiEffect::LoadComposer { .. }
-            | UiEffect::ClearComposer(_)
-            | UiEffect::ReplaceMentionToken { .. }
-            | UiEffect::ExternalEditor(_) => {}
+            UiEffect::FocusComposer { room, mode } => self.composers.focus(room, mode, &mut msgs),
+            UiEffect::RequestSubmit(room) => {
+                if let Some(composer) = self.composers.get(&room) {
+                    let body = composer.text();
+                    msgs.push(Msg::Submit { room, body });
+                }
+            }
+            UiEffect::InsertNewline(room) => {
+                if let Some(composer) = self.composers.get_mut(&room) {
+                    composer.insert_newline(&mut msgs);
+                }
+            }
+            UiEffect::LoadComposer { room, text } => {
+                self.composers.get_or_create(&room).load(&text, &mut msgs);
+            }
+            UiEffect::ClearComposer(room) => {
+                if let Some(composer) = self.composers.get_mut(&room) {
+                    composer.clear();
+                }
+            }
+            UiEffect::ReplaceMentionToken { room, text } => {
+                if let Some(composer) = self.composers.get_mut(&room) {
+                    composer.replace_token(&text, &mut msgs);
+                }
+            }
+            UiEffect::ExternalEditor(room) => {
+                if let Some(composer) = self.composers.get_mut(&room) {
+                    composer.request_external_editor();
+                    edit_externally(&mut self.terminal, composer, &mut msgs);
+                }
+            }
             UiEffect::Quit => self.should_quit = true,
         }
+        msgs
     }
 
     pub fn should_quit(&self) -> bool {
@@ -215,6 +284,24 @@ impl Drop for Tui {
     fn drop(&mut self) {
         // Nothing is left to report the error to.
         let _ = self.restore();
+    }
+}
+
+/// Runs the external editor if the composer asked for it. edtui leaves raw
+/// mode and the alternate screen around it and clears the terminal after it,
+/// so the next draw repaints everything; the editor gets the cursor shown
+/// and no focus reports.
+fn edit_externally(terminal: &mut Terminal<Backend>, composer: &mut Composer, msgs: &mut Vec<Msg>) {
+    let open = |state: &mut EditorState| {
+        execute!(io::stdout(), DisableFocusChange, Show)?;
+        let edited = system_editor::open(state, terminal);
+        let restored = execute!(io::stdout(), EnableFocusChange, Hide);
+        edited.and(restored)
+    };
+    if let Err(error) = composer.edit_externally(msgs, open) {
+        msgs.push(Msg::EffectFailed {
+            error: format!("The external editor failed: {error}"),
+        });
     }
 }
 

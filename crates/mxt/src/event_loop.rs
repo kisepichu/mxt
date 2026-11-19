@@ -35,7 +35,7 @@ pub async fn run(
         };
         tokio::select! {
             event = terminal_events.next() => match event {
-                Some(event) => queue.extend(tui.handle_event(event?)),
+                Some(event) => queue.extend(tui.handle_event(app, event?)),
                 // The terminal input has ended, so nothing can quit later.
                 None => return Ok(()),
             },
@@ -67,6 +67,8 @@ fn draw(
 }
 
 /// Feeds the queued messages to `update` in order and routes the effects.
+/// What the tui adapter reports while executing an effect (the composer's
+/// text and edits) joins the end of the queue.
 fn update(
     app: &mut App,
     tui: &mut Tui,
@@ -76,7 +78,7 @@ fn update(
     while let Some(msg) = queue.pop_front() {
         for effect in app.update(msg) {
             match effect {
-                Effect::Ui(effect) => tui.execute(effect, Instant::now()),
+                Effect::Ui(effect) => queue.extend(tui.execute(effect, Instant::now())),
                 Effect::Matrix(effect) => {
                     if to_matrix.send(effect).is_err() {
                         queue.push_back(Msg::EffectFailed {

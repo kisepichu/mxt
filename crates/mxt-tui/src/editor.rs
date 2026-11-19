@@ -1,6 +1,6 @@
-//! The full-screen message view (design, "Terminal adapter and the
-//! composer"): an edtui scratch editor in vim mode holding the message's
-//! text. Its edits are dropped with it.
+//! An edtui editor in vim mode with the shared register: the composers and
+//! the message view's scratch editor (design, "Terminal adapter and the
+//! composer").
 
 use crossterm::event::{KeyCode as C, KeyModifiers as M};
 use edtui::events::KeyInput;
@@ -10,20 +10,21 @@ use mxt_core::msg::EditorMode;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Clear, Padding};
+use ratatui::widgets::Block;
 
 use crate::clipboard::SharedRegister;
 
-pub(crate) struct MessageView {
-    state: EditorState,
+pub(crate) struct Editor {
+    pub(crate) state: EditorState,
     keys: EditorEventHandler,
 }
 
-impl MessageView {
-    pub(crate) fn new(text: &str, register: SharedRegister) -> MessageView {
+impl Editor {
+    /// In normal mode with the cursor at the start.
+    pub(crate) fn new(text: &str, register: SharedRegister) -> Editor {
         let mut state = EditorState::new(Lines::from(text));
         state.set_clipboard(register);
-        MessageView {
+        Editor {
             state,
             keys: EditorEventHandler::vim_mode(),
         }
@@ -38,13 +39,10 @@ impl MessageView {
         }
     }
 
-    /// The keys the core passed on, in order. Keys edtui has no code for
-    /// are left out.
-    pub(crate) fn replay(&mut self, keys: &[Key]) {
-        for &key in keys {
-            if let Some(input) = key_input(key, self.state.mode) {
-                self.keys.on_key_event(input, &mut self.state);
-            }
+    /// A key the core passed on. Keys edtui has no code for are left out.
+    pub(crate) fn feed(&mut self, key: Key) {
+        if let Some(input) = key_input(key, self.state.mode) {
+            self.keys.on_key_event(input, &mut self.state);
         }
     }
 
@@ -53,23 +51,25 @@ impl MessageView {
         (self.state.mode == edtui::EditorMode::Search).then(|| self.state.search_pattern())
     }
 
-    /// Draws the editor over `area`. Outside search mode the terminal cursor
-    /// goes to the editor's cursor, where an input method puts its preedit.
-    pub(crate) fn draw(&mut self, frame: &mut Frame, area: Rect) {
-        frame.render_widget(Clear, area);
+    /// Draws the editor in `block` over `area`, wrapping its lines. With
+    /// `cursor`, the terminal cursor goes to the editor's cursor outside
+    /// search mode, where an input method puts its preedit; the bottom line
+    /// has it in search mode.
+    pub(crate) fn draw(&mut self, frame: &mut Frame, area: Rect, block: Block, cursor: bool) {
         // The terminal cursor marks the cursor; the selection and search
         // matches are reversed.
         let theme = EditorTheme::default()
             .base(Style::new())
             .hide_cursor()
             .selection_style(Style::new().add_modifier(Modifier::REVERSED))
-            .block(Block::new().padding(Padding::horizontal(1)))
+            .block(block)
             .hide_status_line();
         frame.render_widget(
             EditorView::new(&mut self.state).theme(theme).wrap(true),
             area,
         );
-        if self.state.mode != edtui::EditorMode::Search
+        if cursor
+            && self.state.mode != edtui::EditorMode::Search
             && let Some(position) = self.state.cursor_screen_position()
         {
             frame.set_cursor_position(position);
@@ -114,12 +114,12 @@ fn key_input(key: Key, mode: edtui::EditorMode) -> Option<KeyInput> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use edtui::EditorMode as Mode;
     use mxt_core::keys::KeySeq;
 
-    fn keys(text: &str) -> Vec<Key> {
+    pub(crate) fn keys(text: &str) -> Vec<Key> {
         KeySeq::parse(text, &KeySeq::default())
             .unwrap()
             .keys()
@@ -153,16 +153,18 @@ mod tests {
     }
 
     #[test]
-    fn replayed_keys_move_search_and_yank() {
+    fn fed_keys_move_search_and_yank() {
         let register = SharedRegister::default();
-        let mut view = MessageView::new("first line\nSecond line", register.clone());
-        view.replay(&keys("G"));
-        assert_eq!(view.state.cursor.row, 1);
-        view.replay(&keys("gg/Sec"));
-        assert_eq!(view.mode(), EditorMode::Search);
-        assert_eq!(view.search().as_deref(), Some("Sec"));
-        view.replay(&keys("<CR>yy"));
-        assert_eq!(view.mode(), EditorMode::Normal);
+        let mut editor = Editor::new("first line\nSecond line", register.clone());
+        let feed =
+            |editor: &mut Editor, text| keys(text).into_iter().for_each(|key| editor.feed(key));
+        feed(&mut editor, "G");
+        assert_eq!(editor.state.cursor.row, 1);
+        feed(&mut editor, "gg/Sec");
+        assert_eq!(editor.mode(), EditorMode::Search);
+        assert_eq!(editor.search().as_deref(), Some("Sec"));
+        feed(&mut editor, "<CR>yy");
+        assert_eq!(editor.mode(), EditorMode::Normal);
         assert!(register.take_unsent().is_some());
     }
 }

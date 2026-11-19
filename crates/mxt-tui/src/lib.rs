@@ -2,8 +2,10 @@
 //! effects.
 
 mod clipboard;
+mod composer;
+mod editor;
 mod input;
-mod message_view;
+mod overlay;
 mod terminal;
 mod timeline_view;
 mod timers;

@@ -2,23 +2,34 @@
 //! "Unread badges"). Colors come only from the 16-color palette.
 
 use mxt_core::app::{App, CommandLine, Focus, LineKind, StatusKind};
-use mxt_core::msg::SyncState;
+use mxt_core::msg::{EditorMode, SyncState};
 use mxt_core::room::{Badge, RoomName, RoomSummary};
+use mxt_core::timeline::{Draft, ItemRef, TimelineEntry};
 use ratatui::Frame;
 use ratatui::buffer::CellWidth;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::message_view::MessageView;
+use crate::composer::Composer;
+use crate::editor::Editor;
+use crate::overlay::Overlays;
 use crate::timeline_view::TimelinePane;
 
 /// The room list width, its border included.
 const ROOM_LIST_WIDTH: u16 = 30;
 /// Terminals narrower than this give the room list a third of their width.
 const NARROW_WIDTH: u16 = 90;
+/// The timeline header and the composer line up with the entries, which
+/// leave two columns for the cursor bar and one on the right.
+const ENTRIES_PADDING: Padding = Padding {
+    left: 2,
+    right: 1,
+    top: 0,
+    bottom: 0,
+};
 
 pub(crate) const PLAIN: Style = Style::new();
 pub(crate) const DIM: Style = Style::new().add_modifier(Modifier::DIM);
@@ -39,7 +50,11 @@ const MIN_NAME_WIDTH: usize = 6;
 pub(crate) struct Panes<'a> {
     pub(crate) room_list: &'a mut ListState,
     pub(crate) timeline: &'a mut TimelinePane,
-    pub(crate) view: Option<&'a mut MessageView>,
+    /// The message view's editor while it is open.
+    pub(crate) view: Option<&'a mut Editor>,
+    /// The open room's composer, once it had focus.
+    pub(crate) composer: Option<&'a mut Composer>,
+    pub(crate) overlays: &'a mut Overlays,
 }
 
 /// The first and last visible items of the panes, inclusive; `None` for a
@@ -50,39 +65,75 @@ pub(crate) struct Visible {
     pub(crate) timeline: Option<(usize, usize)>,
 }
 
-/// Draws the frame. The message view covers everything but the bottom line.
+/// Draws the frame. The message view covers everything but the bottom line,
+/// and the picker is drawn over the panes. The terminal cursor goes to the
+/// focused editor, the picker's query or the bottom line's prompt, whichever
+/// is drawn last.
 pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
     let [main, bottom] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
     let mut visible = Visible::default();
+    let mut composer = panes.composer;
+    let focused = app.focus() == Focus::Composer && composer.is_some();
     let search = match panes.view {
         Some(view) => {
-            view.draw(frame, main);
+            frame.render_widget(Clear, main);
+            view.draw(
+                frame,
+                main,
+                Block::new().padding(Padding::horizontal(1)),
+                true,
+            );
             view.search()
         }
         None => {
-            let timeline = if app.sidebar_visible() {
+            let right = if app.sidebar_visible() {
                 let width = if main.width < NARROW_WIDTH {
                     main.width / 3
                 } else {
                     ROOM_LIST_WIDTH
                 };
-                let [list, timeline] =
+                let [list, right] =
                     Layout::horizontal([Constraint::Length(width), Constraint::Fill(1)])
                         .areas(main);
                 visible.room_list = draw_room_list(frame, list, app, panes.room_list);
-                timeline
+                right
             } else {
                 main
             };
-            visible.timeline = draw_timeline(frame, timeline, app, panes.timeline);
-            None
+            if app.open_room().is_some() {
+                let height = composer_height(composer.as_deref(), right);
+                let [timeline, composer_area] =
+                    Layout::vertical([Constraint::Fill(1), Constraint::Length(height)])
+                        .areas(right);
+                visible.timeline = draw_timeline(frame, timeline, app, panes.timeline);
+                draw_composer(frame, composer_area, app, composer.as_deref_mut(), focused);
+                if let Some((members, selected)) = app.mention_menu() {
+                    panes.overlays.draw_mention_menu(
+                        frame,
+                        composer_area,
+                        timeline,
+                        members,
+                        selected,
+                    );
+                }
+            } else {
+                visible.timeline = draw_timeline(frame, right, app, panes.timeline);
+            }
+            composer
+                .as_deref()
+                .filter(|_| focused)
+                .and_then(Composer::search)
         }
     };
+    if let Some(picker) = app.picker() {
+        panes.overlays.draw_picker(frame, main, picker);
+    }
+    let editor = composer.filter(|_| focused).map(|composer| composer.mode());
     match (app.command_line(), search) {
         (Some(line), _) => draw_command_line(frame, bottom, line),
         (None, Some(pattern)) => draw_prompt_line(frame, bottom, "/", &pattern),
-        (None, None) => draw_status_line(frame, bottom, app),
+        (None, None) => draw_status_line(frame, bottom, app, editor),
     }
     visible
 }
@@ -223,14 +274,7 @@ fn draw_timeline(
     app: &App,
     pane: &mut TimelinePane,
 ) -> Option<(usize, usize)> {
-    // The header lines up with the entries, which leave two columns for the
-    // cursor bar.
-    let block = Block::new().padding(Padding {
-        left: 2,
-        right: 1,
-        top: 0,
-        bottom: 0,
-    });
+    let block = Block::new().padding(ENTRIES_PADDING);
     let header = Rect {
         height: area.height.min(1),
         ..block.inner(area)
@@ -249,11 +293,65 @@ fn draw_timeline(
     pane.draw(frame, entries, app)
 }
 
-/// The mode, the pending count and keys, the open room, the status message,
-/// and right-aligned the sync state. When they do not fit, the room name is
-/// cut first, so the status message stays readable.
-fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
-    let mode = format!(" {} ", app.mode_label(None));
+/// The composer's height in `pane`: a rule, and the rows of its text, from
+/// one up to a third of the pane.
+fn composer_height(composer: Option<&Composer>, pane: Rect) -> u16 {
+    let width = pane
+        .width
+        .saturating_sub(ENTRIES_PADDING.left + ENTRIES_PADDING.right);
+    let rows = composer.map_or(1, |composer| composer.rows(usize::from(width)));
+    let most = usize::from(pane.height / 3).max(1);
+    u16::try_from(rows.min(most)).unwrap_or(1) + 1
+}
+
+/// The open room's composer: a rule naming a reply or an edit, then the
+/// text. A room whose composer never had focus shows an empty one.
+fn draw_composer(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    composer: Option<&mut Composer>,
+    focused: bool,
+) {
+    let mut block = Block::new()
+        .borders(Borders::TOP)
+        .border_style(DIM)
+        .padding(ENTRIES_PADDING);
+    if let Some(label) = draft_label(app) {
+        block = block.title(Line::from(vec![
+            Span::styled("─", DIM),
+            Span::raw(format!(" {label} ")),
+        ]));
+    }
+    match composer {
+        Some(composer) => composer.draw(frame, area, block, focused),
+        None => frame.render_widget(block, area),
+    }
+}
+
+/// What the open room's draft is, unless it is a new message.
+fn draft_label(app: &App) -> Option<String> {
+    match app.draft(app.open_room()?)? {
+        Draft::New => None,
+        Draft::Reply { to } => {
+            let sender = app.timeline().iter().find_map(|entry| match entry {
+                TimelineEntry::Item(item) if matches!(&item.id, ItemRef::Remote(id) if id == to) => {
+                    Some(item.sender_name.as_str())
+                }
+                _ => None,
+            });
+            Some(sender.map_or_else(|| "Reply".to_owned(), |name| format!("Reply to {name}")))
+        }
+        Draft::Edit { .. } => Some("Edit".to_owned()),
+    }
+}
+
+/// The mode (the composer's editor mode while it has focus), the pending
+/// count and keys, the open room, the confirmation question or the status
+/// message, and right-aligned the sync state. When they do not fit, the room
+/// name is cut first, so the question or the status message stays readable.
+fn draw_status_line(frame: &mut Frame, area: Rect, app: &App, editor: Option<EditorMode>) {
+    let mode = format!(" {} ", app.mode_label(editor));
     let mut pending = app
         .pending_count()
         .map(|n| n.to_string())
@@ -265,13 +363,17 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
     if !pending.is_empty() {
         head.extend([(GAP, PLAIN), (pending.as_str(), PLAIN)]);
     }
-    let status = app.status().map(|status| {
-        let style = match status.kind {
-            StatusKind::Info => PLAIN,
-            StatusKind::Error => ERROR,
-        };
-        [(GAP, PLAIN), (status.text.as_str(), style)]
-    });
+    let status = match (app.confirmation(), app.status()) {
+        (Some(question), _) => Some([(GAP, PLAIN), (question, BOLD)]),
+        (None, Some(status)) => {
+            let style = match status.kind {
+                StatusKind::Info => PLAIN,
+                StatusKind::Error => ERROR,
+            };
+            Some([(GAP, PLAIN), (status.text.as_str(), style)])
+        }
+        (None, None) => None,
+    };
 
     let sync = sync_label(app.sync_state());
     let width = usize::from(area.width);
@@ -319,12 +421,13 @@ fn draw_command_line(frame: &mut Frame, area: Rect, line: &CommandLine) {
     draw_prompt_line(frame, area, prompt, &line.text);
 }
 
-/// The one-column prompt and the text, with the terminal cursor after the
-/// text. A text wider than the line loses its start, so its end and the
-/// cursor stay visible.
-fn draw_prompt_line(frame: &mut Frame, area: Rect, prompt: &str, full: &str) {
-    // The prompt and the cursor take a column each.
-    let room = usize::from(area.width).saturating_sub(2);
+/// The prompt and the text, with the terminal cursor after the text. A text
+/// wider than the line loses its start, so its end and the cursor stay
+/// visible.
+pub(crate) fn draw_prompt_line(frame: &mut Frame, area: Rect, prompt: &str, full: &str) {
+    let prompt_columns = text_width(prompt);
+    // The cursor takes a column.
+    let room = usize::from(area.width).saturating_sub(prompt_columns + 1);
     let mut text = full;
     let mut text_columns = text_width(text);
     for (at, grapheme) in full.grapheme_indices(true) {
@@ -335,7 +438,7 @@ fn draw_prompt_line(frame: &mut Frame, area: Rect, prompt: &str, full: &str) {
         text_columns -= grapheme_width(grapheme);
     }
     frame.render_widget(Line::from(vec![Span::raw(prompt), Span::raw(text)]), area);
-    let column = u16::try_from(1 + text_columns).unwrap_or(u16::MAX);
+    let column = u16::try_from(prompt_columns + text_columns).unwrap_or(u16::MAX);
     let x = area.x.saturating_add(column);
     frame.set_cursor_position(Position::new(x.min(area.right().saturating_sub(1)), area.y));
 }
