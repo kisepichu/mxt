@@ -2716,6 +2716,7 @@ dependencies = [
  "matrix-sdk",
  "matrix-sdk-ui",
  "mxt-core",
+ "ruma",
  "serde",
  "serde_json",
  "tokio",
@@ -3778,6 +3779,7 @@ checksum = "9e27e35e6c36fa1abc4def766e474a0f2f709e87f1602d57ec34d41b09253da4"
 dependencies = [
  "as_variant",
  "html5ever",
+ "ruma-common",
  "tracing",
  "wildmatch",
 ]

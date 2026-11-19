@@ -4,7 +4,7 @@
 use std::{sync::Arc, time::Duration};
 
 use matrix_sdk::{
-    Client, HttpError, Room,
+    Client, Room,
     latest_events::LatestEventValue,
     room::Receipts,
     ruma::{self, OwnedEventId, OwnedRoomId},
@@ -26,7 +26,14 @@ use tokio::{
 };
 use tracing::{debug, warn};
 
-use crate::{Error, backoff::Backoff, bridges, error::brief_sync, rooms};
+use crate::{
+    Error,
+    backoff::Backoff,
+    bridges,
+    error::{brief_sync, without_url},
+    rooms,
+    timeline::Subscription,
+};
 
 /// Builds the sync service (matrix-sdk-ui `SyncService` with offline mode),
 /// so startup can start it before the UI (the first login waits for the
@@ -106,8 +113,8 @@ impl Matrix {
     }
 }
 
-/// Subscriptions run in order, so the last one wins; receipts run
-/// concurrently.
+/// Subscriptions run in order, so the last one wins; receipts and back
+/// pagination run concurrently.
 async fn run_effects(
     client: Client,
     room_list: Arc<RoomListService>,
@@ -116,16 +123,23 @@ async fn run_effects(
     mut queue: UnboundedReceiver<MatrixEffect>,
 ) {
     let mut running = JoinSet::new();
+    // The open room's timeline; at most one.
+    let mut timeline: Option<Subscription> = None;
     loop {
         tokio::select! {
             effect = queue.recv() => match effect {
-                Some(MatrixEffect::SubscribeTimeline(room)) => match sdk_room_id(&room) {
-                    Some(room) => room_list.set_room_subscriptions(&[&room]).await,
-                    None => report(&to_core, "Opening the room failed", &Error::UnknownRoom),
-                },
+                Some(MatrixEffect::SubscribeTimeline(room)) => {
+                    if let Some(previous) = timeline.take() {
+                        previous.stop().await;
+                    }
+                    timeline = subscribe(&client, &room_list, room, &to_core).await;
+                }
                 Some(MatrixEffect::UnsubscribeTimeline(room)) => {
                     if let Some(room) = sdk_room_id(&room) {
                         room_list.remove_room_subscriptions(&[&room]);
+                    }
+                    if let Some(open) = timeline.take_if(|open| *open.room() == room) {
+                        open.stop().await;
                     }
                 }
                 Some(MatrixEffect::MarkRoomRead(room)) => {
@@ -144,14 +158,18 @@ async fn run_effects(
                         }
                     });
                 }
-                // The adapter keeps no timeline yet (phase 2 Task 4 adds it),
-                // so there is nothing to paginate. The answer ends the core's
-                // request.
                 Some(MatrixEffect::PaginateBackwards(room)) => {
-                    let _ = to_core.send(Msg::PaginationFailed {
-                        room,
-                        error: "older messages cannot be loaded yet: mxt keeps no timeline".to_owned(),
-                    });
+                    match timeline.as_mut().filter(|open| *open.room() == room) {
+                        Some(open) => open.paginate_backwards(to_core.clone()),
+                        // Opening the room failed; the answer ends the core's
+                        // request.
+                        None => {
+                            let _ = to_core.send(Msg::PaginationFailed {
+                                room,
+                                error: "the room's timeline is not open".to_owned(),
+                            });
+                        }
+                    }
                 }
                 // Sending, reactions, redactions and members arrive in
                 // phase 3 Task 3.
@@ -164,13 +182,46 @@ async fn run_effects(
                 ) => {}
                 None => break,
             },
-            Some(finished) = running.join_next(), if !running.is_empty() => match finished {
-                // Passed on, so `Matrix::panicked` sees it.
-                Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-                Err(error) => warn!("a matrix effect task ended abnormally: {error}"),
-                Ok(()) => {}
-            },
+            Some(finished) = running.join_next(), if !running.is_empty() => pass_on(finished),
+            Some(finished) = timeline_task(&mut timeline) => pass_on(finished),
         }
+    }
+}
+
+/// The room list subscription (the room's events and state in the sync),
+/// and the room's timeline.
+async fn subscribe(
+    client: &Client,
+    room_list: &RoomListService,
+    room: RoomId,
+    to_core: &UnboundedSender<Msg>,
+) -> Option<Subscription> {
+    let started = match sdk_room(client, &room) {
+        Ok(sdk_room) => {
+            room_list
+                .set_room_subscriptions(&[sdk_room.room_id()])
+                .await;
+            Subscription::start(&sdk_room, room, to_core.clone()).await
+        }
+        Err(error) => Err(error),
+    };
+    started
+        .inspect_err(|error| report(to_core, "Opening the room failed", error))
+        .ok()
+}
+
+/// The next task of the open timeline that ended; `None` without a timeline
+/// or without tasks, which disables the `select!` branch until the next turn.
+async fn timeline_task(timeline: &mut Option<Subscription>) -> Option<Result<(), JoinError>> {
+    timeline.as_mut()?.join_next().await
+}
+
+/// A panic is passed on, so `Matrix::panicked` sees it.
+fn pass_on(finished: Result<(), JoinError>) {
+    match finished {
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(error) => warn!("a matrix effect task ended abnormally: {error}"),
+        Ok(()) => {}
     }
 }
 
@@ -213,18 +264,6 @@ fn read_up_to(event: OwnedEventId, kind: ReceiptKind) -> Receipts {
     match kind {
         ReceiptKind::Public => marker.public_read_receipt(event),
         ReceiptKind::Private => marker.private_read_receipt(event),
-    }
-}
-
-/// A failed request names its URL, which holds the room ID; the status line
-/// and the `warn` log get the error without it.
-fn without_url(error: matrix_sdk::Error) -> matrix_sdk::Error {
-    match error {
-        matrix_sdk::Error::Http(error) => match *error {
-            HttpError::Reqwest(error) => HttpError::Reqwest(error.without_url()).into(),
-            error => error.into(),
-        },
-        error => error,
     }
 }
 
