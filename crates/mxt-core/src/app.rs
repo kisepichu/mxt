@@ -109,8 +109,8 @@ pub struct App {
     open_room: Option<RoomId>,
     /// The open room's timeline; empty while no room is open.
     timeline: Timeline,
-    /// Whether the full-screen message view is open.
-    view_open: bool,
+    /// The item the full-screen message view shows, while it is open.
+    view: Option<ItemRef>,
     focus: Focus,
     sidebar_visible: bool,
     sync_state: SyncState,
@@ -146,7 +146,7 @@ impl App {
             room_cursor: None,
             open_room: None,
             timeline: Timeline::default(),
-            view_open: false,
+            view: None,
             focus,
             sidebar_visible: settings.room_list_visible,
             sync_state: SyncState::default(),
@@ -198,6 +198,9 @@ impl App {
             Msg::ComposerEdited { room, empty } => self.composer_edited(room, empty),
             Msg::MentionQuery { room, query } => self.mention_query(room, query),
             Msg::MembersLoaded { room, members } => self.members_loaded(room, members),
+            Msg::Downloaded { path } => self.downloaded(path, &mut effects),
+            Msg::ImageFetched { item, bytes } => self.image_fetched(item, bytes, &mut effects),
+            Msg::ImageUnavailable { item, reason } => self.image_unavailable(&item, &reason),
         }
         effects
     }
@@ -232,7 +235,7 @@ impl App {
     }
 
     pub fn view_open(&self) -> bool {
-        self.view_open
+        self.view.is_some()
     }
 
     pub fn focus(&self) -> Focus {
@@ -284,7 +287,7 @@ impl App {
         if self.picker.is_some() {
             return "PICKER";
         }
-        if self.view_open {
+        if self.view.is_some() {
             return "VIEW";
         }
         match (self.focus, editor) {
@@ -304,7 +307,7 @@ impl App {
         if self.picker.is_some() {
             return InputContext::Picker;
         }
-        if self.view_open {
+        if self.view.is_some() {
             return match editor {
                 None | Some(EditorMode::Normal | EditorMode::Visual) => InputContext::MessageView,
                 Some(EditorMode::Insert | EditorMode::Search) => InputContext::EditorPassthrough,
@@ -454,10 +457,13 @@ impl App {
             Action::RoomOpen(target) => self.open_target(target, effects),
             Action::RoomOpenSelected => self.open_selected(effects),
             Action::RoomMarkRead => self.mark_read(effects),
+            Action::RoomMute => self.set_mute(true, effects),
+            Action::RoomUnmute => self.set_mute(false, effects),
             Action::MessageView => self.view_message(effects),
             Action::ViewClose => self.close_view(effects),
             Action::MessageYank => self.yank_message(effects),
             Action::MessageGotoReply => self.goto_reply(effects),
+            Action::MessageOpen => self.open_message(effects),
             Action::MessageReply => self.reply(effects),
             Action::MessageEdit => self.edit_message(effects),
             Action::MessageDelete => self.delete_message(),
@@ -474,6 +480,7 @@ impl App {
             Action::CompletionPrev => self.move_completion(false),
             Action::CompletionAccept => self.accept_completion(effects),
             Action::CompletionCancel => self.cancel_completion(),
+            Action::PickerRooms(filter) => self.pick_room(*filter),
             Action::PickerNext => self.move_picker(true),
             Action::PickerPrev => self.move_picker(false),
             Action::PickerAccept => self.accept_picker(effects),
@@ -496,10 +503,11 @@ impl App {
                 self.focus = Focus::RoomList;
             }
             Action::FocusTimeline => self.focus = Focus::Timeline,
+            Action::FileUpload { path } => self.upload(path, effects),
             Action::AppQuit => effects.push(Effect::Ui(UiEffect::Quit)),
             Action::Nop => {}
-            // The phase that implements an action replaces this.
-            _ => self.set_status(
+            // The phase that implements the action replaces this.
+            Action::AccountRecover => self.set_status(
                 StatusKind::Info,
                 format!("{} is not available yet", action.name()),
             ),

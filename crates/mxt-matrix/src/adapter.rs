@@ -180,6 +180,13 @@ async fn run_effects(
                     | MatrixEffect::ToggleReaction { .. }
                     | MatrixEffect::Resend { .. },
                 ) => {}
+                // Notification modes and media arrive in phase 4 Task 2.
+                Some(
+                    MatrixEffect::SetMute { .. }
+                    | MatrixEffect::Download { .. }
+                    | MatrixEffect::Upload { .. }
+                    | MatrixEffect::FetchImage { .. },
+                ) => {}
                 None => break,
             },
             Some(finished) = running.join_next(), if !running.is_empty() => pass_on(finished),

@@ -101,25 +101,42 @@ impl RichText {
     /// Mention spans, in order (used to rebuild the mentions of an edit).
     pub fn mentions(&self) -> Vec<(&str, &MentionTarget)> {
         let mut mentions = Vec::new();
-        collect_mentions(&self.blocks, &mut mentions);
+        for_each_paragraph(&self.blocks, &mut |inlines| {
+            mentions.extend(inlines.iter().filter_map(|inline| match inline {
+                Inline::Mention { text, target } => Some((text.as_str(), target)),
+                _ => None,
+            }));
+        });
         mentions
+    }
+
+    /// The URLs of link spans, in order, each once (`message.open`).
+    pub fn links(&self) -> Vec<&str> {
+        let mut links: Vec<&str> = Vec::new();
+        for_each_paragraph(&self.blocks, &mut |inlines| {
+            for inline in inlines {
+                if let Inline::Link { url, .. } = inline
+                    && !links.contains(&url.as_str())
+                {
+                    links.push(url);
+                }
+            }
+        });
+        links
     }
 }
 
-fn collect_mentions<'a>(blocks: &'a [Block], mentions: &mut Vec<(&'a str, &'a MentionTarget)>) {
+/// Calls `f` with the inlines of every paragraph, in order, also inside
+/// quotes and lists.
+fn for_each_paragraph<'a>(blocks: &'a [Block], f: &mut impl FnMut(&'a [Inline])) {
     for block in blocks {
         match block {
-            Block::Paragraph(inlines) => {
-                mentions.extend(inlines.iter().filter_map(|inline| match inline {
-                    Inline::Mention { text, target } => Some((text.as_str(), target)),
-                    _ => None,
-                }));
-            }
+            Block::Paragraph(inlines) => f(inlines),
             Block::Code { .. } => {}
-            Block::Quote(blocks) => collect_mentions(blocks, mentions),
+            Block::Quote(blocks) => for_each_paragraph(blocks, f),
             Block::List { items, .. } => {
                 for item in items {
-                    collect_mentions(item, mentions);
+                    for_each_paragraph(item, f);
                 }
             }
         }

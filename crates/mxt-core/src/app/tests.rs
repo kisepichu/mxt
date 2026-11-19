@@ -9,6 +9,8 @@ use crate::room::{NotificationMode, RoomKind, RoomName, RoomSummary, UnreadCount
 use crate::settings::Settings;
 
 mod composer;
+mod files;
+mod room_actions;
 mod timeline;
 
 /// The user's own ID.
@@ -40,11 +42,10 @@ fn room(rid: &str, at: u64, messages: u64) -> RoomSummary {
     }
 }
 fn app_with(user: Vec<(TableId, KeySeq, Binding)>) -> App {
-    let mut app = App::new(
-        Keymap::new(&space(), user),
-        Settings::default(),
-        UserId::new(ME),
-    );
+    app_in(Settings::default(), user)
+}
+fn app_in(settings: Settings, user: Vec<(TableId, KeySeq, Binding)>) -> App {
+    let mut app = App::new(Keymap::new(&space(), user), settings, UserId::new(ME));
     // Order (newest first): !c, !b, !a. !b is read.
     for r in [
         room("!a:example.org", 10, 1),
@@ -324,10 +325,10 @@ fn removing_rooms_at_the_end_clamps_then_unplaces_the_cursor() {
 #[test]
 fn quit_and_unavailable_actions() {
     let mut app = app();
-    assert_eq!(no_timers(keys(&mut app, "<Space><Space>")).len(), 0);
+    assert_eq!(keys(&mut app, ":recover<CR>"), vec![]);
     assert_eq!(
         app.status().unwrap().text,
-        "picker.rooms is not available yet"
+        "account.recover is not available yet"
     );
     let quit = Binding::single(Action::AppQuit);
     let mut app = app_with(vec![(TableId::Normal, seq("Q"), quit)]);
@@ -418,7 +419,7 @@ fn a_key_that_ends_a_binding_which_changes_the_context_goes_to_the_new_context()
     assert_eq!(line(&app), Some((LineKind::Command, "j")));
     assert_eq!(cursor_id(&app), "!c:example.org");
     // The status the binding set survives the key that ended it.
-    assert_eq!(app.status().unwrap().text, "room.mute is not available yet");
+    assert_eq!(app.status().unwrap().text, "Muted c:example.org");
 }
 
 #[test]

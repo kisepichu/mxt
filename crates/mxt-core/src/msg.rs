@@ -5,7 +5,7 @@ use crate::keys::Key;
 use crate::mention::Member;
 use crate::resolver::TimerId;
 use crate::room::RoomSummary;
-use crate::timeline::TimelineDiff;
+use crate::timeline::{ItemRef, MediaBytes, TimelineDiff};
 
 /// The mode of the edtui editor that has focus, reported with every key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,5 +92,20 @@ pub enum Msg {
     MembersLoaded {
         room: RoomId,
         members: Vec<Member>,
+    },
+    /// A `MatrixEffect::Download` saved the file at `path`.
+    Downloaded {
+        path: String,
+    },
+    /// The image of `item`, answering `MatrixEffect::FetchImage`.
+    ImageFetched {
+        item: ItemRef,
+        bytes: MediaBytes,
+    },
+    /// `MatrixEffect::FetchImage` for `item` brought no image, for example
+    /// because the file is too large to preview.
+    ImageUnavailable {
+        item: ItemRef,
+        reason: String,
     },
 }

@@ -95,6 +95,8 @@ impl Overlays {
         );
         let title = match picker.kind {
             PickerKind::Emoji { .. } => " Reaction ",
+            PickerKind::Rooms { .. } => " Room ",
+            PickerKind::Links => " Link ",
         };
         let block = Block::bordered().border_style(DIM).title(title);
         let inner = block.inner(area);
@@ -107,7 +109,7 @@ impl Overlays {
         }
         draw_prompt_line(frame, query, "> ", &picker.query);
         if picker.items.is_empty() {
-            frame.render_widget(Line::styled("No match", DIM), list);
+            frame.render_widget(Line::styled(picker.empty_text(), DIM), list);
             return;
         }
         let rows = usize::from(list.height);

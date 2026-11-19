@@ -5,9 +5,10 @@ use super::{App, Confirm, Focus, Motion, StatusKind};
 use crate::effect::{Effect, MatrixEffect, UiEffect, ViewContent};
 use crate::ids::{EventId, RoomId};
 use crate::msg::Pane;
+use crate::settings::ImagePreview;
 use crate::timeline::{
-    ItemRef, MessageContent, OwnEvent, SendState, TimelineDiff, TimelineEntry, TimelineItem,
-    apply_diff,
+    ItemRef, MediaBytes, MessageContent, OwnEvent, SendState, TimelineDiff, TimelineEntry,
+    TimelineItem, apply_diff,
 };
 
 /// Back pagination starts when the cursor has at most this many older items
@@ -266,19 +267,109 @@ impl App {
         effects.push(Effect::Matrix(MatrixEffect::SendReceipt { room, event }));
     }
 
-    /// `message.view`: the item's text in the full-screen view.
+    /// `message.view`: the item in the full-screen view. An image shows its
+    /// details, and its image is fetched unless previews are off; other
+    /// items show their text.
     pub(super) fn view_message(&mut self, effects: &mut Vec<Effect>) {
-        if let Some(item) = self.timeline.cursor_item() {
-            let text = item.content.plain_text();
-            effects.push(Effect::Ui(UiEffect::OpenView(ViewContent::Text(text))));
-            self.view_open = true;
+        let (Some(room), Some(item)) = (&self.open_room, self.timeline.cursor_item()) else {
+            return;
+        };
+        let content = match &item.content {
+            MessageContent::Image {
+                name,
+                size,
+                dimensions,
+            } => ViewContent::Image {
+                item: item.id.clone(),
+                name: name.clone(),
+                size: *size,
+                dimensions: *dimensions,
+            },
+            content => ViewContent::Text(content.plain_text()),
+        };
+        let fetch = matches!(content, ViewContent::Image { .. })
+            && self.settings.image_preview != ImagePreview::Off;
+        effects.push(Effect::Ui(UiEffect::OpenView(content)));
+        if fetch {
+            effects.push(Effect::Matrix(MatrixEffect::FetchImage {
+                room: room.clone(),
+                item: item.id.clone(),
+            }));
         }
+        self.view = Some(item.id.clone());
     }
 
     /// `view.close`.
     pub(super) fn close_view(&mut self, effects: &mut Vec<Effect>) {
-        if std::mem::take(&mut self.view_open) {
+        if self.view.take().is_some() {
             effects.push(Effect::Ui(UiEffect::CloseView));
+        }
+    }
+
+    /// `Msg::ImageFetched`: only for the item the open view shows; an image
+    /// for a closed view or another item is dropped.
+    pub(super) fn image_fetched(
+        &mut self,
+        item: ItemRef,
+        bytes: MediaBytes,
+        effects: &mut Vec<Effect>,
+    ) {
+        if self.view.as_ref() == Some(&item) {
+            effects.push(Effect::Ui(UiEffect::ShowImage { item, bytes }));
+        }
+    }
+
+    /// `Msg::ImageUnavailable`: the reason, while the view shows the item.
+    pub(super) fn image_unavailable(&mut self, item: &ItemRef, reason: &str) {
+        if self.view.as_ref() == Some(item) {
+            self.set_status(StatusKind::Error, format!("No image preview: {reason}"));
+        }
+    }
+
+    /// `message.open`: downloads an attachment, opens the only link, or picks
+    /// one of several links.
+    pub(super) fn open_message(&mut self, effects: &mut Vec<Effect>) {
+        let (Some(room), Some(item)) = (&self.open_room, self.timeline.cursor_item()) else {
+            return;
+        };
+        let mut links: Vec<String> = match &item.content {
+            MessageContent::Image { .. } | MessageContent::File { .. } => {
+                return effects.push(Effect::Matrix(MatrixEffect::Download {
+                    room: room.clone(),
+                    item: item.id.clone(),
+                }));
+            }
+            MessageContent::Text { rich, .. }
+            | MessageContent::Notice(rich)
+            | MessageContent::Emote(rich) => rich.links().into_iter().map(str::to_owned).collect(),
+            MessageContent::Sticker { .. }
+            | MessageContent::Redacted
+            | MessageContent::Undecryptable
+            | MessageContent::Unsupported { .. } => Vec::new(),
+        };
+        if links.len() > 1 {
+            return self.pick_link(links);
+        }
+        match links.pop() {
+            Some(url) => effects.push(Effect::Ui(UiEffect::OpenUrl(url))),
+            None => self.set_status(StatusKind::Error, "Nothing to open"),
+        }
+    }
+
+    /// `Msg::Downloaded`: opens the saved file.
+    pub(super) fn downloaded(&mut self, path: String, effects: &mut Vec<Effect>) {
+        self.set_status(StatusKind::Info, format!("Saved {path}"));
+        effects.push(Effect::Ui(UiEffect::OpenPath(path)));
+    }
+
+    /// `file.upload`: sends the file at `path` to the open room.
+    pub(super) fn upload(&mut self, path: &str, effects: &mut Vec<Effect>) {
+        match &self.open_room {
+            Some(room) => effects.push(Effect::Matrix(MatrixEffect::Upload {
+                room: room.clone(),
+                path: path.to_owned(),
+            })),
+            None => self.set_status(StatusKind::Error, "No room is open"),
         }
     }
 
