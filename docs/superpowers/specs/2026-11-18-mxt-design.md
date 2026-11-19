@@ -892,7 +892,8 @@ platforms.
 - Failed sends keep the local echo with a failed marker. `message.resend` sends
   it again; a transient failure also goes out by itself when the sync is back.
   Edits and reactions that the server refuses for good are dropped from the
-  timeline with an error in the status line (see "The send queue").
+  send queue with an error in the status line (see "The send queue"); an
+  edit of a sent message gets its draft back as below.
 - A message that cannot be queued (its room is not open, or the replied-to or
   edited event cannot be fetched) gets no local echo. `MatrixEffect::Send`
   carries a `SendId`, and the matrix adapter answers it with
@@ -902,6 +903,19 @@ platforms.
   composer if its room is open and the composer is still empty with a new
   draft. Otherwise the user has moved on, and only the status message is
   shown.
+- An edit of a sent message has no local echo of its own: it is a request in
+  the send queue, dropped when the homeserver refuses it, and the composer
+  was cleared when it was submitted. So the adapter answers such an edit
+  only when it leaves the send queue: `SendQueued` once the homeserver has
+  accepted it, `SendFailed` when the homeserver refuses it for good, and the
+  core keeps its draft until then and puts it back under the rule above. The
+  adapter finds the edit's request by its content among the send queue's
+  updates, because the SDK's send handle does not expose its transaction ID.
+  Edits left in the send queue by an earlier session are only reported, and
+  so is an edit of a local echo that the SDK turns into an edit request of
+  its own (when the echo is being sent at that moment, or was sent
+  meanwhile). matrix-sdk-ui 0.19 keeps showing a dropped edit's text on its
+  target, when no other edit applies, until the timeline is built again.
 - Redaction asks for confirmation in `CONFIRM` mode because it cannot be
   undone.
 - `M_UNKNOWN_TOKEN` is handled as described in "Startup".

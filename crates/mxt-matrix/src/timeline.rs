@@ -29,7 +29,7 @@ use matrix_sdk_ui::{
 };
 use mxt_core::{
     effect::{Outgoing, OutgoingKind},
-    ids::{EventId, RoomId, Timestamp, TxnId, UserId},
+    ids::{EventId, RoomId, SendId, Timestamp, TxnId, UserId},
     mention::RenderedBody,
     msg::Msg,
     rich::{Block, Inline, RichText},
@@ -48,6 +48,7 @@ use crate::{
     Error,
     error::{brief_sdk, timeline_error, without_url},
     html::render_html,
+    send_queue::Edits,
 };
 
 /// How many events one back pagination asks for.
@@ -263,18 +264,36 @@ async fn fetch_reply_details(timeline: Arc<Timeline>, mut ids: UnboundedReceiver
     }
 }
 
-/// Queues `message` in the room's send queue: a new message, a reply, or an
-/// edit, which keeps its mentions in the new content. The local echo shows
-/// the send state, so only a failure to queue is an error here.
-pub(crate) async fn send_message(timeline: &Timeline, message: Outgoing) -> Result<(), Error> {
+/// When a queued message is answered with `Msg::SendQueued`.
+pub(crate) enum Answer {
+    /// At once: its local echo holds its text.
+    Now,
+    /// When it is sent: an edit of a sent message, recorded in `Edits`, has
+    /// no local echo of its own.
+    WhenSent,
+}
+
+/// Queues `message`, the core's send `id`, in the room's send queue: a new
+/// message, a reply, or an edit, which keeps its mentions in the new
+/// content. The local echo shows the send state, so only a failure to queue
+/// is an error here; an edit of a sent message is recorded in `edits`.
+pub(crate) async fn send_message(
+    timeline: &Timeline,
+    id: SendId,
+    message: Outgoing,
+    edits: &Edits,
+) -> Result<Answer, Error> {
     enable_sending(timeline.room());
     let content = outgoing_content(&message.body);
-    let queued = match message.kind {
+    let answer = match message.kind {
         OutgoingKind::New => timeline
             .send(RoomMessageEventContent::from(content).into())
             .await
-            .map(drop),
-        OutgoingKind::Reply { to } => timeline.send_reply(content, event_id(&to)?).await.map(drop),
+            .map(|_| Answer::Now),
+        OutgoingKind::Reply { to } => timeline
+            .send_reply(content, event_id(&to)?)
+            .await
+            .map(|_| Answer::Now),
         // What `Timeline::edit` does for a sent message, without looking for
         // it in the timeline's items, which may no longer hold it.
         OutgoingKind::Edit {
@@ -285,17 +304,27 @@ pub(crate) async fn send_message(timeline: &Timeline, message: Outgoing) -> Resu
                 .make_edit_event(&event_id(&target)?, EditedContent::RoomMessage(content))
                 .await
                 .map_err(|error| timeline_error(sdk::EditError::RoomError(error).into()))?;
-            timeline.send(edit).await.map(drop)
+            let recorded = edits.send(timeline, edit, id).await;
+            recorded.map(|recorded| {
+                if recorded {
+                    Answer::WhenSent
+                } else {
+                    Answer::Now
+                }
+            })
         }
         // A local echo is replaced in the send queue.
         OutgoingKind::Edit {
             target: target @ ItemRef::Local(_),
         } => {
             let content = EditedContent::RoomMessage(content);
-            timeline.edit(&item_id(&target)?, content).await
+            timeline
+                .edit(&item_id(&target)?, content)
+                .await
+                .map(|()| Answer::Now)
         }
     };
-    queued.map_err(timeline_error)
+    answer.map_err(timeline_error)
 }
 
 /// Adds the user's reaction with `key` to `item`, or removes it if they

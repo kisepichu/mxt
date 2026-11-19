@@ -53,8 +53,8 @@ pub(super) struct MentionMenu {
     selected: usize,
 }
 
-/// A submitted draft, kept until its send is queued or fails (design, "Error
-/// handling").
+/// A submitted draft, kept until its send is answered: queued (for an edit
+/// of a sent message, sent) or failed (design, "Error handling").
 pub(super) struct PendingSend {
     room: RoomId,
     /// The composer text as submitted, before the mentions were rendered.
@@ -154,7 +154,8 @@ impl App {
         self.clear_composer(room, effects);
     }
 
-    /// `Msg::SendQueued`: the local echo has the message now.
+    /// `Msg::SendQueued`: the local echo has the message now, or the edit of
+    /// a sent message was sent.
     pub(super) fn send_queued(&mut self, id: SendId) {
         self.pending_sends.remove(&id);
     }
