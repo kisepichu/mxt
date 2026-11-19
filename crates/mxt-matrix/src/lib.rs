@@ -6,6 +6,7 @@ mod backoff;
 mod bridges;
 mod client;
 mod error;
+mod html;
 mod recovery;
 mod rooms;
 mod session;
