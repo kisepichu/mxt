@@ -13,6 +13,10 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Block;
 
 use crate::clipboard::SharedRegister;
+use crate::view::grapheme_width;
+
+/// The columns edtui draws a tab with (its default).
+const TAB_WIDTH: usize = 2;
 
 pub(crate) struct Editor {
     pub(crate) state: EditorState,
@@ -53,6 +57,27 @@ impl Editor {
         (self.state.mode == edtui::EditorMode::Search).then(|| self.state.search_pattern())
     }
 
+    /// The rows the text takes at `width` columns, at least one. Like
+    /// edtui's wrapping, a character that does not fit on a row moves to the
+    /// next one whole, and an empty line takes a row. In insert mode the
+    /// cursor after the end of its line takes a column too: edtui draws it
+    /// on the next row when the line's last row is full.
+    pub(crate) fn rows(&self, width: usize) -> usize {
+        let state = &self.state;
+        let insert = state.mode == edtui::EditorMode::Insert;
+        let rows: usize = state
+            .lines
+            .iter_row()
+            .enumerate()
+            .map(|(row, line)| {
+                let cursor_after =
+                    insert && row == state.cursor.row && state.cursor.col >= line.len();
+                wrapped_rows(line, width, cursor_after)
+            })
+            .sum();
+        rows.max(1)
+    }
+
     /// Draws the editor in `block` over `area`, wrapping its lines. With
     /// `cursor`, the terminal cursor goes to the editor's cursor outside
     /// search mode, where an input method puts its preedit; the bottom line
@@ -77,6 +102,25 @@ impl Editor {
             frame.set_cursor_position(position);
         }
     }
+}
+
+/// The rows `line` takes at `width` columns; with `cursor_after`, the cursor
+/// after its end takes a column as well.
+fn wrapped_rows(line: &[char], width: usize, cursor_after: bool) -> usize {
+    let columns = line.iter().map(|&c| match c {
+        '\t' => TAB_WIDTH,
+        c => grapheme_width(c.encode_utf8(&mut [0; 4])),
+    });
+    let mut rows = 1;
+    let mut used = 0;
+    for columns in columns.chain(cursor_after.then_some(1)) {
+        if used > 0 && used + columns > width {
+            rows += 1;
+            used = 0;
+        }
+        used += columns;
+    }
+    rows
 }
 
 /// A core key as edtui's input in `mode`.

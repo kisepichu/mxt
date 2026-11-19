@@ -26,6 +26,10 @@ edtui = { version = "0.11", default-features = false, features = ["system-editor
 # The reaction picker's emoji and shortcodes; also what matrix-sdk-ui uses.
 emojis = "0.9"
 futures-util = "0.3"
+# Decoding images for the message view, in the formats Matrix clients send.
+# The default formats (AVIF through rav1e and libfuzzer-sys) pull in a
+# license the policy rejects.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 jiff = "1"
 matrix-sdk = { version = "0.19", default-features = false, features = ["e2e-encryption", "sqlite", "rustls-aws-lc-rs"] }
 matrix-sdk-ui = { version = "0.19", default-features = false }
@@ -34,6 +38,9 @@ nucleo-matcher = "0.3"
 # and the command line tool are left out.
 pulldown-cmark = { version = "0.13", default-features = false }
 ratatui = "0.30"
+# Images in the message view, in the terminal's graphics protocol. The
+# defaults link the native chafa library and enable image's default formats.
+ratatui-image = { version = "11", default-features = false, features = ["crossterm"] }
 rpassword = "7"
 # Feature-only: the code uses the SDK's ruma through `matrix_sdk::ruma`, and
 # this enables `html-matrix` on it for typed HTML elements (the SDK enables

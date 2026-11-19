@@ -8,11 +8,11 @@ use std::time::{Duration, Instant};
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{DisableFocusChange, EnableFocusChange, Event, EventStream};
 use crossterm::execute;
-use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use edtui::system_editor;
 use futures_util::StreamExt as _;
 use mxt_core::app::{App, Focus};
-use mxt_core::effect::{UiEffect, ViewContent};
+use mxt_core::effect::UiEffect;
 use mxt_core::ids::RoomId;
 use mxt_core::msg::{EditorMode, Msg, Pane};
 use mxt_core::resolver::TimerId;
@@ -22,12 +22,13 @@ use ratatui::widgets::ListState;
 
 use crate::clipboard::SharedRegister;
 use crate::composer::{Composer, Composers};
-use crate::editor::Editor;
+use crate::image_view::Images;
 use crate::input::key_from_crossterm;
+use crate::opener::{Opener, is_web_url};
 use crate::overlay::Overlays;
 use crate::timeline_view::{TimeFormat, TimelinePane};
 use crate::timers::Timers;
-use crate::view::{self, Panes};
+use crate::view::{self, Panes, View};
 
 type Backend = CrosstermBackend<Stdout>;
 
@@ -46,8 +47,10 @@ pub struct Tui {
     /// The room list range last reported with `Msg::Viewport`.
     room_list_viewport: Option<(usize, usize)>,
     timeline: TimelinePane,
-    /// The message view's scratch editor while it is open.
-    view: Option<Editor>,
+    /// The message view while it is open.
+    view: Option<View>,
+    images: Images,
+    opener: Opener,
     composers: Composers,
     overlays: Overlays,
     register: SharedRegister,
@@ -56,15 +59,29 @@ pub struct Tui {
 }
 
 impl Tui {
-    /// Raw mode, alternate screen, focus change reporting, hidden cursor.
-    pub fn new() -> io::Result<Tui> {
+    /// Raw mode, alternate screen, focus change reporting, hidden cursor,
+    /// and the terminal's graphics protocol for images. `opener` is
+    /// `files.opener`.
+    pub fn new(opener: Vec<String>) -> io::Result<Tui> {
         crossterm::terminal::enable_raw_mode()?;
         ACTIVE.store(true, Ordering::SeqCst);
-        let setup = execute!(io::stdout(), EnterAlternateScreen, EnableFocusChange, Hide)
-            .and_then(|()| Terminal::new(CrosstermBackend::new(io::stdout())))
-            .and_then(|mut terminal| terminal.clear().map(|()| terminal));
+        let setup =
+            execute!(io::stdout(), EnterAlternateScreen, EnableFocusChange, Hide).and_then(|()| {
+                // The terminal answers the query on its input, which the
+                // event stream does not read yet. When the answers do not
+                // come in time, as in a tmux pane that is not visible,
+                // ratatui-image's thread still takes the next input, so
+                // nothing below asks the terminal: ratatui's `clear` would
+                // ask for the cursor position. The clear wipes what a
+                // terminal prints for a query it does not know, and the
+                // new terminal's buffers are as blank as the screen.
+                let images = Images::query();
+                execute!(io::stdout(), Clear(ClearType::All))?;
+                let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+                Ok((terminal, images))
+            });
         match setup {
-            Ok(terminal) => {
+            Ok((terminal, images)) => {
                 let register = SharedRegister::default();
                 Ok(Tui {
                     terminal,
@@ -73,6 +90,8 @@ impl Tui {
                     room_list_viewport: None,
                     timeline: TimelinePane::new(),
                     view: None,
+                    images,
+                    opener: Opener::new(opener),
                     composers: Composers::new(register.clone()),
                     overlays: Overlays::default(),
                     register,
@@ -114,6 +133,7 @@ impl Tui {
             room_list,
             timeline,
             view,
+            images,
             composers,
             overlays,
             ..
@@ -125,6 +145,7 @@ impl Tui {
                 room_list,
                 timeline,
                 view: view.as_mut(),
+                images: Some(images),
                 composer,
                 overlays,
             };
@@ -176,7 +197,7 @@ impl Tui {
 
     fn editor_mode(&self, app: &App) -> Option<EditorMode> {
         if let Some(view) = &self.view {
-            return Some(view.mode());
+            return Some(view.editor.mode());
         }
         if app.focus() != Focus::Composer {
             return None;
@@ -191,8 +212,11 @@ impl Tui {
     /// - `ReplayKeys` goes to the message view's editor while it is open,
     ///   otherwise to the composer that last got the focus.
     /// - `OpenView` replaces the message view and `CloseView` drops it with
-    ///   its edits. `ShowImage`, `OpenPath` and `OpenUrl` are ignored until
-    ///   phase 4 Task 3.
+    ///   its edits. `ShowImage` decodes the image for the view (see
+    ///   [`Images::insert`]); a failure becomes `Msg::EffectFailed`.
+    /// - `OpenPath` and `OpenUrl` run `files.opener` (see
+    ///   [`Opener::open`]), `OpenUrl` only for `http://` and `https://`
+    ///   URLs. A refusal or a failure to start it becomes `Msg::EffectFailed`.
     /// - `Yank` copies into the register, and the next draw sends it to the
     ///   terminal clipboard.
     /// - `FocusComposer` creates the room's composer on first focus.
@@ -216,18 +240,33 @@ impl Tui {
             }
             UiEffect::ReplayKeys(keys) => {
                 if let Some(view) = &mut self.view {
-                    keys.into_iter().for_each(|key| view.feed(key));
+                    keys.into_iter().for_each(|key| view.editor.feed(key));
                 } else if let Some(composer) = self.composers.focused_mut() {
                     composer.replay(&keys, &mut msgs);
                 }
             }
-            // Until phase 4 Task 3 draws images, an image's view shows its
-            // name, as the text view did before.
-            UiEffect::OpenView(ViewContent::Text(text) | ViewContent::Image { name: text, .. }) => {
-                self.view = Some(Editor::new(&text, self.register.clone()));
+            UiEffect::OpenView(content) => {
+                self.view = Some(View::new(content, self.register.clone()));
             }
-            // Running the opener and drawing images arrive in phase 4 Task 3.
-            UiEffect::ShowImage { .. } | UiEffect::OpenPath(_) | UiEffect::OpenUrl(_) => {}
+            UiEffect::ShowImage { item, bytes } => {
+                let shown = match self.terminal.size() {
+                    Ok(screen) => self
+                        .images
+                        .insert(item, bytes.as_bytes(), screen)
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                };
+                if let Err(error) = shown {
+                    msgs.push(Msg::EffectFailed {
+                        error: format!("Cannot show the image: {error}"),
+                    });
+                }
+            }
+            UiEffect::OpenPath(path) => self.open(&path, &mut msgs),
+            UiEffect::OpenUrl(url) if is_web_url(&url) => self.open(&url, &mut msgs),
+            UiEffect::OpenUrl(url) => msgs.push(Msg::EffectFailed {
+                error: format!("Not opening {url}: only http and https links are opened"),
+            }),
             UiEffect::CloseView => self.view = None,
             UiEffect::Yank(text) => self.register.copy(text),
             UiEffect::FocusComposer { room, mode } => self.composers.focus(room, mode, &mut msgs),
@@ -259,6 +298,15 @@ impl Tui {
             UiEffect::Quit => self.should_quit = true,
         }
         msgs
+    }
+
+    /// Runs `files.opener` on `target`.
+    fn open(&self, target: &str, msgs: &mut Vec<Msg>) {
+        if let Err(error) = self.opener.open(target) {
+            msgs.push(Msg::EffectFailed {
+                error: format!("Cannot open {target}: {error}"),
+            });
+        }
     }
 
     /// Runs the external editor on the room's composer.

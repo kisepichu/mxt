@@ -2,6 +2,7 @@
 //! "Unread badges"). Colors come only from the 16-color palette.
 
 use mxt_core::app::{App, CommandLine, Focus, LineKind, StatusKind};
+use mxt_core::effect::ViewContent;
 use mxt_core::msg::{EditorMode, SyncState};
 use mxt_core::room::{Badge, RoomName, RoomSummary};
 use mxt_core::timeline::{Draft, ItemRef, TimelineEntry};
@@ -13,10 +14,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding};
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::clipboard::SharedRegister;
 use crate::composer::Composer;
 use crate::editor::Editor;
+use crate::image_view::Images;
 use crate::overlay::Overlays;
-use crate::timeline_view::TimelinePane;
+use crate::timeline_view::{TimelinePane, file_size};
 
 /// The room list width, its border included.
 const ROOM_LIST_WIDTH: u16 = 30;
@@ -50,11 +53,75 @@ const MIN_NAME_WIDTH: usize = 6;
 pub(crate) struct Panes<'a> {
     pub(crate) room_list: &'a mut ListState,
     pub(crate) timeline: &'a mut TimelinePane,
-    /// The message view's editor while it is open.
-    pub(crate) view: Option<&'a mut Editor>,
+    /// The message view while it is open.
+    pub(crate) view: Option<&'a mut View>,
+    /// The decoded images, if there is a picker for the terminal's graphics
+    /// protocol.
+    pub(crate) images: Option<&'a mut Images>,
     /// The open room's composer, once it had focus.
     pub(crate) composer: Option<&'a mut Composer>,
     pub(crate) overlays: &'a mut Overlays,
+}
+
+/// The full-screen message view (design, "Terminal adapter and the
+/// composer"): a scratch editor holding the message's text, or an image's
+/// details with the image below them.
+pub(crate) struct View {
+    pub(crate) editor: Editor,
+    /// The item of an image message.
+    image: Option<ItemRef>,
+}
+
+impl View {
+    /// An image's details are its name, then its size and dimensions.
+    pub(crate) fn new(content: ViewContent, register: SharedRegister) -> View {
+        let (text, image) = match content {
+            ViewContent::Text(text) => (text, None),
+            ViewContent::Image {
+                item,
+                name,
+                size,
+                dimensions,
+            } => {
+                let details: Vec<String> = size
+                    .map(file_size)
+                    .into_iter()
+                    .chain(dimensions.map(|(width, height)| format!("{width}x{height}")))
+                    .collect();
+                let text = if details.is_empty() {
+                    name
+                } else {
+                    format!("{name}\n{}", details.join(GAP))
+                };
+                (text, Some(item))
+            }
+        };
+        View {
+            editor: Editor::new(&text, register),
+            image,
+        }
+    }
+
+    /// Over `area`: the editor, and for an image the image a row below
+    /// the details, once `images` keeps it.
+    fn draw(&mut self, frame: &mut Frame, area: Rect, images: Option<&mut Images>) {
+        let block = Block::new().padding(Padding::horizontal(1));
+        let Some(item) = &self.image else {
+            self.editor.draw(frame, area, block, true);
+            return;
+        };
+        let rows = self.editor.rows(usize::from(block.inner(area).width));
+        let [details, _, image] = Layout::vertical([
+            Constraint::Length(u16::try_from(rows).unwrap_or(u16::MAX)),
+            Constraint::Length(1),
+            Constraint::Fill(1),
+        ])
+        .areas(area);
+        if let Some(images) = images {
+            images.draw(frame, block.inner(image), item);
+        }
+        self.editor.draw(frame, details, block, true);
+    }
 }
 
 /// The first and last visible items of the panes, inclusive; `None` for a
@@ -78,13 +145,8 @@ pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
     let (search, view_mode) = match panes.view {
         Some(view) => {
             frame.render_widget(Clear, main);
-            view.draw(
-                frame,
-                main,
-                Block::new().padding(Padding::horizontal(1)),
-                true,
-            );
-            (view.search(), Some(view.mode()))
+            view.draw(frame, main, panes.images);
+            (view.editor.search(), Some(view.editor.mode()))
         }
         None => {
             let right = if app.sidebar_visible() {
@@ -601,8 +663,8 @@ pub(crate) mod tests {
             }
         }
 
-        /// One frame, with the message view's editor while it is open.
-        pub(crate) fn draw(&mut self, app: &App, view: Option<&mut Editor>) -> Visible {
+        /// One frame, with the message view while it is open.
+        pub(crate) fn draw(&mut self, app: &App, view: Option<&mut View>) -> Visible {
             let mut visible = Visible::default();
             self.terminal
                 .draw(|frame| {
@@ -610,6 +672,7 @@ pub(crate) mod tests {
                         room_list: &mut self.room_list,
                         timeline: &mut self.timeline,
                         view,
+                        images: None,
                         composer: None,
                         overlays: &mut self.overlays,
                     };
@@ -636,16 +699,19 @@ pub(crate) mod tests {
         press(&mut app, "<CR>");
         assert!(app.view_open());
         let mut screen = Screen::new();
-        let mut editor = Editor::new("message 3", SharedRegister::default());
-        screen.draw(&app, Some(&mut editor));
+        let mut view = View::new(
+            ViewContent::Text("message 3".to_owned()),
+            SharedRegister::default(),
+        );
+        screen.draw(&app, Some(&mut view));
         assert!(
             screen.bottom_line().starts_with(" VIEW NORMAL "),
             "{:?}",
             screen.bottom_line()
         );
         // In insert mode `q` is text, not `view.close`.
-        keys("i").into_iter().for_each(|key| editor.feed(key));
-        screen.draw(&app, Some(&mut editor));
+        keys("i").into_iter().for_each(|key| view.editor.feed(key));
+        screen.draw(&app, Some(&mut view));
         assert!(
             screen.bottom_line().starts_with(" VIEW INSERT "),
             "{:?}",

@@ -11,12 +11,10 @@ use std::time::Duration;
 
 use mxt_core::app::App;
 use mxt_core::ids::UserId;
-use mxt_core::keymap::Keymap;
-use mxt_core::settings::Settings;
 use mxt_matrix::{
     Client, Homeserver, Matrix, RecoveryStatus, SavedSession, SessionWatch, SyncLoop,
 };
-use mxt_tui::{TimeFormat, Tui};
+use mxt_tui::Tui;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
@@ -57,27 +55,9 @@ pub enum Invalid {
 /// Runs mxt from the session to the end of the terminal UI. The caller holds
 /// the data directory lock and drops the runtime afterwards.
 pub async fn run(config: Config, paths: &Paths) -> Outcome {
-    let Config {
-        user_id,
-        homeserver,
-        keymap,
-        settings,
-        time_format,
-        ..
-    } = config;
-    match connect(&user_id, homeserver.as_deref(), paths).await {
-        Ok((client, sync, mut session)) => {
-            run_ui(
-                client,
-                sync,
-                &mut session,
-                keymap,
-                settings,
-                time_format,
-                user_id,
-            )
-            .await
-        }
+    let connected = connect(&config.user_id, config.homeserver.as_deref(), paths).await;
+    match connected {
+        Ok((client, sync, mut session)) => run_ui(client, sync, &mut session, config).await,
         Err(outcome) => outcome,
     }
 }
@@ -244,18 +224,23 @@ async fn run_ui(
     client: Client,
     sync: SyncLoop,
     session: &mut SessionWatch,
-    keymap: Keymap,
-    settings: Settings,
-    time_format: TimeFormat,
-    me: UserId,
+    config: Config,
 ) -> Outcome {
+    let Config {
+        user_id,
+        keymap,
+        settings,
+        time_format,
+        opener,
+        ..
+    } = config;
     let receipts = settings.read_receipts;
-    let mut app = App::new(keymap, settings, me);
+    let mut app = App::new(keymap, settings, user_id);
     let (to_core, from_matrix) = mpsc::unbounded_channel();
     let (to_matrix, effects) = mpsc::unbounded_channel();
     let mut matrix = Matrix::start(client, sync, receipts, to_core, effects).await;
     mxt_tui::install_panic_hook();
-    let mut tui = match Tui::new() {
+    let mut tui = match Tui::new(opener) {
         Ok(tui) => tui,
         Err(error) => {
             matrix.stop().await;

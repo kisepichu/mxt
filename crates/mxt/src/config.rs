@@ -40,10 +40,6 @@ pub struct Config {
         expect(dead_code, reason = "file downloads (phase 4) save here")
     )]
     pub download_dir: PathBuf,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "opening files (phase 4) runs it")
-    )]
     pub opener: Vec<String>,
 }
 
