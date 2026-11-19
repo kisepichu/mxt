@@ -795,5 +795,10 @@ pub(crate) mod tests {
         assert_eq!(cols(&mut editor, &steps), [3, 4, 3, 0, 2, 3, 7]);
         feed(&mut editor, "0dw");
         assert_eq!(text(&editor), "のテキスト");
+
+        // As in vim, `b` from `」` stops at `日`, where the bracket's class
+        // ends the word, and only the next `b` goes to the bracket.
+        let mut editor = holding("「日本」");
+        assert_eq!(cols(&mut editor, &["w", "w", "b", "b"]), [1, 3, 1, 0]);
     }
 }

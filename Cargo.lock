@@ -1030,7 +1030,7 @@ dependencies = [
 [[package]]
 name = "edtui"
 version = "0.11.8"
-source = "git+https://github.com/kisepichu/edtui?rev=4e0d019d5542011138af1bfd12e4ee769fafc560#4e0d019d5542011138af1bfd12e4ee769fafc560"
+source = "git+https://github.com/kisepichu/edtui?rev=1182cb9c02f671f56a63c7da6a532d91e12755f1#1182cb9c02f671f56a63c7da6a532d91e12755f1"
 dependencies = [
  "crossterm",
  "edit",

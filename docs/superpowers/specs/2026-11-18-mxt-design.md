@@ -1010,9 +1010,14 @@ lighter.
   vim"). `Cargo.toml` pins it in `[patch.crates-io]` to a full commit hash,
   and `cargoLock.allowBuiltinFetchGit = true` lets nixpkgs fetch it with
   `builtins.fetchGit` by the commit in `Cargo.lock`, so it needs no output
-  hash either. `cargo deny check sources` allows only crates.io and that
-  repository. Native inputs follow the SDK's needs (nixpkgs' iamb package,
-  also built on matrix-rust-sdk, needs `sqlite`, `aws-lc` and `pkg-config`).
+  hash either. `fetchGit` fetches all refs, so a pinned commit must stay
+  reachable: every fork commit mxt pins is tagged `mxt-<short hash>` in the
+  fork, and neither the tags nor the `mxt` branch are rewritten (the branch
+  takes fork changes as new merge commits), so earlier mxt commits still
+  build. `cargo deny check sources` allows only crates.io and that
+  repository, and requires a git dependency to name a commit. Native inputs
+  follow the SDK's needs (nixpkgs' iamb package, also built on
+  matrix-rust-sdk, needs `sqlite`, `aws-lc` and `pkg-config`).
 - `devShells.default`: the toolchain listed above.
 - `checks.package`: the package build.
 
