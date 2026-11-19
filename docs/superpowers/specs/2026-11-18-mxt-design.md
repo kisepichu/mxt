@@ -465,6 +465,10 @@ covered by unit tests.
     `composer.completion`, then in `composer.insert`. Otherwise look it up in
     `composer.insert`. If it is not bound, pass it to edtui.
   - edtui in search mode: every key goes to edtui, including `<Esc>`.
+  - edtui in normal or visual mode while a key waits for its character
+    (after `f`, `F`, `t`, `T` or `r`, also after an operator, as in `df` or
+    `yt`): the next key goes to edtui without the keymap (see "edtui
+    differences from vim").
 - The external editor (`composer.external_editor`) uses edtui's
   `system-editor` feature, which opens `$VISUAL` or `$EDITOR`.
 - The tui adapter reports `Msg::Viewport { pane, first, last }` after a render
@@ -526,7 +530,7 @@ why, and exits. The next start logs in as a new device with fresh stores.
 | composer modes | the composer has focus; the status line shows edtui's mode (`INSERT`, `NORMAL`, `VISUAL`, `SEARCH`) | see "Input routing" above |
 | `COMMAND` | the `:` command line is open | `command_line` table, then text input |
 | `PICKER` | the room picker, the emoji picker or the link picker is open | `picker` table, then text input |
-| `VIEW` | the message view is open; the status line shows `VIEW` and the view editor's mode (`VIEW NORMAL`, `VIEW INSERT`, `VIEW VISUAL`, `VIEW SEARCH`) | `message_view` table while its editor is in normal or visual mode, then edtui |
+| `VIEW` | the message view is open; the status line shows `VIEW` and the view editor's mode (`VIEW NORMAL`, `VIEW INSERT`, `VIEW VISUAL`, `VIEW SEARCH`) | `message_view` table while its editor is in normal or visual mode and no key waits for its character (see "Input routing" above), then edtui |
 | `CONFIRM` | an action asks for confirmation | `y` confirms, any other key cancels |
 | `SECRET` | the recovery key is being entered | masked text input, `<CR>` submits, `<Esc>` cancels |
 
@@ -804,10 +808,10 @@ Settings:
 |---|---|---|
 | `room_list` | the room list has focus | look in `normal` |
 | `timeline` | the timeline has focus | look in `normal` |
-| `composer.normal`, `composer.visual` | the composer has focus and edtui is in normal or visual mode | look in `normal`, then pass the key to edtui |
+| `composer.normal`, `composer.visual` | the composer has focus, edtui is in normal or visual mode, and no key waits for its character (see "Input routing") | look in `normal`, then pass the key to edtui |
 | `composer.insert` | the composer has focus and edtui is in insert mode | pass the key to edtui |
 | `composer.completion` | the mention menu is open in insert mode | look in `composer.insert`, then pass the key to edtui |
-| `message_view` | the message view is open and its editor is in normal or visual mode | pass the key to edtui |
+| `message_view` | the message view is open, its editor is in normal or visual mode, and no key waits for its character | pass the key to edtui |
 | `picker` | a picker is open | type it into the query |
 | `command_line` | the command line is open | type it into the command line |
 | `normal` | fallback for the tables above that name it | ignore the key |
@@ -1088,14 +1092,18 @@ asking for the recovery key ("Startup").
   `<Right>` over whole grapheme clusters (skin tones, ZWJ sequences, VS16).
   The key after `f`, `t` or `r` goes to the editor without the keymap (`f:`
   finds a colon, `<Esc>` cancels). edtui's own `df`, `dt`, `cf` and `ct`
-  still work; other operators with these motions (`dF`, `cT`, `d;`) are not
-  supported, and `dF` and its character do nothing. Still needing edtui
-  patches, or accepted for the first release: the cursor drawn after emoji
-  clusters (edtui sums the widths of single characters, so it is up to 4
-  columns off), `x`, `r`, `a`, insert-mode arrows and visual selections that
-  work on single characters inside a cluster, CJK word classes for `w`, `e`
-  and `b`, operators with `F`, `T`, `;` and `,`, a linewise `p` on the last
-  line, `.` repeating `r`, and `r` in visual mode.
+  still work, and `;` and `,` repeat their find. Other operators with these
+  motions (`dF`, `cT`, `yf`, `d;`) are not supported and do nothing; the
+  character after `dF` or `yf` is dropped, as is the one after `r` in visual
+  mode. Still needing edtui patches, or accepted for the first release: the
+  cursor drawn after emoji clusters (edtui sums the widths of single
+  characters, so it is up to 4 columns off), `x`, `r`, `a`, insert-mode
+  arrows and visual selections that work on single characters inside a
+  cluster, edtui's `df`, `dt`, `cf` and `ct`, which work on single
+  characters and can split a cluster (`df👍` leaves the skin tone), `df<Tab>`,
+  which cancels where `f<Tab>` finds a tab, CJK word classes for `w`, `e` and
+  `b`, operators with `F`, `T`, `;` and `,`, a linewise `p` on the last line,
+  `.` repeating `r`, and `r` in visual mode.
 - **Mentions on the remote network.** mxt relies on bridges turning
   `matrix.to` user links and `m.mentions` into remote mentions. Phase 0
   confirmed it for the Discord bridge in both directions; other bridges are
