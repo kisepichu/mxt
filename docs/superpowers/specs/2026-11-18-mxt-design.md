@@ -375,7 +375,10 @@ covered by unit tests.
   echo with a failed marker until `message.resend` or its deletion, and
   holds back the room's later requests until then. An edit or reaction that
   the server refuses for good would block the room's queue; mxt aborts it
-  (the timeline drops it) and reports the failure.
+  and reports the failure, and a refused edit of a sent message is answered
+  as its send (see "Error handling"). The SDK takes an aborted reaction off
+  its target, but an aborted edit's text stays on it until the next
+  matrix-sdk-ui release.
 - Reactions: `Timeline::toggle_reaction`. Choosing a reaction the user already
   sent removes it.
 - Redaction: a sent message is redacted with `Room::redact` directly, not
@@ -401,8 +404,9 @@ covered by unit tests.
   user's identity changes.
 - HTML bodies: `formatted_body` is parsed with `ruma::html` into `RichText`.
   `<mx-reply>` fallbacks are dropped, `<del>` becomes strikethrough,
-  `data-mx-spoiler` becomes spoiler style (mentions and emoticons inside it
-  are hidden too), and `<img data-mx-emoticon>` becomes its alt text.
+  `data-mx-spoiler` becomes spoiler style (mentions, emoticons and code
+  blocks inside it are hidden too), and `<img data-mx-emoticon>` becomes its
+  alt text. Reply previews show spoilers as `[spoiler]`.
 - Images: `FetchImage` uses the event's thumbnail source when there is one.
   In encrypted rooms there is often none, and the SDK cannot ask the server to
   scale encrypted media, so the adapter downloads the full file. Files larger
@@ -902,7 +906,8 @@ platforms.
 - Failed sends keep the local echo with a failed marker. `message.resend` sends
   it again; a transient failure also goes out by itself when the sync is back.
   Edits and reactions that the server refuses for good are dropped from the
-  timeline with an error in the status line (see "The send queue").
+  send queue with an error in the status line (see "The send queue"); an
+  edit of a sent message gets its draft back as below.
 - A message that cannot be queued (its room is not open, or the replied-to or
   edited event cannot be fetched) gets no local echo. `MatrixEffect::Send`
   carries a `SendId`, and the matrix adapter answers it with
@@ -912,6 +917,19 @@ platforms.
   composer if its room is open and the composer is still empty with a new
   draft. Otherwise the user has moved on, and only the status message is
   shown.
+- An edit of a sent message has no local echo of its own: it is a request in
+  the send queue, dropped when the homeserver refuses it, and the composer
+  was cleared when it was submitted. So the adapter answers such an edit
+  only when it leaves the send queue: `SendQueued` once the homeserver has
+  accepted it, `SendFailed` when the homeserver refuses it for good, and the
+  core keeps its draft until then and puts it back under the rule above. The
+  adapter finds the edit's request by its content among the send queue's
+  updates, because the SDK's send handle does not expose its transaction ID.
+  Edits left in the send queue by an earlier session are only reported, and
+  so is an edit of a local echo that the SDK turns into an edit request of
+  its own (when the echo is being sent at that moment, or was sent
+  meanwhile). matrix-sdk-ui 0.19 keeps showing a dropped edit's text on its
+  target, when no other edit applies, until the timeline is built again.
 - Redaction asks for confirmation in `CONFIRM` mode because it cannot be
   undone.
 - `M_UNKNOWN_TOKEN` is handled as described in "Startup".

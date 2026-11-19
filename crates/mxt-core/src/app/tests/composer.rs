@@ -452,6 +452,80 @@ fn a_failed_send_is_not_put_back_after_switching_rooms() {
     assert_eq!(app.draft(&id(C)), Some(&Draft::New));
 }
 
+/// `!c` open with the user's `@Alice typo`, its mention a pill, being edited.
+fn editing() -> App {
+    let rich = RichText {
+        blocks: vec![Block::Paragraph(vec![
+            Inline::Mention {
+                text: "@Alice".into(),
+                target: MentionTarget::User(UserId::new(ALICE)),
+                spoiler: false,
+            },
+            Inline::Text {
+                text: " typo".into(),
+                style: Style::default(),
+            },
+        ])],
+    };
+    let mut app = opened();
+    let message = with(own(remote(1), "@Alice typo"), |item| {
+        item.content = MessageContent::Text {
+            body: "@Alice typo".into(),
+            rich,
+        };
+    });
+    reset(&mut app, vec![message]);
+    keys(&mut app, "e");
+    app
+}
+
+/// The homeserver refused the app's `n`-th send, an edit of a sent message,
+/// after the send queue had it.
+fn refused(app: &mut App, n: u64) -> Vec<Effect> {
+    app.update(Msg::SendFailed {
+        id: SendId(n),
+        error: "Editing the message failed: the homeserver answered 403".into(),
+    })
+}
+
+#[test]
+fn an_edit_refused_after_it_was_queued_comes_back_as_an_edit_of_its_message() {
+    let mut app = editing();
+    submit(&mut app, "@Alice fixed");
+    // A message sent meanwhile is queued and leaves the composer empty.
+    submit(&mut app, "next");
+    app.update(Msg::SendQueued { id: SendId(1) });
+
+    assert_eq!(
+        refused(&mut app, 0),
+        vec![ui(UiEffect::LoadComposer {
+            room: id(C),
+            text: "@Alice fixed".into(),
+        })]
+    );
+    assert_eq!(
+        status(&app),
+        Some("Editing the message failed: the homeserver answered 403")
+    );
+    assert_eq!(edit_target(&app, C), Some(&remote(1)));
+    // Sent again as an edit of the same message, with its mention.
+    let mentions = [MentionRef {
+        user: UserId::new(ALICE),
+        text: "@Alice".into(),
+    }];
+    assert_eq!(
+        submit(&mut app, "@Alice fixed"),
+        vec![
+            send(
+                2,
+                render_mentions("@Alice fixed", &mentions),
+                OutgoingKind::Edit { target: remote(1) }
+            ),
+            clear(C),
+        ]
+    );
+}
+
 #[test]
 fn message_reply_refuses_a_local_echo_and_an_edit_draft() {
     let mut app = opened();

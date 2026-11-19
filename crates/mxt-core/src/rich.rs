@@ -6,6 +6,9 @@ use std::fmt::Write as _;
 
 use crate::ids::UserId;
 
+/// What [`RichText::to_plain_hiding_spoilers`] shows for spoiler text.
+const SPOILER: &str = "[spoiler]";
+
 /// Inline styles; any combination can apply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Style {
@@ -52,10 +55,12 @@ pub enum Inline {
 pub enum Block {
     Paragraph(Vec<Inline>),
     /// `text` has no trailing newline: a renderer trims the one that HTML
-    /// `<pre><code>` content usually ends with.
+    /// `<pre><code>` content usually ends with. `spoiler` when the block is
+    /// in a spoiler.
     Code {
         language: Option<String>,
         text: String,
+        spoiler: bool,
     },
     Quote(Vec<Block>),
     /// `start` is the number of the first item of an ordered list.
@@ -97,6 +102,19 @@ impl RichText {
     /// first line.
     pub fn to_plain(&self) -> String {
         let mut plain = Plain::default();
+        plain.blocks(&self.blocks);
+        plain.out
+    }
+
+    /// [`RichText::to_plain`] with every run of spoiler text, links,
+    /// mentions and emoticons, and every code block in a spoiler, as one
+    /// `[spoiler]`: for a preview of the text (the reply preview), which has
+    /// no way to reveal them.
+    pub fn to_plain_hiding_spoilers(&self) -> String {
+        let mut plain = Plain {
+            hide_spoilers: true,
+            ..Plain::default()
+        };
         plain.blocks(&self.blocks);
         plain.out
     }
@@ -187,13 +205,15 @@ fn for_each_paragraph<'a>(blocks: &'a [Block], f: &mut impl FnMut(&'a [Inline]))
     }
 }
 
-/// Builds [`RichText::to_plain`]: every line starts with the prefixes of the
-/// quotes and list items it is in.
+/// Builds [`RichText::to_plain`] and [`RichText::to_plain_hiding_spoilers`]:
+/// every line starts with the prefixes of the quotes and list items it is in.
 #[derive(Default)]
 struct Plain {
     out: String,
     /// Outermost first.
     prefixes: Vec<Prefix>,
+    /// Spoilers become `SPOILER`.
+    hide_spoilers: bool,
 }
 
 enum Prefix {
@@ -220,19 +240,34 @@ impl Plain {
         match block {
             Block::Paragraph(inlines) => {
                 self.start_line();
+                // Whether the previous inline was a hidden spoiler, so a run
+                // of them shows one placeholder.
+                let mut hidden = false;
                 for inline in inlines {
-                    match inline {
-                        Inline::Text { text, .. }
-                        | Inline::Link { text, .. }
-                        | Inline::Mention { text, .. }
-                        | Inline::Emoticon { alt: text, .. } => self.text(text),
-                        Inline::LineBreak => self.text("\n"),
+                    let (text, spoiler) = match inline {
+                        Inline::Text { text, style } | Inline::Link { text, style, .. } => {
+                            (text.as_str(), style.spoiler)
+                        }
+                        Inline::Mention { text, spoiler, .. } => (text.as_str(), *spoiler),
+                        Inline::Emoticon { alt, spoiler } => (alt.as_str(), *spoiler),
+                        Inline::LineBreak => ("\n", false),
+                    };
+                    let hide = spoiler && self.hide_spoilers;
+                    if !hide {
+                        self.text(text);
+                    } else if !hidden {
+                        self.text(SPOILER);
                     }
+                    hidden = hide;
                 }
             }
-            Block::Code { text, .. } => {
+            Block::Code { text, spoiler, .. } => {
                 self.start_line();
-                self.text(text);
+                self.text(if *spoiler && self.hide_spoilers {
+                    SPOILER
+                } else {
+                    text
+                });
             }
             Block::Quote(blocks) => self.nested(Prefix::Quote, blocks),
             Block::List {
@@ -278,7 +313,7 @@ impl Plain {
     }
 
     fn start_line(&mut self) {
-        let Plain { out, prefixes } = self;
+        let Plain { out, prefixes, .. } = self;
         for prefix in prefixes {
             match prefix {
                 Prefix::Quote => out.push_str("> "),
@@ -405,6 +440,7 @@ mod tests {
             Block::Code {
                 language: Some("sh".into()),
                 text: "cargo test\ncargo fmt".into(),
+                spoiler: false,
             },
         ]);
         assert_eq!(rich.to_plain(), "Run:\ncargo test\ncargo fmt");

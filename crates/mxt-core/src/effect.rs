@@ -53,7 +53,9 @@ pub enum MatrixEffect {
     },
     /// Send through the room's timeline; answered with `Msg::SendQueued`
     /// once the room's send queue has it, or `Msg::SendFailed` when it
-    /// cannot be queued. The local echo shows the send state after that.
+    /// cannot be queued. The local echo shows the send state after that. An
+    /// edit of a sent message has no local echo, so it is answered when it
+    /// leaves the queue: `SendQueued` once sent, `SendFailed` when refused.
     Send {
         room: RoomId,
         id: SendId,

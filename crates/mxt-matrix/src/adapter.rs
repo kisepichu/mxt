@@ -30,8 +30,9 @@ use tracing::{debug, warn};
 use crate::{
     Error, SyncLoop,
     error::without_url,
-    media, rooms, send_queue,
-    timeline::{Subscription, event_id, redact, resend, send_message, toggle_reaction},
+    media, rooms,
+    send_queue::{self, Edits},
+    timeline::{Answer, Subscription, event_id, redact, resend, send_message, toggle_reaction},
 };
 
 /// The running matrix adapter.
@@ -48,7 +49,8 @@ impl Matrix {
     /// good, and uploads, into `Msg::EffectFailed` (see `send_queue`). The
     /// effects sent to `effects` run in the background; failures arrive as
     /// `Msg::EffectFailed`, and sends are answered with `Msg::SendQueued` or
-    /// `Msg::SendFailed`. Downloads are saved in `download_dir`
+    /// `Msg::SendFailed`, an edit of a sent message only when it leaves the
+    /// send queue. Downloads are saved in `download_dir`
     /// (`files.download_dir`), and a leading `~/` in an upload's path stands
     /// for `home`.
     pub async fn start(
@@ -63,16 +65,18 @@ impl Matrix {
         let settings = client.notification_settings().await;
         let rooms = rooms::Rooms::new(client.clone(), settings.clone(), to_core.clone());
         let send_updates = client.send_queue().subscribe();
+        let edits = Edits::default();
         let mut tasks = JoinSet::new();
         tasks.spawn(watch_sync(client.clone(), sync.state(), to_core.clone()));
         tasks.spawn(rooms::run(rooms, sync.rooms()));
         tasks.spawn(send_queue::handle_failures(
             client.clone(),
+            edits.clone(),
             send_updates,
             to_core.clone(),
         ));
         let files = Files { download_dir, home };
-        let effects = run_effects(client, settings, receipts, files, to_core, effects);
+        let effects = run_effects(client, settings, receipts, files, edits, to_core, effects);
         tasks.spawn(effects);
         Matrix { tasks, sync }
     }
@@ -157,12 +161,13 @@ async fn run_effects(
     settings: NotificationSettings,
     receipts: ReceiptKind,
     files: Files,
+    edits: Edits,
     to_core: UnboundedSender<Msg>,
     mut queue: UnboundedReceiver<MatrixEffect>,
 ) {
     let mut running = JoinSet::new();
     let (sends, to_send) = mpsc::unbounded_channel();
-    running.spawn(send_messages(to_send, to_core.clone()));
+    running.spawn(send_messages(to_send, edits, to_core.clone()));
     let (mutes, to_mute) = mpsc::unbounded_channel();
     running.spawn(set_mutes(
         client.clone(),
@@ -305,21 +310,28 @@ where
 }
 
 /// Queues the messages and uploads one at a time, in the order they were
-/// sent; a message is answered with `Msg::SendQueued` or `Msg::SendFailed`,
-/// an upload that cannot be queued is reported. A reply or an edit of a
-/// sent message fetches its target event first when the event cache lacks
-/// it, which can take up to three attempts of the client's request timeout,
-/// and an upload reads its file (and fetches the homeserver's upload limit
-/// once); a later message must not overtake either, so it waits. Meanwhile
-/// the other effects (switching rooms, pagination, receipts) do not wait.
-async fn send_messages(mut requests: UnboundedReceiver<Queued>, to_core: UnboundedSender<Msg>) {
+/// sent; a message is answered with `Msg::SendQueued` or `Msg::SendFailed`
+/// (an edit of a sent message by `send_queue::handle_failures`, once it
+/// leaves the send queue), an upload that cannot be queued is reported. A
+/// reply or an edit of a sent message fetches its target event first when
+/// the event cache lacks it, which can take up to three attempts of the
+/// client's request timeout, and an upload reads its file (and fetches the
+/// homeserver's upload limit once); a later message must not overtake
+/// either, so it waits. Meanwhile the other effects (switching rooms,
+/// pagination, receipts) do not wait.
+async fn send_messages(
+    mut requests: UnboundedReceiver<Queued>,
+    edits: Edits,
+    to_core: UnboundedSender<Msg>,
+) {
     while let Some(request) = requests.recv().await {
         match request {
             Queued::Message(timeline, id, message) => {
-                match send_message(&timeline, message).await {
-                    Ok(()) => {
+                match send_message(&timeline, id, message, &edits).await {
+                    Ok(Answer::Now) => {
                         let _ = to_core.send(Msg::SendQueued { id });
                     }
+                    Ok(Answer::WhenSent) => {}
                     Err(error) => report_send(&to_core, id, &error),
                 }
             }
@@ -521,7 +533,20 @@ fn report(to_core: &UnboundedSender<Msg>, what: &str, error: &Error) {
 /// `report` for a message that could not be queued, as `Msg::SendFailed`,
 /// so the core can put its draft back.
 fn report_send(to_core: &UnboundedSender<Msg>, id: SendId, error: &Error) {
-    let error = logged("Sending the message failed", &error.brief(), error);
+    let what = "Sending the message failed";
+    report_send_brief(to_core, id, what, &error.brief(), error);
+}
+
+/// `report_send`, for an error that is not an `Error` and with what failed:
+/// `brief` names no room and holds no event contents.
+pub(crate) fn report_send_brief(
+    to_core: &UnboundedSender<Msg>,
+    id: SendId,
+    what: &str,
+    brief: &dyn Display,
+    full: &dyn Display,
+) {
+    let error = logged(what, brief, full);
     let _ = to_core.send(Msg::SendFailed { id, error });
 }
 

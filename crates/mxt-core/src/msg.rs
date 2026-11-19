@@ -72,12 +72,16 @@ pub enum Msg {
     EffectFailed {
         error: String,
     },
-    /// The room's send queue has the message of `MatrixEffect::Send`.
+    /// The message of `MatrixEffect::Send` is safe without its draft: the
+    /// room's send queue has it, and its local echo shows it, or, for an
+    /// edit of a sent message, which has no local echo of its own, the
+    /// homeserver accepted it.
     SendQueued {
         id: SendId,
     },
-    /// The message of `MatrixEffect::Send` could not be queued; `error` is
-    /// for the status line.
+    /// The message of `MatrixEffect::Send` could not be queued, or the
+    /// homeserver refused an edit of a sent message for good; `error` is for
+    /// the status line.
     SendFailed {
         id: SendId,
         error: String,
