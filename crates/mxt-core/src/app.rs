@@ -94,7 +94,11 @@ pub struct App {
     /// started.
     key_context: InputContext,
     /// The editor mode reported with the last key, for the keys resolved
-    /// again after a timeout.
+    /// again after a binding, also after a timeout. `composer.focus` with
+    /// insert mode sets it to insert, as the tui adapter enters insert mode
+    /// for it. Other mode changes before the next key are unknown to the
+    /// core, such as a released `a` in `composer.normal` that starts insert
+    /// mode: keys resolved again after it still use the mode reported last.
     editor: Option<EditorMode>,
     rooms: RoomList,
     /// The room list cursor, once a cursor action, a search or opening a room
@@ -336,8 +340,8 @@ impl App {
 
     /// Resolves `key` in the current input context. The keys the resolver
     /// hands back after a binding ran come here again one by one, so when
-    /// the binding changed the context or asked for confirmation, they go to
-    /// the new context or answer the question (design, "Keymap resolver").
+    /// the binding changed the context, they go to the new context (design,
+    /// "Keymap resolver").
     fn feed(&mut self, key: Key, effects: &mut Vec<Effect>) {
         if let Some(confirm) = self.confirm.take() {
             // Keys pending from before the question go with it.
@@ -390,6 +394,12 @@ impl App {
             }
             Resolved::Refeed(keys) => {
                 for key in keys {
+                    // Unlike nvim, a question drops the keys left over
+                    // instead of taking one as the answer, so keys typed
+                    // ahead never confirm a redaction.
+                    if self.confirm.is_some() {
+                        break;
+                    }
                     self.feed(key, effects);
                 }
             }
