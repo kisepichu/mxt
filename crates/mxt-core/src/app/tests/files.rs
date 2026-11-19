@@ -2,7 +2,7 @@ use super::timeline::{item, local, msg, opened, remote, reset, status};
 use super::*;
 use crate::effect::ViewContent;
 use crate::rich::{Block, CodeRun, Inline, MentionTarget, RichText, Style};
-use crate::settings::ImagePreview;
+use crate::settings::{ImagePreview, ImageProtocol};
 use crate::timeline::{ItemRef, MediaBytes, MessageContent, TimelineEntry};
 
 const C: &str = "!c:example.org";
@@ -398,6 +398,18 @@ fn with_image_previews_off_the_view_shows_the_image_details_only() {
     reset(&mut app, vec![image(1)]);
     assert_eq!(keys(&mut app, "<CR>"), vec![image_view(1)]);
     assert!(app.view_open());
+}
+
+#[test]
+fn a_forced_image_protocol_still_fetches_the_image() {
+    let forced = Settings {
+        image_preview: ImagePreview::Forced(ImageProtocol::Halfblocks),
+        ..Settings::default()
+    };
+    let mut app = app_in(forced, vec![]);
+    keys(&mut app, "<CR>");
+    reset(&mut app, vec![image(1)]);
+    assert_eq!(keys(&mut app, "<CR>"), vec![image_view(1), fetch(1)]);
 }
 
 #[test]

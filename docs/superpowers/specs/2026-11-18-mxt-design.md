@@ -142,7 +142,7 @@ flowchart BT
 |---|---|---|
 | `mxt-core` | Domain types, keymap and its resolver, action registry, pickers, mention rendering, `App` state and `update` | `std` and small pure crates without I/O (`nucleo-matcher`, `emojis`, `pulldown-cmark`, `unicode-segmentation`). Not the SDK, `ruma`, an async runtime, a terminal library, `serde` or `toml`. |
 | `mxt-matrix` | Builds the SDK client, converts SDK data into domain types, executes matrix effects, forwards SDK streams as `Msg`s, reads bridge state, renders HTML bodies into domain rich text, reads and writes the session file | `mxt-core`, `matrix-sdk`, `matrix-sdk-ui`, tokio, `futures-util`, `tracing`, `serde`/`serde_json` (the session file holds the SDK's serde session type), `mime_guess` (the MIME type of an upload), `image` (the dimensions of uploaded images); HTML parsing through `matrix_sdk::ruma::html`, plus a feature-only `ruma` dependency of the SDK's ruma version that enables `html-matrix` (the SDK enables only `html`) and `markdown` (`FormattedBody::markdown`); as dev-dependencies, `matrix-sdk` with its `testing` feature, `matrix-sdk-test` and `mxt-core` with its `testing` feature (the tests against `MatrixMockServer`) |
-| `mxt-tui` | Layout and widgets, input routing, the composers and the message view (edtui), image decoding and previews, OSC 52 clipboard, local time formatting, executing UI effects | `mxt-core`, ratatui, crossterm, edtui, ratatui-image, image, jiff, `base64` (OSC 52), `futures-util` (the terminal event stream), `unicode-segmentation` |
+| `mxt-tui` | Layout and widgets, input routing, the composers and the message view (edtui), image decoding and previews, OSC 52 clipboard, local time formatting, executing UI effects | `mxt-core`, ratatui, crossterm, edtui, ratatui-image, image, jiff, `base64` (OSC 52), `futures-util` (the terminal event stream), `unicode-segmentation`, `rustix` (reading the terminal's answer to XTVERSION with a timeout, and the window's size in pixels) |
 | `mxt` | Command line, startup flow, configuration file loading (TOML DTOs), paths, the data directory lock, logging, wiring the adapters and the event loop | all of the above, `serde`, `toml`, `tracing`, `tracing-appender` and `tracing-subscriber` (the log files), `rpassword` (the password and recovery key prompts); `matrix-sdk` as a dev-dependency |
 
 Because `mxt-core` does not depend on the SDK, its tests build and run without
@@ -822,28 +822,70 @@ list, so mxt does not offer an event-level mention list.
   to the directory mxt was started in. Before reading the file, mxt refuses
   anything that is not a regular file and files above the homeserver's
   upload limit.
-- Image previews use ratatui-image, which detects the terminal's graphics
-  protocol (sixel, kitty, iTerm2) and falls back to half blocks. They appear
-  only in the message view (`message.view`), which keeps the timeline's width
-  fixed. The image comes from the thumbnail source when the event has one and
-  from the full file otherwise, up to 10 MiB, scaled down locally. Decoding
-  is limited to 128 MiB of memory, so an image that claims huge dimensions
-  shows an error instead. `ui.image_preview = "off"` shows only the file name
-  and size in the view, and mxt then never queries the terminal for its
-  graphics protocol.
+- Image previews use ratatui-image, in sixel, kitty or iTerm2 graphics or
+  in half blocks. They appear only in the message view (`message.view`),
+  which keeps the timeline's width fixed. The image comes from the
+  thumbnail source when the event has one and from the full file otherwise,
+  up to 10 MiB, scaled down locally. Decoding is limited to 128 MiB of
+  memory, so an image that claims huge dimensions shows an error instead.
+- The protocol, chosen when the tui adapter sets up the terminal, after
+  raw mode and the alternate screen and before the key reader starts:
+  - `ui.image_preview = "auto"` inside WSL without SSH (`WSL_DISTRO_NAME`
+    set, neither `SSH_CONNECTION` nor `SSH_TTY`): half blocks, and no query
+    at all. Every graphics protocol breaks in ConPTY; half blocks need no
+    cell size; and ConPTY does not reliably pass a query's answers on (as
+    ratatui-image notes), so ratatui-image's query would wait for its
+    timeout and leave its thread blocked on stdin, taking the first key.
+  - Otherwise, with `auto`, the terminal's name decides where mxt knows
+    better than ratatui-image: WezTerm and iTerm2 get iTerm2, kitty and
+    Ghostty kitty. Over SSH ratatui-image cannot tell WezTerm (it reads
+    only `WEZTERM_EXECUTABLE`, which SSH does not forward), picks kitty,
+    and ratatui-image's kitty graphics always use Unicode placeholders,
+    which WezTerm draws as boxes (wezterm#7924; kitty has no way to ask
+    for placeholder support, kitty#10732). Any other name, a name that
+    starts with `tmux` (a local tmux in front of SSH answers for the
+    terminal), and no name leave ratatui-image's own choice. Windows
+    Terminal does not answer XTVERSION; ratatui-image finds sixel in its
+    DA1 reply.
+  - The name: outside tmux, the tui adapter writes XTVERSION (`CSI > q`)
+    and DA1 (`CSI c`). Terminals answer in order and all answer DA1, so the
+    DA1 reply ends the answers at once for a terminal without XTVERSION.
+    It reads stdin one byte per read, with `VMIN` 0 and `VTIME` up to a
+    deadline 1 s away, so no thread is left blocked on input, and stops
+    at the DA1 reply's last byte, so the bytes after it stay unread. The
+    name is the text of `DCS > | text ST` before that; other input before
+    it is skipped. An answer later than 1 s goes to ratatui-image's query,
+    which runs next and reads up to its own last answer. Inside tmux
+    (`TMUX` set), tmux answers XTVERSION itself, so the name is
+    `tmux display -p '#{client_termtype}'`, the outer terminal's answer to
+    tmux's own query, for one client when several are attached.
+  - ratatui-image's query then runs as before, for the cell size and its
+    own choice, with the workaround for its thread in tmux. The protocol
+    for the name replaces ratatui-image's choice only when the cell size
+    was measured (answered by the terminal, or from the window's size in
+    pixels), as ratatui-image itself uses only half blocks with a guessed
+    size.
+  - `"iterm2"`, `"sixel"`, `"kitty"` and `"halfblocks"` force that
+    protocol, also in WSL: no name, and ratatui-image's query still runs
+    for the cell size.
+  - `"off"` shows only the file name and size in the view, and mxt then
+    never queries the terminal for its graphics protocol.
+  - Under tmux with several clients attached, the cell size comes from
+    whichever terminal answers ratatui-image's query first, and the name
+    from the client tmux reports.
 
 ### Clipboard and terminal focus
 
 `message.yank` and edtui copies use OSC 52. Inside tmux, OSC 52 reaches the
 outer terminal only with `set -g set-clipboard on`, and focus events reach mxt
 only with `set -g focus-events on`. Without focus events, mxt treats the
-terminal as always focused. With `ui.image_preview = "auto"` under tmux,
+terminal as always focused. Unless `ui.image_preview = "off"`, under tmux
 ratatui-image turns tmux's `allow-passthrough` on for the active pane of the
 tmux session's current window (mxt's own pane when mxt's window is in
 front), and the option stays on after mxt exits. When mxt runs over SSH from
-inside a local tmux, the local tmux needs `set -g allow-passthrough on` for
-sixel or kitty images; otherwise mxt falls back to half blocks. The user
-documentation, [Terminal setup](../../terminal.md), says so.
+inside a local tmux, the remote mxt cannot tell the terminal (see "Files and
+images"), and images are usually half blocks. The user documentation,
+[Terminal setup](../../terminal.md), says so.
 
 ## Configuration
 
@@ -865,7 +907,7 @@ timeoutlen = 1000                                 # milliseconds
 # sort: "recent" | "name"; width: 12 to 80; network: "inline" | "below"
 room_list = { visible = true, sort = "recent", width = 30, network = "inline" }
 time_format = "%H:%M"                             # strftime, in the local time zone
-image_preview = "auto"                            # "auto" | "off" (message view)
+image_preview = "auto"                            # "auto" | "off" | "iterm2" | "sixel" | "kitty" | "halfblocks"
 read_receipts = "public"                          # "public" | "private"
 
 [files]
@@ -886,6 +928,10 @@ opener = ["xdg-open"]           # for example ["wslview"] on WSL
 
 Settings:
 
+- `ui.image_preview` is `"auto"` (the default), `"off"`, or one of
+  `"iterm2"`, `"sixel"`, `"kitty"` and `"halfblocks"`, which force that
+  graphics protocol when the choice for the terminal is wrong; see "Files
+  and images".
 - `ui.read_receipts = "public"` sends `m.read` receipts, which other users
   see. `"private"` sends `m.read.private`, which only the user's own devices
   see.

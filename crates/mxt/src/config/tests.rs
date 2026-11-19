@@ -3,7 +3,7 @@ use mxt_core::action::Action;
 use mxt_core::keymap::InputContext;
 use mxt_core::keys::KeySeq;
 use mxt_core::rooms::RoomSort;
-use mxt_core::settings::{ImagePreview, ReceiptKind};
+use mxt_core::settings::{ImagePreview, ImageProtocol, ReceiptKind};
 use mxt_tui::NetworkPlacement;
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt as _;
@@ -140,6 +140,32 @@ fn settings_are_read() {
     );
     assert_eq!(c.download_dir, PathBuf::from("/tmp/dl"));
     assert_eq!(c.opener, vec!["wslview".to_string()]);
+}
+
+#[test]
+fn image_preview_takes_auto_off_and_each_protocol() {
+    for (value, preview) in [
+        ("auto", ImagePreview::Auto),
+        ("off", ImagePreview::Off),
+        ("iterm2", ImagePreview::Forced(ImageProtocol::Iterm2)),
+        ("sixel", ImagePreview::Forced(ImageProtocol::Sixel)),
+        ("kitty", ImagePreview::Forced(ImageProtocol::Kitty)),
+        (
+            "halfblocks",
+            ImagePreview::Forced(ImageProtocol::Halfblocks),
+        ),
+    ] {
+        let c = ok(&format!("{MINIMAL}[ui]\nimage_preview = \"{value}\"\n"));
+        assert_eq!(c.settings.image_preview, preview, "{value}");
+    }
+    for value in ["chafa", "Kitty", "iTerm2", "half_blocks", ""] {
+        let (line, msg) = err(&format!("{MINIMAL}[ui]\nimage_preview = \"{value}\"\n"));
+        assert_eq!(line, 4, "{value}");
+        assert!(
+            msg.contains("ui.image_preview") && msg.contains("halfblocks"),
+            "{msg}"
+        );
+    }
 }
 
 #[test]

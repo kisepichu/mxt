@@ -27,7 +27,7 @@ timeoutlen = 1000                                 # milliseconds
 # sort: "recent" | "name"; width: 12 to 80; network: "inline" | "below"
 room_list = { visible = true, sort = "recent", width = 30, network = "inline" }
 time_format = "%H:%M"                             # strftime, in the local time zone
-image_preview = "auto"                            # "auto" | "off" (message view)
+image_preview = "auto"                            # "auto" | "off" | "iterm2" | "sixel" | "kitty" | "halfblocks"
 read_receipts = "public"                          # "public" | "private"
 
 [files]
@@ -97,7 +97,7 @@ Nothing is silently ignored. These are all errors:
 | `timeoutlen` | `1000` | milliseconds, a non-negative integer | How long a key sequence that starts a longer binding waits for the next key, like nvim's `timeoutlen`. |
 | `room_list` | see below | a table | The room list. |
 | `time_format` | `"%H:%M"` | a [strftime format](https://docs.rs/jiff/latest/jiff/fmt/strtime/index.html), not empty | The time in each message header, in the local time zone. |
-| `image_preview` | `"auto"` | `"auto"`, `"off"` | `"auto"` shows images in the message view in the terminal's graphics protocol (see [Terminal setup](terminal.md#images)). `"off"` shows only the file name and size there, and mxt never asks the terminal for its graphics protocol. |
+| `image_preview` | `"auto"` | `"auto"`, `"off"`, `"iterm2"`, `"sixel"`, `"kitty"`, `"halfblocks"` | `"auto"` shows images in the message view in the graphics protocol mxt chooses for the terminal (see [Terminal setup](terminal.md#images)). `"iterm2"`, `"sixel"`, `"kitty"` and `"halfblocks"` use that protocol instead, for a terminal where the choice is wrong. `"off"` shows only the file name and size there, and mxt never asks the terminal for its graphics protocol. |
 | `read_receipts` | `"public"` | `"public"`, `"private"` | `"public"` sends `m.read` receipts, which other users see. `"private"` sends `m.read.private`, which only your own devices see. |
 
 `room_list` is a table; write it inline as in the example, or as a section:
@@ -339,4 +339,5 @@ the room list's order:
 | `XDG_CONFIG_HOME` | the configuration file's directory, see above |
 | `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME`, `HOME` | where mxt keeps its data, see [Files](../README.md#files) |
 | `MXT_LOG` | the log filter, see [Files](../README.md#files) |
+| `TMUX`, `WSL_DISTRO_NAME`, `SSH_CONNECTION`, `SSH_TTY` | how `ui.image_preview = "auto"` chooses the graphics protocol, see [Images](terminal.md#images) |
 | `VISUAL`, `EDITOR` | the external editor (`<C-x><C-e>`); a platform default when neither is set |

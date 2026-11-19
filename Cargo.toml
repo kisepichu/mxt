@@ -56,6 +56,10 @@ rpassword = "7"
 # composer's Markdown into the HTML body. The version matrix-sdk 0.19.1 uses,
 # so there is one ruma in the tree.
 ruma = { version = "0.17.2", default-features = false, features = ["html-matrix", "markdown"] }
+# Reading the terminal's answer to mxt's own query with a timeout and without
+# std's buffer (`VMIN`/`VTIME`), and the window's size in pixels. The version
+# and features crossterm uses, so this adds nothing to the build.
+rustix = { version = "1", default-features = false, features = ["std", "termios"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }

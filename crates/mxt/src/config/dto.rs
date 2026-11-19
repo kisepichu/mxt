@@ -89,13 +89,22 @@ impl From<NetworkPlacement> for mxt_tui::NetworkPlacement {
 pub enum ImagePreview {
     Auto,
     Off,
+    Iterm2,
+    Sixel,
+    Kitty,
+    Halfblocks,
 }
 
 impl From<ImagePreview> for settings::ImagePreview {
     fn from(preview: ImagePreview) -> settings::ImagePreview {
+        use settings::ImageProtocol;
         match preview {
             ImagePreview::Auto => settings::ImagePreview::Auto,
             ImagePreview::Off => settings::ImagePreview::Off,
+            ImagePreview::Iterm2 => settings::ImagePreview::Forced(ImageProtocol::Iterm2),
+            ImagePreview::Sixel => settings::ImagePreview::Forced(ImageProtocol::Sixel),
+            ImagePreview::Kitty => settings::ImagePreview::Forced(ImageProtocol::Kitty),
+            ImagePreview::Halfblocks => settings::ImagePreview::Forced(ImageProtocol::Halfblocks),
         }
     }
 }

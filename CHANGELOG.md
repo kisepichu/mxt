@@ -8,6 +8,21 @@ marked **Breaking:**.
 
 ## [Unreleased]
 
+### Added
+
+- `ui.image_preview` takes `"iterm2"`, `"sixel"`, `"kitty"` and
+  `"halfblocks"`, which draw images in that protocol for a terminal where
+  mxt's choice is wrong.
+
+### Changed
+
+- With `ui.image_preview = "auto"`, mxt asks the terminal for its name, or
+  inside tmux asks tmux for the outer terminal's name, and draws images in
+  iTerm2 graphics in WezTerm and iTerm2, and in kitty graphics in kitty and
+  Ghostty; other terminals keep ratatui-image's detection. WezTerm over SSH
+  showed boxes instead of images. Inside WSL without SSH, images are half
+  blocks.
+
 ## [0.1.0] - 2026-11-19
 
 The first release.

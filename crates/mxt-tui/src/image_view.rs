@@ -1,7 +1,7 @@
 //! Images in the message view (design, "Files and images"): decoded with
 //! `image`, scaled down to the terminal, kept for the last few items, and
-//! drawn with ratatui-image in the terminal's graphics protocol (sixel,
-//! kitty, iTerm2, else half blocks).
+//! drawn with ratatui-image in the graphics protocol chosen for the terminal
+//! (see [`crate::image_protocol`]): sixel, kitty, iTerm2, else half blocks.
 
 use std::io::{self, Cursor, Write as _};
 use std::thread;
@@ -9,13 +9,17 @@ use std::time::{Duration, Instant};
 
 use image::metadata::Orientation;
 use image::{DynamicImage, ImageDecoder as _, ImageFormat, ImageReader, ImageResult, Limits};
+use mxt_core::settings::ImageProtocol;
 use mxt_core::timeline::ItemRef;
 use ratatui::Frame;
 use ratatui::layout::{Rect, Size};
-use ratatui_image::picker::Picker;
 use ratatui_image::picker::cap_parser::QueryStdioOptions;
+use ratatui_image::picker::{Capability, Picker};
 use ratatui_image::protocol::StatefulProtocol;
 use ratatui_image::{FilterType, Resize, StatefulImage};
+use rustix::termios;
+
+use crate::image_protocol::{self, Choice, Env, NameSource};
 
 /// How many decoded images are kept.
 const KEPT: usize = 4;
@@ -42,21 +46,33 @@ struct Kept {
 }
 
 impl Images {
-    /// Asks the terminal for its graphics protocol and font size. The
-    /// terminal must be in raw mode, and nothing else may read its input
-    /// yet: the answers arrive there. When they do not come in time,
-    /// ratatui-image guesses from the environment (iTerm2 hints, the font
-    /// size from the window's size in pixels) and else uses half blocks. A
-    /// query that fails uses half blocks.
-    pub(crate) fn query() -> io::Result<Images> {
-        let options = QueryStdioOptions::default();
-        let timeout = options.timeout;
-        let started = Instant::now();
-        let picker =
-            Picker::from_query_stdio_with_options(options).unwrap_or_else(|_| Picker::halfblocks());
-        if picker.tmux_detected() && started.elapsed() >= timeout {
-            release_query_thread()?;
-        }
+    /// Chooses the graphics protocol: `forced`, or for `None` (`auto`) the
+    /// one for the terminal's name, and otherwise ratatui-image's. Unless
+    /// the choice is half blocks in WSL, ratatui-image then asks the
+    /// terminal for its graphics protocols and cell size. The terminal must
+    /// be in raw mode, and nothing else may read its input yet: the answers
+    /// arrive there.
+    pub(crate) fn query(forced: Option<ImageProtocol>) -> io::Result<Images> {
+        let choice = image_protocol::choose(forced, &Env::read(), |source| match source {
+            NameSource::Terminal => image_protocol::query_terminal(),
+            NameSource::Tmux => Ok(image_protocol::tmux_client_termtype()),
+        })?;
+        let picker = match choice {
+            Choice::Halfblocks => Picker::halfblocks(),
+            Choice::Detected => detect()?,
+            Choice::ForTerminal(protocol) => {
+                let mut picker = detect()?;
+                if cell_size_measured(&picker) {
+                    picker.set_protocol_type(protocol);
+                }
+                picker
+            }
+            Choice::Forced(protocol) => {
+                let mut picker = detect()?;
+                picker.set_protocol_type(protocol);
+                picker
+            }
+        };
         Ok(Images {
             picker,
             kept: Recent::new(KEPT),
@@ -153,6 +169,38 @@ fn decode(bytes: &[u8], width: u32, height: u32) -> ImageResult<DynamicImage> {
     };
     image.apply_orientation(orientation);
     Ok(image)
+}
+
+/// ratatui-image's query for the terminal's graphics protocols and cell
+/// size. When the answers do not come in time, ratatui-image guesses from
+/// the environment (iTerm2 hints, the cell size from the window's size in
+/// pixels) and else uses half blocks. A query that fails uses half blocks.
+fn detect() -> io::Result<Picker> {
+    let options = QueryStdioOptions::default();
+    let timeout = options.timeout;
+    let started = Instant::now();
+    let picker =
+        Picker::from_query_stdio_with_options(options).unwrap_or_else(|_| Picker::halfblocks());
+    if picker.tmux_detected() && started.elapsed() >= timeout {
+        release_query_thread()?;
+    }
+    Ok(picker)
+}
+
+/// Whether `picker`'s cell size was measured: answered by the terminal, or
+/// taken from the window's size in pixels, as ratatui-image does when the
+/// terminal does not answer. Otherwise it is ratatui-image's guess, and
+/// ratatui-image itself then uses only half blocks: the other protocols
+/// draw the image in pixels, which must fill the cells it is laid out in.
+fn cell_size_measured(picker: &Picker) -> bool {
+    let answered = picker
+        .capabilities()
+        .iter()
+        .any(|capability| matches!(capability, Capability::CellSize(Some(_))));
+    answered
+        || termios::tcgetwinsize(io::stdout()).is_ok_and(|size| {
+            size.ws_xpixel > 0 && size.ws_ypixel > 0 && size.ws_col > 0 && size.ws_row > 0
+        })
 }
 
 /// A workaround for ratatui-image's query thread, which reads stdin without

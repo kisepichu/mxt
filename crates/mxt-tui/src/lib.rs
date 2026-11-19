@@ -4,6 +4,7 @@
 mod clipboard;
 mod composer;
 mod editor;
+mod image_protocol;
 mod image_view;
 mod input;
 mod opener;
