@@ -259,6 +259,7 @@ fn message_edit_loads_the_plain_body_of_an_own_text_message_with_its_mentions() 
             Inline::Mention {
                 text: "@Alice".into(),
                 target: MentionTarget::User(alice.clone()),
+                spoiler: false,
             },
             Inline::Text {
                 text: " ".into(),
