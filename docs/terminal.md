@@ -54,6 +54,10 @@ break stays a line break and never sends the message.
   yank.
 - The command line, `/` and the pickers hold one line, so they take the
   text up to its first line break.
+- The recovery key prompt of `:recover` takes the text up to its first line
+  break too, masked as `*` like typed text, so a key copied with a line break
+  is not submitted yet; `<CR>` submits it. The text never reaches the
+  composer or another input.
 - The room list and the timeline ignore a paste.
 - A paste never opens the mention menu, even when it ends in `@name`.
 - A paste larger than 256 KiB goes nowhere, and the status line says

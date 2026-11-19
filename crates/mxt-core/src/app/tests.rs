@@ -419,11 +419,90 @@ fn a_paste_in_secret_mode_never_reaches_the_composer() {
     ]);
     keys(&mut app, "<CR>i");
     keys_in(&mut app, "<C-r>", Some(EditorMode::Insert));
-    // The paste ends `<C-r>`, which enters `SECRET` mode, and then goes
-    // nowhere; so does the next paste.
-    for _ in 0..2 {
-        assert_eq!(paste(&mut app, "key", Some(EditorMode::Insert)), vec![]);
-        assert_eq!(app.mode_label(Some(EditorMode::Insert)), "SECRET");
+    // The paste ends `<C-r>`, which enters `SECRET` mode, and goes into the
+    // key, as keys typed after `<C-r>` would; so does the next paste, whose
+    // line break goes.
+    for (text, typed) in [("key", 3), ("key\n", 6)] {
+        let pasted = app.update(Msg::Paste {
+            text: text.into(),
+            editor: Some(EditorMode::Insert),
+        });
+        assert_eq!(pasted, vec![]);
+        assert_eq!(secret_len(&app), Some(typed));
+    }
+    let key = RecoveryKey::from("keykey".to_owned());
+    assert_eq!(
+        keys_in(&mut app, "<CR>", Some(EditorMode::Insert)),
+        vec![Effect::Matrix(MatrixEffect::Recover(key))]
+    );
+}
+
+#[test]
+fn a_paste_in_secret_mode_goes_into_the_key_up_to_its_first_line_break() {
+    // By default only `normal` opens the command line, with `:`; here
+    // `<C-o>` opens it in the composer's insert mode and the message view.
+    let user = || {
+        vec![
+            (
+                TableId::ComposerInsert,
+                seq("<C-o>"),
+                Binding::single(Action::CommandLineOpen),
+            ),
+            (
+                TableId::MessageView,
+                seq("<C-o>"),
+                Binding::single(Action::CommandLineOpen),
+            ),
+        ]
+    };
+    // Each opens the command line where the keys go and returns the mode of
+    // the editor that has them, which `SECRET` mode then keeps.
+    let setups: [fn(&mut App) -> Option<EditorMode>; 4] = [
+        // The room list.
+        |app| {
+            keys(app, ":");
+            None
+        },
+        // The composer in insert mode.
+        |app| {
+            keys(app, "<CR>i");
+            keys_in(app, "<C-o>", Some(EditorMode::Insert));
+            Some(EditorMode::Insert)
+        },
+        // The composer in normal mode.
+        |app| {
+            keys(app, "<CR>i");
+            keys_in(app, "<Esc>", Some(EditorMode::Insert));
+            keys_in(app, ":", Some(EditorMode::Normal));
+            Some(EditorMode::Normal)
+        },
+        // The message view.
+        |app| {
+            keys(app, "<CR>");
+            timeline::reset(app, vec![timeline::msg(1)]);
+            keys(app, "<CR>");
+            keys_in(app, "<C-o>", Some(EditorMode::Normal));
+            Some(EditorMode::Normal)
+        },
+    ];
+    for setup in setups {
+        let mut app = app_with(user());
+        let editor = setup(&mut app);
+        assert_eq!(keys_in(&mut app, "recover<CR>", editor), vec![]);
+        assert_eq!(secret_len(&app), Some(0));
+        // A key copied with a line break and more after it: no binding runs,
+        // nothing is submitted and no editor gets the text.
+        let pasted = app.update(Msg::Paste {
+            text: "EsTj 3yST\nrest".into(),
+            editor,
+        });
+        assert_eq!(pasted, vec![]);
+        assert_eq!(secret_len(&app), Some(9));
+        let key = RecoveryKey::from("EsTj 3yST".to_owned());
+        assert_eq!(
+            keys_in(&mut app, "<CR>", editor),
+            vec![Effect::Matrix(MatrixEffect::Recover(key))]
+        );
     }
 }
 
@@ -655,11 +734,15 @@ fn a_paste_larger_than_256_kib_is_refused() {
     assert_eq!(paste(&mut app, &over, Some(EditorMode::Insert)), vec![]);
     assert_eq!(refused(&app), too_large);
 
-    // Also where only its first line would go.
+    // Also where only its first line would go, the recovery key too.
     let mut app = self::app();
     keys(&mut app, ":open ");
     assert_eq!(paste(&mut app, &format!("b\n{limit}"), None), vec![]);
     assert_eq!(line(&app), Some((LineKind::Command, "open ")));
+    assert_eq!(refused(&app), too_large);
+    keys(&mut app, "<Esc>:recover<CR>");
+    assert_eq!(paste(&mut app, &format!("b\n{limit}"), None), vec![]);
+    assert_eq!(secret_len(&app), Some(0));
     assert_eq!(refused(&app), too_large);
 }
 

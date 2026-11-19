@@ -495,9 +495,11 @@ covered by unit tests.
   terminal reports a paste as one event, which the tui adapter sends as
   `Msg::Paste` with its line breaks as `\n` (terminals and tmux send `\r`).
   A paste is text, never keys: it runs no binding, so a pasted line break
-  never sends the message. The core ends the pending keys first, as their
-  timeout would, so they keep their order with the text, and then sends the
-  paste where a released key would go (see "Keymap resolver"):
+  never sends the message. Like a key, a paste goes to `CONFIRM` and then
+  `SECRET` mode before anything else. Otherwise the core ends the pending
+  keys first, as their timeout would, so they keep their order with the
+  text, and then sends the paste where a released key would go (see "Keymap
+  resolver"):
   - an editor (the composer's or the message view's), with
     `Effect::Ui(Paste(text))`: insert mode inserts the text at the cursor,
     line breaks as new lines. Normal mode puts it after the cursor like `p`
@@ -513,7 +515,11 @@ covered by unit tests.
     the next key looks for the token again.
   - the command line, the search line and the pickers, which hold one line:
     the text up to the first line break; the rest is dropped.
-  - `SECRET` mode: the first line too, masked like typed text.
+  - `SECRET` mode, also when a binding that the paste ends enters it, as
+    for the keys typed after that binding: the first line too, added to the
+    key and masked like typed text. The rest is dropped, with the line break
+    a copied key ends in. The paste never submits the key and returns no
+    effect: the key leaves the core only in the `Recover` effect of `<CR>`.
   - the room list and the timeline: nowhere.
   - `CONFIRM` mode: nowhere, and the question is cancelled, as by any key
     but `y`.

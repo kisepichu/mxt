@@ -50,7 +50,7 @@ come between messages.
 | `PICKER` | a picker is open | the `picker` table, then the query |
 | `VIEW NORMAL`, `VIEW INSERT`, `VIEW VISUAL`, `VIEW SEARCH` | the message view is open; the mode of its editor | the `message_view` table in normal and visual mode, then the editor |
 | `CONFIRM` | an action asks first, as `dd` does | `y` confirms, any other key cancels |
-| `SECRET` | `:recover` asks for the recovery key; the status line shows `Recovery key:` and a `*` for each character | typed text, `<BS>`, `<C-u>` and `<C-w>`; `<CR>` submits, `<Esc>` cancels; no keymap |
+| `SECRET` | `:recover` asks for the recovery key; the status line shows `Recovery key:` and a `*` for each character | typed text, a paste's first line, `<BS>`, `<C-u>` and `<C-w>`; `<CR>` submits, `<Esc>` cancels; no keymap |
 
 In `NORMAL`, the room list and the timeline have no character cursor: the
 cursor moves one room or one message at a time. That leaves `<Space>` free
