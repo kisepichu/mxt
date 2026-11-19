@@ -64,7 +64,7 @@ impl Error {
             Error::Timeline(timeline::Error::EventCacheError(
                 EventCacheError::PaginationError(error),
             )) => {
-                if is_failed_request(error) {
+                if is_unreachable(error) {
                     return Brief {
                         error: &"the request failed",
                         response: None,
@@ -101,19 +101,12 @@ pub(crate) fn without_url(error: matrix_sdk::Error) -> matrix_sdk::Error {
     }
 }
 
-/// The errors `without_url` removes the URL from.
-fn is_failed_request(error: &matrix_sdk::Error) -> bool {
-    matches!(error, matrix_sdk::Error::Http(error) if matches!(**error, HttpError::Reqwest(_)))
-}
-
-/// Whether the request did not reach the homeserver, or its answer did not
-/// arrive in time: a connection or timeout error.
+/// Whether the request failed in the network layer, so no answer of the
+/// homeserver arrived: a connection, timeout, reset or truncated body. Every
+/// answer, an error response too, is an `HttpError::Api`; the SDK classifies
+/// the same way. These are the errors `without_url` removes the URL from.
 pub(crate) fn is_unreachable(error: &matrix_sdk::Error) -> bool {
-    matches!(
-        error,
-        matrix_sdk::Error::Http(error)
-            if matches!(&**error, HttpError::Reqwest(error) if error.is_connect() || error.is_timeout())
-    )
+    matches!(error, matrix_sdk::Error::Http(error) if matches!(**error, HttpError::Reqwest(_)))
 }
 
 /// A timeline error, with the request URL removed where the SDK error is not
@@ -338,6 +331,15 @@ mod tests {
             Error::UnknownRoom.brief().to_string(),
             Error::UnknownRoom.to_string()
         );
+    }
+
+    #[test]
+    fn reqwest_errors_are_unreachable_and_server_answers_are_not() {
+        // Any reqwest error, not only a connect or timeout error (here one
+        // from building the request): no answer of the homeserver arrived.
+        let request = matrix_sdk::reqwest::Proxy::all("http://[").unwrap_err();
+        assert!(is_unreachable(&HttpError::Reqwest(request).into()));
+        assert!(!is_unreachable(&server_error("M_UNKNOWN").into()));
     }
 
     #[test]
