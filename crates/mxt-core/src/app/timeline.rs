@@ -339,20 +339,23 @@ impl App {
     /// `message.open`: downloads an attachment, opens the only `http://` or
     /// `https://` link, or picks one of several. Links with other schemes are
     /// left out (see [`is_web_url`]). An attachment that is still a local
-    /// echo is refused: the adapter downloads by remote event.
+    /// echo is refused: the adapter downloads by remote event. A download
+    /// shows `Downloading <name>` until it is saved, which takes a while for
+    /// a large file.
     pub(super) fn open_message(&mut self, effects: &mut Vec<Effect>) {
         let (Some(room), Some(item)) = (&self.open_room, self.timeline.cursor_item()) else {
             return;
         };
         let mut links: Vec<String> = match &item.content {
-            MessageContent::Image { .. } | MessageContent::File { .. } => {
+            MessageContent::Image { name, .. } | MessageContent::File { name, .. } => {
                 if let ItemRef::Local(_) = item.id {
                     return self.set_status(StatusKind::Error, NOT_SENT);
                 }
-                return effects.push(Effect::Matrix(MatrixEffect::Download {
+                effects.push(Effect::Matrix(MatrixEffect::Download {
                     room: room.clone(),
                     item: item.id.clone(),
                 }));
+                return self.set_status(StatusKind::Info, format!("Downloading {name}"));
             }
             MessageContent::Text { rich, .. }
             | MessageContent::Notice(rich)
