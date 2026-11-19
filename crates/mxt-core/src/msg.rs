@@ -43,6 +43,12 @@ pub enum Msg {
         key: Key,
         editor: Option<EditorMode>,
     },
+    /// Text pasted into the terminal (bracketed paste), with its line breaks
+    /// as `\n`; `editor` as with `Key`.
+    Paste {
+        text: String,
+        editor: Option<EditorMode>,
+    },
     /// A timer from `UiEffect::StartTimer` expired.
     Timeout {
         id: TimerId,

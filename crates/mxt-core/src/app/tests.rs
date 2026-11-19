@@ -473,6 +473,75 @@ fn editor_contexts_release_keys_to_the_editor() {
     assert_eq!(app.mode_label(Some(EditorMode::Insert)), "INSERT");
 }
 
+fn paste(app: &mut App, text: &str, editor: Option<EditorMode>) -> Vec<Effect> {
+    no_timers(app.update(Msg::Paste {
+        text: text.into(),
+        editor,
+    }))
+}
+
+#[test]
+fn a_paste_goes_to_the_editor_as_text_and_never_sends() {
+    let mut app = app();
+    keys(&mut app, "<CR>i");
+    // `<CR>` sends in insert mode; a pasted line break is text.
+    for editor in [EditorMode::Insert, EditorMode::Normal] {
+        assert_eq!(
+            paste(&mut app, "one\ntwo\n", Some(editor)),
+            vec![Effect::Ui(UiEffect::Paste("one\ntwo\n".into()))]
+        );
+    }
+    assert_eq!(app.focus(), Focus::Composer);
+}
+
+#[test]
+fn keys_pending_before_a_paste_end_first() {
+    let mut app = app();
+    keys(&mut app, "<CR>i");
+    // `<C-x>` waits for `<C-x><C-e>`; it reaches the editor before the text.
+    keys_in(&mut app, "<C-x>", Some(EditorMode::Insert));
+    assert_eq!(
+        paste(&mut app, "text", Some(EditorMode::Insert)),
+        vec![
+            Effect::Ui(UiEffect::ReplayKeys(seq("<C-x>").keys().to_vec())),
+            Effect::Ui(UiEffect::Paste("text".into())),
+        ]
+    );
+    assert!(app.pending_keys().is_empty());
+}
+
+#[test]
+fn the_command_line_and_pickers_take_the_first_line_of_a_paste() {
+    let mut app = app();
+    keys(&mut app, ":open ");
+    assert_eq!(paste(&mut app, "b:example.org\n:q\n", None), vec![]);
+    assert_eq!(line(&app), Some((LineKind::Command, "open b:example.org")));
+
+    keys(&mut app, "<Esc><Space><Space>");
+    assert_eq!(paste(&mut app, "b:ex\n<CR>", None), vec![]);
+    let picker = app.picker().unwrap();
+    assert_eq!(picker.query, "b:ex");
+    assert_eq!(picker.items[0].key, PickerKey::Room(id("!b:example.org")));
+    // A paste that starts with a line break adds nothing.
+    paste(&mut app, "\nmore", None);
+    assert_eq!(app.picker().unwrap().query, "b:ex");
+}
+
+#[test]
+fn a_paste_in_the_room_list_or_the_timeline_does_nothing() {
+    let mut app = app();
+    // A count typed before it is dropped too.
+    keys(&mut app, "2");
+    assert_eq!(paste(&mut app, "j:q\n", None), vec![]);
+    keys(&mut app, "j");
+    assert_eq!(cursor_id(&app), "!b:example.org");
+    keys(&mut app, "<CR><C-w>l");
+    assert_eq!(paste(&mut app, "dd:q\n", None), vec![]);
+    assert_eq!(app.focus(), Focus::Timeline);
+    assert_eq!(line(&app), None);
+    assert_eq!(app.confirmation(), None);
+}
+
 fn line(app: &App) -> Option<(LineKind, &str)> {
     app.command_line().map(|l| (l.kind, l.text.as_str()))
 }

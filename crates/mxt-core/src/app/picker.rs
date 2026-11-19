@@ -152,6 +152,18 @@ impl App {
         }
     }
 
+    /// Pasted text without line breaks, added to the query, which ranks
+    /// the items again.
+    pub(super) fn paste_into_picker(&mut self, text: &str) {
+        if let Some(open) = &mut self.picker
+            && !text.is_empty()
+        {
+            open.picker.query.push_str(text);
+            open.picker.items = open.source.items(&open.picker.query, &self.rooms);
+            open.picker.selected = 0;
+        }
+    }
+
     /// `picker.next` / `picker.prev`, wrapping around.
     pub(super) fn move_picker(&mut self, forward: bool) {
         if let Some(open) = &mut self.picker

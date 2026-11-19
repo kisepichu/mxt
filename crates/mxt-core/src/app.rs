@@ -176,6 +176,7 @@ impl App {
         let mut effects = Vec::new();
         match msg {
             Msg::Key { key, editor } => self.key(key, editor, &mut effects),
+            Msg::Paste { text, editor } => self.paste(text, editor, &mut effects),
             Msg::Timeout { id } => self.timeout(id, &mut effects),
             Msg::RoomUpserted(summary) => self.upsert_room(summary),
             Msg::RoomRemoved(id) => self.remove_room(id, &mut effects),
@@ -368,6 +369,60 @@ impl App {
             self.cancel_completion();
         }
         self.feed(key, effects);
+    }
+
+    /// A paste (design, "Input routing") goes where typed text would go,
+    /// without the keymap: to the editor that has the keys, the first line
+    /// to the command line or the picker query, and nowhere in the room list
+    /// and the timeline. Pending keys end first, as on their timeout, so
+    /// they keep their order with the text; keys pending in another input
+    /// context are dropped, as a key there would drop them. Like any key
+    /// but `y`, a paste cancels a question, and it never answers one that a
+    /// binding ending before it asks.
+    fn paste(&mut self, text: String, editor: Option<EditorMode>, effects: &mut Vec<Effect>) {
+        self.status = None;
+        self.editor = editor;
+        if editor != Some(EditorMode::Insert) {
+            self.cancel_completion();
+        }
+        if self.confirm.take().is_some() {
+            self.resolver.reset();
+            return;
+        }
+        // Keys resolved again after a binding can be pending once more, in
+        // the context the binding left; each round ends at least one key.
+        let context = loop {
+            let context = self.input_context(self.editor);
+            if context != self.key_context {
+                self.resolver.reset();
+                self.key_context = context;
+            }
+            let ended = self.resolver.interrupt(self.keymap.effective(context));
+            if ended.is_empty() {
+                break context;
+            }
+            for next in ended {
+                self.resolved(context.sink(), next, effects);
+            }
+            if self.confirm.is_some() {
+                return;
+            }
+        };
+        match context.sink() {
+            KeySink::Drop => {}
+            KeySink::Editor => effects.push(Effect::Ui(UiEffect::Paste(text))),
+            KeySink::Text => {
+                let mut line = text;
+                if let Some(end) = line.find('\n') {
+                    line.truncate(end);
+                }
+                if self.command_line.is_some() {
+                    self.paste_into_line(&line);
+                } else {
+                    self.paste_into_picker(&line);
+                }
+            }
+        }
     }
 
     /// Resolves `key` in the current input context. The keys the resolver
