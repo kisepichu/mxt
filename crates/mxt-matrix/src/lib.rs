@@ -16,4 +16,4 @@ pub use error::Error;
 pub use matrix_sdk::Client;
 pub use matrix_sdk_ui::sync_service::SyncService;
 pub use recovery::{RecoveryStatus, recover, recovery_status, wait_for_device_keys};
-pub use session::{SavedSession, load_session, login, restore, save_session};
+pub use session::{SavedSession, SessionWatch, load_session, login, restore, save_session};

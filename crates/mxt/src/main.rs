@@ -7,19 +7,27 @@ mod lock;
 mod logging;
 mod paths;
 mod prompt;
+mod startup;
 #[cfg(test)]
 mod test_dir;
 
+use std::env::VarError;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use config::{Config, ConfigError};
-use mxt_core::app::App;
-use mxt_tui::Tui;
-use tokio::sync::mpsc;
+use lock::{DataLock, LockError};
+use paths::Paths;
+use startup::{Invalid, Outcome};
+use tracing::error;
 
 const USAGE: &str = "usage: mxt [--config PATH]\n       mxt --version";
+
+/// How long the runtime's tasks get to stop at exit. Stopping them drops the
+/// last SDK clients, which closes the stores before the data is moved aside.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -36,36 +44,86 @@ fn main() -> ExitCode {
         }
     };
 
-    let env = |name: &str| std::env::var(name).ok();
+    let env = |name: &str| std::env::var_os(name);
     let Some(path) = config_path.or_else(|| config::default_path(&env)) else {
-        eprintln!("mxt: neither XDG_CONFIG_HOME nor HOME is set; pass --config PATH");
+        eprintln!(
+            "mxt: neither XDG_CONFIG_HOME nor HOME is set to an absolute path; pass --config PATH"
+        );
         return ExitCode::FAILURE;
     };
-    let Some(home) = env("HOME").filter(|home| !home.is_empty()) else {
-        eprintln!("mxt: HOME is not set");
+    let Some(home) = env("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+    else {
+        eprintln!("mxt: HOME is not set to an absolute path");
         return ExitCode::FAILURE;
     };
 
-    match config::load(&path, Path::new(&home)) {
-        Ok(config) => run_ui(config),
+    let config = match config::load(&path, &home) {
+        Ok(config) => config,
         Err(ConfigError::NotFound { path }) => {
             eprint!(
                 "mxt: {} does not exist. A minimal configuration:\n\n{}",
                 path.display(),
                 config::MINIMAL_EXAMPLE
             );
-            ExitCode::FAILURE
+            return ExitCode::FAILURE;
         }
         Err(error) => {
             eprintln!("mxt: {error}");
-            ExitCode::FAILURE
+            return ExitCode::FAILURE;
         }
+    };
+    // `HOME` is absolute, so every directory has its fallback.
+    let Some(paths) = Paths::from_env(&env) else {
+        eprintln!("mxt: HOME is not set to an absolute path");
+        return ExitCode::FAILURE;
+    };
+    if let Err(message) = paths.check_separate() {
+        eprintln!("mxt: {message}");
+        return ExitCode::FAILURE;
     }
+    run(config, &paths)
 }
 
-/// The terminal UI until `:q`.
-fn run_ui(config: Config) -> ExitCode {
-    let mut app = App::new(config.keymap, config.settings, config.user_id);
+/// Everything after the configuration: the directories, the lock, the log,
+/// then the startup flow until `:q`. The lock is released last.
+fn run(config: Config, paths: &Paths) -> ExitCode {
+    if let Err(error) = paths.create_dirs() {
+        eprintln!("mxt: {error}");
+        return ExitCode::FAILURE;
+    }
+    let lock_file = paths.lock_file();
+    let _lock = match DataLock::acquire(&lock_file) {
+        Ok(lock) => lock,
+        Err(LockError::Held) => {
+            eprintln!(
+                "mxt: another mxt is running (lock: {})",
+                lock_file.display()
+            );
+            return ExitCode::FAILURE;
+        }
+        Err(LockError::Io(error)) => {
+            eprintln!("mxt: {}: {error}", lock_file.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let filter = match std::env::var("MXT_LOG") {
+        Ok(filter) => Some(filter),
+        Err(VarError::NotPresent) => None,
+        Err(VarError::NotUnicode(_)) => {
+            eprintln!("mxt: MXT_LOG is not valid UTF-8");
+            return ExitCode::FAILURE;
+        }
+    };
+    let _log = match logging::init_logging(&paths.state, filter.as_deref()) {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!("mxt: logging: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -76,26 +134,62 @@ fn run_ui(config: Config) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    mxt_tui::install_panic_hook();
-    let mut tui = match Tui::new() {
-        Ok(tui) => tui,
-        Err(error) => {
-            eprintln!("mxt: cannot set up the terminal: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    // The matrix adapter (the sync task) takes `_to_core` and
-    // `_matrix_effects`; until then they stay open, so the loop sees neither
-    // channel closed.
-    let (_to_core, from_matrix) = mpsc::unbounded_channel();
-    let (to_matrix, _matrix_effects) = mpsc::unbounded_channel();
-    let result = runtime.block_on(event_loop::run(&mut app, &mut tui, from_matrix, to_matrix));
-    let restored = tui.restore();
-    match result.and(restored) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("mxt: terminal: {error}");
+    let outcome = runtime.block_on(startup::run(config, paths));
+    runtime.shutdown_timeout(SHUTDOWN_TIMEOUT);
+    match outcome {
+        Outcome::Quit => ExitCode::SUCCESS,
+        Outcome::Failed(message) => {
+            error!("{message}");
+            eprintln!("mxt: {message}");
             ExitCode::FAILURE
+        }
+        Outcome::FirstLoginFailed(message) => {
+            error!("{message}");
+            eprintln!("mxt: {message}");
+            if let Err(failure) = invalidate::discard_new_store(paths) {
+                error!("deleting the new store failed: {failure}");
+                eprintln!("mxt: deleting the new store failed: {failure}");
+            }
+            ExitCode::FAILURE
+        }
+        Outcome::Invalid(reason) => {
+            set_aside(paths, reason);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Moves the data of a session that cannot be used any more aside, so the
+/// next start logs in as a new device with fresh stores.
+fn set_aside(paths: &Paths, reason: Invalid) {
+    let (why, device) = match reason {
+        Invalid::UnknownToken => (
+            "the homeserver no longer accepts this session (M_UNKNOWN_TOKEN)".to_owned(),
+            "",
+        ),
+        // The access token may still be valid; it moves aside with the data.
+        Invalid::MissingStore => (
+            format!(
+                "the session has no store ({} is missing), and a new store would give this \
+                 device new encryption keys",
+                paths.store_dir().display()
+            ),
+            " The old device stays in the account's device list and can be removed from \
+             another client.",
+        ),
+    };
+    match invalidate::invalidate(paths, invalidate::unix_seconds()) {
+        Ok(moved) => {
+            error!("{why}; moved the data to {}", moved.display());
+            eprintln!(
+                "mxt: {why}. The old data was moved to {}; the next start logs in as a new \
+                 device.{device}",
+                moved.display()
+            );
+        }
+        Err(failure) => {
+            error!("{why}; moving the data aside failed: {failure}");
+            eprintln!("mxt: {why}, and moving the old data aside failed: {failure}");
         }
     }
 }

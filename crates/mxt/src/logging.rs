@@ -15,7 +15,6 @@ const DEFAULT_FILTER: &str = "warn,mxt=info,mxt_core=info,mxt_matrix=info,mxt_tu
 /// timestamps are UTC. `filter` is `MXT_LOG`, an `EnvFilter` directive; unset
 /// or empty means the default. Keep the guard until exit: dropping it flushes
 /// the remaining lines.
-#[allow(dead_code)] // Used by `main` once the startup flow is wired.
 pub fn init_logging(
     state_dir: &Path,
     filter: Option<&str>,

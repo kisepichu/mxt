@@ -158,6 +158,8 @@ pub enum Binding {
 pub struct ActionSpec {
     pub name: String,
     pub args: Vec<(String, ArgValue)>,
+    /// Where each argument's name starts in the file, in the order of `args`.
+    pub arg_starts: Vec<usize>,
 }
 
 impl<'de> Deserialize<'de> for Binding {
@@ -212,22 +214,29 @@ impl<'de> Visitor<'de> for ActionVisitor {
         Ok(ActionSpec {
             name: name.to_owned(),
             args: Vec::new(),
+            arg_starts: Vec::new(),
         })
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<ActionSpec, A::Error> {
         let mut name = None;
         let mut args = Vec::new();
-        while let Some(key) = map.next_key::<String>()? {
-            if key == "action" {
+        let mut arg_starts = Vec::new();
+        while let Some(key) = map.next_key::<Spanned<String>>()? {
+            if key.get_ref() == "action" {
                 name = Some(map.next_value()?);
             } else {
                 let Arg(value) = map.next_value()?;
-                args.push((key, value));
+                arg_starts.push(key.span().start);
+                args.push((key.into_inner(), value));
             }
         }
         let name = name.ok_or_else(|| de::Error::missing_field("action"))?;
-        Ok(ActionSpec { name, args })
+        Ok(ActionSpec {
+            name,
+            args,
+            arg_starts,
+        })
     }
 }
 

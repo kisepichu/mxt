@@ -4,6 +4,8 @@ use mxt_core::keymap::InputContext;
 use mxt_core::keys::KeySeq;
 use mxt_core::rooms::RoomSort;
 use mxt_core::settings::{ImagePreview, ReceiptKind};
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Path, PathBuf};
 
 fn ok(text: &str) -> Config {
@@ -113,6 +115,62 @@ fn settings_are_read() {
     assert_eq!(c.settings.image_preview, ImagePreview::Off);
     assert_eq!(c.download_dir, PathBuf::from("/tmp/dl"));
     assert_eq!(c.opener, vec!["wslview".to_string()]);
+}
+
+#[test]
+fn homeserver_and_time_format_are_read() {
+    let c = ok(&format!(
+        "{MINIMAL}homeserver = \"https://matrix.example.org\"\n[ui]\ntime_format = \"%Y-%m-%d %H:%M\"\n"
+    ));
+    assert_eq!(c.homeserver.as_deref(), Some("https://matrix.example.org"));
+    assert_eq!(c.time_format, "%Y-%m-%d %H:%M");
+}
+
+#[test]
+fn a_homeserver_needs_a_scheme() {
+    let (line, msg) = err(&format!("{MINIMAL}homeserver = \"matrix.example.org\"\n"));
+    assert_eq!(line, 3);
+    assert!(msg.contains("account.homeserver"), "{msg}");
+}
+
+#[test]
+fn the_download_dir_must_be_absolute() {
+    for value in ["~alice/dl", "Downloads", ""] {
+        let (line, msg) = err(&format!("{MINIMAL}[files]\ndownload_dir = {value:?}\n"));
+        assert_eq!(line, 4, "{value:?}");
+        assert!(
+            msg.contains("files.download_dir") && msg.contains(&format!("{value:?}")),
+            "{msg}"
+        );
+    }
+    let c = ok(&format!("{MINIMAL}[files]\ndownload_dir = \"~/dl\"\n"));
+    assert_eq!(c.download_dir, PathBuf::from("/home/alice/dl"));
+}
+
+#[test]
+fn argument_errors_point_at_the_argument() {
+    // A binding written as a `[header]` table spans only its header line.
+    let header =
+        |args: &str| format!("{MINIMAL}[keymap.normal.\"]u\"]\naction = \"room.open\"\n{args}");
+    for (args, line) in [
+        // An unknown argument.
+        ("filter = \"unread\"\npik = \"next\"\n", 6),
+        // A wrong type.
+        ("filter = 3\n", 5),
+        // An invalid value.
+        ("pick = \"next\"\nfilter = \"unred\"\n", 6),
+        // A conflict: the later of the two in the file.
+        ("pick = \"next\"\nfilter = \"all\"\nquery = \"x\"\n", 7),
+        ("query = \"x\"\npick = \"next\"\n", 6),
+    ] {
+        assert_eq!(err(&header(args)).0, line, "{args}");
+    }
+    // Errors about the action as a whole stay at the binding.
+    let (line, msg) = err(&format!(
+        "{MINIMAL}[keymap.normal.x]\naction = \"file.upload\"\n"
+    ));
+    assert_eq!(line, 3);
+    assert!(msg.contains("path"), "{msg}");
 }
 
 #[test]
@@ -254,16 +312,29 @@ fn default_path_follows_xdg() {
         move |k: &str| {
             vars.iter()
                 .find(|(n, _)| *n == k)
-                .map(|(_, v)| v.to_string())
+                .map(|(_, v)| OsString::from(v))
         }
     };
     assert_eq!(
         default_path(&env(&[("XDG_CONFIG_HOME", "/x"), ("HOME", "/home/alice")])),
         Some(PathBuf::from("/x/mxt/config.toml"))
     );
+    let fallback = Some(PathBuf::from("/home/alice/.config/mxt/config.toml"));
     assert_eq!(
         default_path(&env(&[("XDG_CONFIG_HOME", ""), ("HOME", "/home/alice")])),
-        Some(PathBuf::from("/home/alice/.config/mxt/config.toml"))
+        fallback
+    );
+    assert_eq!(
+        default_path(&env(&[("XDG_CONFIG_HOME", "x"), ("HOME", "/home/alice")])),
+        fallback
     );
     assert_eq!(default_path(&env(&[])), None);
+    assert_eq!(default_path(&env(&[("HOME", "home/alice")])), None);
+
+    // A value that is not UTF-8 is used as it is.
+    let config = OsString::from_vec(b"/x\xff".to_vec());
+    assert_eq!(
+        default_path(&|name: &str| (name == "XDG_CONFIG_HOME").then(|| config.clone())),
+        Some(PathBuf::from(config.clone()).join("mxt/config.toml"))
+    );
 }
