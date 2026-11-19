@@ -863,10 +863,10 @@ fn the_emoji_picker_lists_reacted_and_common_emoji_first_and_toggles_one() {
     assert_eq!(app.timeline_cursor(), Some(0));
 }
 
+/// `R`, bound by default, resends the failed local echo under the cursor.
 #[test]
-fn message_resend_sends_a_failed_local_echo_again() {
-    let resend = Binding::single(Action::MessageResend);
-    let mut app = app_with(vec![(TableId::Timeline, seq("R"), resend)]);
+fn capital_r_resends_a_failed_local_echo() {
+    let mut app = app();
     keys(&mut app, "<CR>");
     let failed = SendState::Failed {
         error: "boom".into(),

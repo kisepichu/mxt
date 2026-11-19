@@ -114,6 +114,10 @@ one. There is no search on the server.
 | `+` | `message.react` | react with the emoji picker; an emoji you already chose removes your reaction |
 | `gx` | `message.open` | open the link, or download and open the attachment |
 | `gd` | `message.goto_reply` | go to the message this one replies to |
+| `R` | `message.resend` | send a message marked `failed` again |
+
+A message that failed for a passing reason, such as a lost connection, also
+goes out by itself once the sync is back; `R` is for the others.
 
 ### `composer.insert`, `composer.normal` and `composer.completion`
 
@@ -149,7 +153,6 @@ use the commands below:
 |---|---|
 | `room.open` with `filter`, `pick` or `query`, for example "open the next unread room" | `:open <room>` |
 | `room.mark_read` | |
-| `message.resend` | |
 | `room.mute`, `room.unmute` | `:mute`, `:unmute` |
 | `file.upload` | `:upload <path>` |
 | `account.recover` | `:recover` |
@@ -176,10 +179,6 @@ user_id = "@alice:example.org"
 [keymap.normal]
 "<leader>x" = "room.mark_read"
 ```
-
-`message.resend` sends a message marked `failed` again. A message that
-failed for a passing reason, such as a lost connection, also goes out by
-itself once the sync is back.
 
 ## Commands
 

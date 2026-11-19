@@ -375,7 +375,7 @@ covered by unit tests.
   request; mxt enables it again on every write and whenever the sync state
   becomes synced, so a message that failed for a transient reason goes out
   when the connection returns. A failed message or upload stays as a local
-  echo with a failed marker until `message.resend` or its deletion, and
+  echo with a failed marker until `message.resend` (`R`) or its deletion, and
   holds back the room's later requests until then. An edit or reaction that
   the server refuses for good would block the room's queue; mxt aborts it
   and reports the failure, and a refused edit of a sent message is answered
@@ -677,6 +677,7 @@ instead, and it never takes more than half of the width.
 | `timeline` | `+` | `message.react` (opens the emoji picker) | |
 | `timeline` | `gx` | `message.open` (link or attachment) | `gx` |
 | `timeline` | `gd` | `message.goto_reply` (the replied-to message) | go to definition |
+| `timeline` | `R` | `message.resend` (a failed message) | |
 | `composer.insert` | `<CR>` | `composer.send` | |
 | `composer.insert` | `<C-j>` | `composer.newline` | |
 | `composer.insert`, `composer.normal` | `<C-x><C-e>` | `composer.external_editor` | shell edit-command-line |
@@ -703,6 +704,8 @@ query is matched against shortcodes and names.
 There is no default binding for "open the next unread room". The action exists
 and users bind it themselves, for example
 `"]u" = { action = "room.open", filter = "unread", pick = "next" }`.
+`room.mark_read` has no default binding either; the configuration example
+binds it to `<leader>x` together with opening the next unread room.
 
 ### Search and jumps
 
@@ -978,11 +981,11 @@ platforms.
 - Events that cannot be decrypted yet show a placeholder. With
   `AfterDecryptionFailure` the SDK asks the key backup for the missing key,
   and the `Timeline` retries decryption when a key arrives.
-- Failed sends keep the local echo with a failed marker. `message.resend` sends
-  it again; a transient failure also goes out by itself when the sync is back.
-  Edits and reactions that the server refuses for good are dropped from the
-  send queue with an error in the status line (see "The send queue"); an
-  edit of a sent message gets its draft back as below.
+- Failed sends keep the local echo with a failed marker. `message.resend`
+  (`R`) sends it again; a transient failure also goes out by itself when the
+  sync is back. Edits and reactions that the server refuses for good are
+  dropped from the send queue with an error in the status line (see "The
+  send queue"); an edit of a sent message gets its draft back as below.
 - A message that cannot be queued (its room is not open, or the replied-to or
   edited event cannot be fetched) gets no local echo. `MatrixEffect::Send`
   carries a `SendId`, and the matrix adapter answers it with
