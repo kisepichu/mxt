@@ -132,20 +132,27 @@ async fn next_updates<T: Clone>(
 }
 
 /// Joined rooms that are not spaces, only the active version of an upgraded
-/// room: as in matrix-sdk-ui's room list, a room whose successor the user
-/// has joined, left or been banned from is not listed.
+/// room (see `active_version`).
 fn is_listed(client: &Client, room: &Room) -> bool {
     room.state() == RoomState::Joined
         && !room.is_space()
-        && room
-            .successor_room()
-            .and_then(|successor| client.get_room(&successor.room_id))
-            .is_none_or(|successor| {
-                !matches!(
-                    successor.state(),
-                    RoomState::Joined | RoomState::Left | RoomState::Banned
-                )
-            })
+        && active_version(
+            room.successor_room()
+                .and_then(|successor| client.get_room(&successor.room_id))
+                .map(|successor| successor.state()),
+        )
+}
+
+/// Whether a room is the active version of an upgraded room, from the state
+/// of the room that replaced it (`None`: none did, or the client does not
+/// know it). As in matrix-sdk-ui's room list, a successor the user has
+/// joined, left or been banned from replaces the room; an invitation to it
+/// or a knock on it does not.
+fn active_version(successor: Option<RoomState>) -> bool {
+    !matches!(
+        successor,
+        Some(RoomState::Joined | RoomState::Left | RoomState::Banned)
+    )
 }
 
 /// The room list state of `run`.
@@ -671,6 +678,17 @@ mod tests {
                 removed: vec![left, old],
             }
         );
+    }
+
+    #[test]
+    fn only_a_successor_the_user_joined_left_or_was_banned_from_hides_a_room() {
+        assert!(active_version(None));
+        for kept in [RoomState::Invited, RoomState::Knocked] {
+            assert!(active_version(Some(kept)), "{kept:?}");
+        }
+        for replaced in [RoomState::Joined, RoomState::Left, RoomState::Banned] {
+            assert!(!active_version(Some(replaced)), "{replaced:?}");
+        }
     }
 
     #[test]
