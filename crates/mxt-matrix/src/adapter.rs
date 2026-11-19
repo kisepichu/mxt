@@ -1,15 +1,19 @@
 //! The `Matrix` handle: runs the tasks that report to the core while the
 //! sync loop runs, and executes matrix effects.
 
+use std::sync::Arc;
+
 use matrix_sdk::{
-    Client, Room,
+    Client, Room, RoomMemberships,
     latest_events::LatestEventValue,
-    room::Receipts,
-    ruma::{self, OwnedEventId},
+    room::{Receipts, RoomMember},
+    ruma::OwnedEventId,
 };
+use matrix_sdk_ui::Timeline;
 use mxt_core::{
     effect::MatrixEffect,
-    ids::{EventId, RoomId},
+    ids::{EventId, RoomId, UserId},
+    mention::Member,
     msg::{Msg, SyncState},
     settings::ReceiptKind,
 };
@@ -22,7 +26,12 @@ use tokio::{
 };
 use tracing::{debug, warn};
 
-use crate::{Error, SyncLoop, error::without_url, rooms, timeline::Subscription};
+use crate::{
+    Error, SyncLoop,
+    error::without_url,
+    rooms,
+    timeline::{Subscription, event_id, redact, resend, send_message, toggle_reaction},
+};
 
 /// The running matrix adapter.
 pub struct Matrix {
@@ -99,8 +108,9 @@ async fn watch_sync(mut state: watch::Receiver<SyncState>, to_core: UnboundedSen
     }
 }
 
-/// Subscriptions run in order, so the last one wins; receipts and back
-/// pagination run concurrently.
+/// Subscriptions and sends run in order, so the last subscription wins and
+/// messages are queued in the order they were sent; the rest runs
+/// concurrently.
 async fn run_effects(
     client: Client,
     receipts: ReceiptKind,
@@ -125,20 +135,14 @@ async fn run_effects(
                     }
                 }
                 Some(MatrixEffect::MarkRoomRead(room)) => {
-                    let (client, to_core) = (client.clone(), to_core.clone());
-                    running.spawn(async move {
-                        if let Err(error) = mark_read(&client, &room, receipts).await {
-                            report(&to_core, "Marking the room as read failed", &error);
-                        }
-                    });
+                    let client = client.clone();
+                    let marked = async move { mark_read(&client, &room, receipts).await };
+                    running.spawn(reported(&to_core, "Marking the room as read failed", marked));
                 }
                 Some(MatrixEffect::SendReceipt { room, event }) => {
-                    let (client, to_core) = (client.clone(), to_core.clone());
-                    running.spawn(async move {
-                        if let Err(error) = send_receipt(&client, &room, &event, receipts).await {
-                            report(&to_core, "Sending the read receipt failed", &error);
-                        }
-                    });
+                    let client = client.clone();
+                    let sent = async move { send_receipt(&client, &room, &event, receipts).await };
+                    running.spawn(reported(&to_core, "Sending the read receipt failed", sent));
                 }
                 Some(MatrixEffect::PaginateBackwards(room)) => {
                     match timeline.as_mut().filter(|open| *open.room() == room) {
@@ -148,20 +152,41 @@ async fn run_effects(
                         None => {
                             let _ = to_core.send(Msg::PaginationFailed {
                                 room,
-                                error: "the room's timeline is not open".to_owned(),
+                                error: Error::TimelineNotOpen.to_string(),
                             });
                         }
                     }
                 }
-                // Sending, reactions, redactions and members arrive in
-                // phase 3 Task 3.
-                Some(
-                    MatrixEffect::Send { .. }
-                    | MatrixEffect::LoadMembers(_)
-                    | MatrixEffect::Redact { .. }
-                    | MatrixEffect::ToggleReaction { .. }
-                    | MatrixEffect::Resend { .. },
-                ) => {}
+                // Awaited here: queueing is quick unless a reply or an edit
+                // has to fetch its target event, and a later message must not
+                // overtake it.
+                Some(MatrixEffect::Send { room, message }) => {
+                    let sent = match open_timeline(&timeline, &room) {
+                        Ok(open) => send_message(&open, message).await,
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = sent {
+                        report(&to_core, "Sending the message failed", &error);
+                    }
+                }
+                Some(MatrixEffect::ToggleReaction { room, item, key }) => {
+                    let open = open_timeline(&timeline, &room);
+                    let toggled = async move { toggle_reaction(&*open?, &item, &key).await };
+                    running.spawn(reported(&to_core, "Reacting failed", toggled));
+                }
+                Some(MatrixEffect::Redact { room, item }) => {
+                    let open = open_timeline(&timeline, &room);
+                    let redacted = async move { redact(&*open?, &item).await };
+                    running.spawn(reported(&to_core, "Deleting the message failed", redacted));
+                }
+                Some(MatrixEffect::Resend { room, txn }) => {
+                    let open = open_timeline(&timeline, &room);
+                    let resent = async move { resend(&*open?, &txn).await };
+                    running.spawn(reported(&to_core, "Resending the message failed", resent));
+                }
+                Some(MatrixEffect::LoadMembers(room)) => {
+                    running.spawn(load_members(client.clone(), room, to_core.clone()));
+                }
                 // Notification modes and media arrive in phase 4 Task 2.
                 Some(
                     MatrixEffect::SetMute { .. }
@@ -174,6 +199,80 @@ async fn run_effects(
             Some(finished) = running.join_next(), if !running.is_empty() => pass_on(finished),
             Some(finished) = timeline_task(&mut timeline) => pass_on(finished),
         }
+    }
+}
+
+/// `effect`, with its failure reported as `what`.
+fn reported<F>(
+    to_core: &UnboundedSender<Msg>,
+    what: &'static str,
+    effect: F,
+) -> impl Future<Output = ()> + use<F>
+where
+    F: Future<Output = Result<(), Error>>,
+{
+    let to_core = to_core.clone();
+    async move {
+        if let Err(error) = effect.await {
+            report(&to_core, what, &error);
+        }
+    }
+}
+
+/// `room`'s timeline if it is the open one: sending, reactions and
+/// redactions act on its items.
+fn open_timeline(timeline: &Option<Subscription>, room: &RoomId) -> Result<Arc<Timeline>, Error> {
+    timeline
+        .as_ref()
+        .filter(|open| open.room() == room)
+        .map(Subscription::timeline)
+        .ok_or(Error::TimelineNotOpen)
+}
+
+/// Answers with `Msg::MembersLoaded` at least once, so mention completion
+/// does not wait for an answer that never comes. With lazy-loaded members,
+/// the ones the store has (the senders of loaded events, for example) go
+/// first, so completion works while the full list loads, which takes a
+/// while in large bridged rooms; then the full list. This is the one full
+/// load above `MEMBERS_FETCH_LIMIT` too: completion needs it, and the core
+/// asks once per room. When loading fails, what loaded before stays, or the
+/// answer is empty.
+async fn load_members(client: Client, room: RoomId, to_core: UnboundedSender<Msg>) {
+    let answer = |members: Vec<RoomMember>| {
+        let members = members.iter().map(member).collect();
+        let _ = to_core.send(Msg::MembersLoaded {
+            room: room.clone(),
+            members,
+        });
+    };
+    let mut answered = false;
+    let loaded = async {
+        let sdk_room = sdk_room(&client, &room)?;
+        let sdk_error = |error| Error::from(without_url(error));
+        if !sdk_room.are_members_synced() {
+            let stored = sdk_room.members_no_sync(RoomMemberships::JOIN).await;
+            answer(stored.map_err(sdk_error)?);
+            answered = true;
+        }
+        let all = sdk_room.members(RoomMemberships::JOIN).await;
+        all.map_err(sdk_error)
+    }
+    .await;
+    match loaded {
+        Ok(members) => answer(members),
+        Err(error) => {
+            report(&to_core, "Loading the room's members failed", &error);
+            if !answered {
+                answer(Vec::new());
+            }
+        }
+    }
+}
+
+fn member(member: &RoomMember) -> Member {
+    Member {
+        user: UserId::new(member.user_id().as_str()),
+        display_name: member.display_name().map(ToOwned::to_owned),
     }
 }
 
@@ -234,7 +333,7 @@ async fn send_receipt(
     receipts: ReceiptKind,
 ) -> Result<(), Error> {
     let room = sdk_room(client, room)?;
-    let event = ruma::EventId::parse(event.as_str()).map_err(|_| Error::InvalidEventId)?;
+    let event = event_id(event)?;
     room.send_multiple_receipts(read_up_to(event, receipts))
         .await
         .map_err(|error| without_url(error).into())
