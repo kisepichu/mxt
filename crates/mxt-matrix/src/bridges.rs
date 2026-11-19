@@ -12,6 +12,9 @@ use crate::Error;
 
 const M_BRIDGE: &str = "m.bridge";
 const HALF_SHOT_BRIDGE: &str = "uk.half-shot.bridge";
+/// The room type keys mautrix bridges add to their bridge state, the newer
+/// first.
+const ROOM_TYPE_KEYS: [&str; 2] = ["com.beeper.room_type.v2", "com.beeper.room_type"];
 
 /// What a room's bridge state says.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,6 +23,20 @@ pub(crate) struct Bridge {
     /// The bridge's bot (`bridgebot`), which is a member of the rooms it
     /// bridges, direct messages included.
     pub bot: Option<OwnedUserId>,
+    /// The room type the bridge declares; `None` when it declares none, as
+    /// mautrix bridges do for ordinary channels.
+    pub room_type: Option<RoomType>,
+}
+
+/// A room type from `com.beeper.room_type.v2` (`dm`, `group_dm` or `space`
+/// in mautrix bridges), else from `com.beeper.room_type` (`dm` for direct
+/// and group direct messages).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RoomType {
+    Dm,
+    GroupDm,
+    /// `space`, or a type mxt does not know.
+    Other,
 }
 
 /// The room's bridge from its `m.bridge` and `uk.half-shot.bridge` state,
@@ -53,9 +70,9 @@ fn content(raw: &RawAnySyncOrStrippedState) -> Option<Value> {
 }
 
 /// One room's bridge from its bridge state events: the first network and
-/// the first protocol display name, and the first bridge bot, `m.bridge`
-/// events before `uk.half-shot.bridge` ones. `None` when no event has
-/// content; a bridge removes its state by emptying it.
+/// the first protocol display name, the first bridge bot and the first room
+/// type, `m.bridge` events before `uk.half-shot.bridge` ones. `None` when no
+/// event has content; a bridge removes its state by emptying it.
 fn room_bridge<'a>(events: impl Iterator<Item = (&'a str, &'a Value)>) -> Option<Bridge> {
     let mut bridges: Vec<(bool, Bridge)> = events
         .filter(|(_, content)| content.as_object().is_some_and(|c| !c.is_empty()))
@@ -81,12 +98,14 @@ fn room_bridge<'a>(events: impl Iterator<Item = (&'a str, &'a Value)>) -> Option
             protocol: first(|info| &info.protocol),
         },
         bot: bridges.iter().find_map(|(_, bridge)| bridge.bot.clone()),
+        room_type: bridges.iter().find_map(|(_, bridge)| bridge.room_type),
     })
 }
 
-/// `content.network.displayname`, `content.protocol.displayname` and
-/// `content.bridgebot` of an `m.bridge` or `uk.half-shot.bridge` state
-/// event's content. Blank names and invalid user IDs count as missing.
+/// `content.network.displayname`, `content.protocol.displayname`,
+/// `content.bridgebot` and the room type of an `m.bridge` or
+/// `uk.half-shot.bridge` state event's content. Blank names, blank room types
+/// and invalid user IDs count as missing.
 fn parse_bridge(content: &Value) -> Bridge {
     let display_name = |key: &str| {
         content
@@ -105,6 +124,19 @@ fn parse_bridge(content: &Value) -> Bridge {
             .get("bridgebot")
             .and_then(Value::as_str)
             .and_then(|bot| UserId::parse(bot).ok()),
+        room_type: ROOM_TYPE_KEYS
+            .iter()
+            .find_map(|key| {
+                content
+                    .get(key)?
+                    .as_str()
+                    .filter(|room_type| !room_type.trim().is_empty())
+            })
+            .map(|room_type| match room_type {
+                "dm" => RoomType::Dm,
+                "group_dm" => RoomType::GroupDm,
+                _ => RoomType::Other,
+            }),
     }
 }
 
@@ -122,6 +154,7 @@ mod tests {
                 protocol: protocol.map(Into::into),
             },
             bot: None,
+            room_type: None,
         }
     }
 
@@ -169,14 +202,47 @@ mod tests {
     }
 
     #[test]
+    fn parse_bridge_reads_the_room_type_v2_before_the_first_version() {
+        let room_type = |content| parse_bridge(&content).room_type;
+        // mautrix-discord: a group direct message.
+        assert_eq!(
+            room_type(
+                json!({ "com.beeper.room_type": "dm", "com.beeper.room_type.v2": "group_dm" })
+            ),
+            Some(RoomType::GroupDm)
+        );
+        assert_eq!(
+            room_type(json!({ "com.beeper.room_type": "dm" })),
+            Some(RoomType::Dm)
+        );
+        assert_eq!(
+            room_type(json!({ "com.beeper.room_type.v2": "space" })),
+            Some(RoomType::Other)
+        );
+        // A blank or non-string v2 type counts as missing.
+        assert_eq!(
+            room_type(json!({ "com.beeper.room_type.v2": " ", "com.beeper.room_type": "dm" })),
+            Some(RoomType::Dm)
+        );
+        assert_eq!(room_type(json!({ "com.beeper.room_type.v2": 1 })), None);
+        // Guild channels declare none.
+        assert_eq!(
+            room_type(json!({ "network": { "displayname": "myserver" } })),
+            None
+        );
+    }
+
+    #[test]
     fn room_bridge_prefers_m_bridge_and_ignores_emptied_state() {
         let half_shot = json!({
             "bridgebot": "@halfshotbot:example.org",
             "network": { "displayname": "half-shot network" },
+            "com.beeper.room_type": "dm",
         });
         let m_bridge = json!({
             "bridgebot": "@discordbot:example.org",
             "protocol": { "displayname": "Discord" },
+            "com.beeper.room_type.v2": "group_dm",
         });
         let removed = json!({});
         let events = [
@@ -188,6 +254,7 @@ mod tests {
             room_bridge(events.into_iter()),
             Some(Bridge {
                 bot: Some(owned_user_id!("@discordbot:example.org")),
+                room_type: Some(RoomType::GroupDm),
                 ..info(Some("half-shot network"), Some("Discord"))
             })
         );
@@ -200,6 +267,7 @@ mod tests {
             room_bridge(events.into_iter()),
             Some(Bridge {
                 bot: Some(owned_user_id!("@halfshotbot:example.org")),
+                room_type: Some(RoomType::Dm),
                 ..info(Some("myserver"), None)
             })
         );

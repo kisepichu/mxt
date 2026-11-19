@@ -409,8 +409,11 @@ async fn room_facts(
     room: &Room,
 ) -> Result<(RoomFacts, Vec<Parent>), Error> {
     let bridge = bridges::bridge(room).await?;
-    let bot = bridge.as_ref().and_then(|bridge| bridge.bot.as_deref());
-    let (is_direct, dm_partner_name) = match bridged_dm_partner_name(room, bot).await? {
+    let bridged_partner = match &bridge {
+        Some(bridge) => bridged_dm_partner_name(room, bridge).await?,
+        None => None,
+    };
+    let (is_direct, dm_partner_name) = match bridged_partner {
         Some(name) => (true, Some(name)),
         None if room.is_direct().await? => (true, dm_partner_name(room).await?),
         None => (false, None),
@@ -460,18 +463,22 @@ async fn dm_partner_name(room: &Room) -> Result<Option<String>, Error> {
         .filter(|name| !name.trim().is_empty()))
 }
 
-/// The other person of a bridged direct message (see `bridged_dm_partner`),
-/// from the store only: no `/members` request.
+/// The other person of a bridged direct message (see `DmCandidate`), from
+/// the store only: no `/members` request.
 async fn bridged_dm_partner_name(
     room: &Room,
-    bot: Option<&ruma::UserId>,
+    bridge: &bridges::Bridge,
 ) -> Result<Option<String>, Error> {
-    let joined_count = room.joined_members_count();
-    // The user and one person, with or without the bot; other rooms are not
-    // read.
-    if bot.is_none() || !(2..=3).contains(&joined_count) {
+    let Some(bot) = bridge.bot.as_deref() else {
         return Ok(None);
-    }
+    };
+    // The SDK counts an empty `m.room.name` as none.
+    let named = room.name().is_some();
+    let joined_count = room.joined_members_count();
+    // Other rooms' members are not read.
+    let Some(candidate) = DmCandidate::new(bot, bridge.room_type, named, joined_count) else {
+        return Ok(None);
+    };
     let members = room.members_no_sync(RoomMemberships::JOIN).await?;
     let joined: Vec<JoinedMember<'_>> = members
         .iter()
@@ -480,12 +487,7 @@ async fn bridged_dm_partner_name(
             display_name: member.display_name(),
         })
         .collect();
-    Ok(bridged_dm_partner(
-        room.own_user_id(),
-        bot,
-        joined_count,
-        &joined,
-    ))
+    Ok(candidate.partner(room.own_user_id(), &joined))
 }
 
 /// A joined member as the store knows it.
@@ -494,40 +496,61 @@ struct JoinedMember<'a> {
     display_name: Option<&'a str>,
 }
 
-/// The name of the person a bridged room is a direct message with (phase 0
-/// finding 2). Bridges such as mautrix-discord keep their bot (`bot`, from
+/// A bridged room that may be a direct message (phase 0 finding 2), before
+/// its members are read. Bridges such as mautrix-discord keep their bot (from
 /// the bridge state) in the direct messages they bridge, so the room has two
-/// other members and the SDK names it after both. A room whose joined
-/// members other than the user and the bridge bot are exactly one person
-/// is a direct message with that person.
-///
-/// Members are lazy-loaded, so `joined` (from the store) may lack members
-/// that `joined_count` (from the server) counts: the person must be the
-/// only joined member the count leaves besides the user and the bot. The
-/// name is the display name, or the user ID without one.
-fn bridged_dm_partner(
-    me: &ruma::UserId,
-    bot: Option<&ruma::UserId>,
+/// other members and the SDK names it after both.
+struct DmCandidate<'a> {
+    bot: &'a ruma::UserId,
     joined_count: u64,
-    joined: &[JoinedMember<'_>],
-) -> Option<String> {
-    let bot = bot?;
-    let bot_joined = joined.iter().any(|member| member.id == bot);
-    if joined_count.checked_sub(1 + u64::from(bot_joined)) != Some(1) {
-        return None;
+}
+
+impl<'a> DmCandidate<'a> {
+    /// A room the bridge declares a direct message (`dm`), or one it declares
+    /// no type for and that has no `m.room.name`, with the user and one
+    /// person besides the bot (`joined_count`, from the server). mautrix
+    /// bridges declare no type for channels either, but name them after the
+    /// channel, so a named channel where only one person has spoken is not
+    /// taken for a direct message. Group direct messages, spaces and other
+    /// declared types never are.
+    fn new(
+        bot: &'a ruma::UserId,
+        room_type: Option<bridges::RoomType>,
+        named: bool,
+        joined_count: u64,
+    ) -> Option<DmCandidate<'a>> {
+        let may_be_dm = match room_type {
+            Some(bridges::RoomType::Dm) => true,
+            Some(bridges::RoomType::GroupDm | bridges::RoomType::Other) => false,
+            None => !named,
+        };
+        (may_be_dm && (2..=3).contains(&joined_count)).then_some(DmCandidate { bot, joined_count })
     }
-    let mut others = joined
-        .iter()
-        .filter(|member| member.id != me && member.id != bot);
-    let (Some(person), None) = (others.next(), others.next()) else {
-        return None;
-    };
-    Some(
-        person
-            .display_name
-            .filter(|name| !name.trim().is_empty())
-            .map_or_else(|| person.id.to_string(), str::to_owned),
-    )
+
+    /// The name of the person the room is a direct message with: the only
+    /// joined member besides the user (`me`) and the bot. Members are
+    /// lazy-loaded, so `joined` (from the store) may lack members that the
+    /// server counts: the person must be the only joined member the count
+    /// leaves besides the user and the bot. The name is the display name, or
+    /// the user ID without one.
+    fn partner(&self, me: &ruma::UserId, joined: &[JoinedMember<'_>]) -> Option<String> {
+        let bot_joined = joined.iter().any(|member| member.id == self.bot);
+        if self.joined_count.checked_sub(1 + u64::from(bot_joined)) != Some(1) {
+            return None;
+        }
+        let mut others = joined
+            .iter()
+            .filter(|member| member.id != me && member.id != self.bot);
+        let (Some(person), None) = (others.next(), others.next()) else {
+            return None;
+        };
+        Some(
+            person
+                .display_name
+                .filter(|name| !name.trim().is_empty())
+                .map_or_else(|| person.id.to_string(), str::to_owned),
+        )
+    }
 }
 
 /// The room's notification rule. Without one (`None` from the SDK) the
@@ -602,6 +625,7 @@ mod tests {
     use matrix_sdk::ruma::{owned_room_id, user_id};
 
     use super::*;
+    use crate::bridges::RoomType;
 
     fn facts(display_name: &str) -> RoomFacts {
         RoomFacts {
@@ -682,43 +706,83 @@ mod tests {
         JoinedMember { id, display_name }
     }
 
-    #[test]
-    fn a_bridged_room_with_the_bot_and_one_person_is_a_direct_message() {
+    /// The partner `bridged_dm_partner_name` finds in a bridged room whose
+    /// bridge declares `room_type`, with an `m.room.name` or without one.
+    fn partner(
+        room_type: Option<RoomType>,
+        named: bool,
+        joined_count: u64,
+        joined: &[JoinedMember<'_>],
+    ) -> Option<String> {
+        let [me, bot, ..] = ids();
+        DmCandidate::new(bot, room_type, named, joined_count)?.partner(me, joined)
+    }
+
+    /// The user, the bridge bot and Alice.
+    fn with_the_bot_and_alice() -> [JoinedMember<'static>; 3] {
         let [me, bot, alice, _] = ids();
-        let joined = [
+        [
             member(me, Some("Me")),
             member(bot, Some("Discord bridge bot")),
             member(alice, Some("Alice")),
-        ];
-        assert_eq!(
-            bridged_dm_partner(me, Some(bot), 3, &joined),
-            Some("Alice".to_owned())
-        );
+        ]
+    }
+
+    #[test]
+    fn an_unnamed_bridged_room_with_the_bot_and_one_person_is_a_direct_message() {
+        let joined = with_the_bot_and_alice();
+        assert_eq!(partner(None, false, 3, &joined), Some("Alice".to_owned()));
         // The user's own membership is not needed.
         assert_eq!(
-            bridged_dm_partner(me, Some(bot), 3, &joined[1..]),
+            partner(None, false, 3, &joined[1..]),
             Some("Alice".to_owned())
         );
         // Without a display name, the user ID.
+        let [me, bot, alice, _] = ids();
         let joined = [
             member(me, None),
             member(bot, None),
             member(alice, Some(" ")),
         ];
         assert_eq!(
-            bridged_dm_partner(me, Some(bot), 3, &joined),
+            partner(None, false, 3, &joined),
             Some("@discord_1:example.org".to_owned())
         );
     }
 
     #[test]
-    fn a_bridged_room_with_one_person_and_no_bot_is_a_direct_message() {
-        let [me, bot, alice, _] = ids();
-        let joined = [member(me, Some("Me")), member(alice, Some("Alice"))];
+    fn a_named_bridged_room_with_the_bot_and_one_person_is_no_direct_message() {
+        // A mautrix-discord guild channel where only Alice has spoken: the
+        // bridge declares no room type and names it after the channel.
+        assert_eq!(partner(None, true, 3, &with_the_bot_and_alice()), None);
+    }
+
+    #[test]
+    fn a_dm_marker_makes_a_bridged_room_a_direct_message_even_with_a_name() {
+        let joined = with_the_bot_and_alice();
         assert_eq!(
-            bridged_dm_partner(me, Some(bot), 2, &joined),
+            partner(Some(RoomType::Dm), true, 3, &joined),
             Some("Alice".to_owned())
         );
+        assert_eq!(
+            partner(Some(RoomType::Dm), false, 3, &joined),
+            Some("Alice".to_owned())
+        );
+    }
+
+    #[test]
+    fn group_dms_and_other_declared_types_are_no_direct_messages() {
+        let joined = with_the_bot_and_alice();
+        for room_type in [RoomType::GroupDm, RoomType::Other] {
+            assert_eq!(partner(Some(room_type), false, 3, &joined), None);
+        }
+    }
+
+    #[test]
+    fn a_bridged_room_with_one_person_and_no_bot_is_a_direct_message() {
+        let [me, _, alice, _] = ids();
+        let joined = [member(me, Some("Me")), member(alice, Some("Alice"))];
+        assert_eq!(partner(None, false, 2, &joined), Some("Alice".to_owned()));
     }
 
     #[test]
@@ -730,21 +794,14 @@ mod tests {
             member(alice, Some("Alice")),
             member(bob, Some("Bob")),
         ];
-        assert_eq!(bridged_dm_partner(me, Some(bot), 4, &joined), None);
+        assert_eq!(partner(Some(RoomType::Dm), false, 4, &joined), None);
         // Bob's membership is not loaded (lazy-loaded members), but the
         // server counts him.
-        assert_eq!(bridged_dm_partner(me, Some(bot), 4, &joined[..3]), None);
+        assert_eq!(partner(Some(RoomType::Dm), false, 4, &joined[..3]), None);
         // The bot's membership is not loaded, so the third member may be
         // the bot or another person.
         let joined = [member(me, Some("Me")), member(alice, Some("Alice"))];
-        assert_eq!(bridged_dm_partner(me, Some(bot), 3, &joined), None);
-    }
-
-    #[test]
-    fn a_room_without_a_bridge_bot_is_left_to_the_direct_targets() {
-        let [me, _, alice, _] = ids();
-        let joined = [member(me, Some("Me")), member(alice, Some("Alice"))];
-        assert_eq!(bridged_dm_partner(me, None, 2, &joined), None);
+        assert_eq!(partner(Some(RoomType::Dm), false, 3, &joined), None);
     }
 
     #[test]
