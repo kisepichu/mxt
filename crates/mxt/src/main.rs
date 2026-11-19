@@ -79,6 +79,10 @@ fn main() -> ExitCode {
         eprintln!("mxt: HOME is not set to an absolute path");
         return ExitCode::FAILURE;
     };
+    if let Err(message) = paths.check_separate() {
+        eprintln!("mxt: {message}");
+        return ExitCode::FAILURE;
+    }
     run(config, &paths)
 }
 
@@ -139,6 +143,15 @@ fn run(config: Config, paths: &Paths) -> ExitCode {
             eprintln!("mxt: {message}");
             ExitCode::FAILURE
         }
+        Outcome::FirstLoginFailed(message) => {
+            error!("{message}");
+            eprintln!("mxt: {message}");
+            if let Err(failure) = invalidate::discard_new_store(paths) {
+                error!("deleting the new store failed: {failure}");
+                eprintln!("mxt: deleting the new store failed: {failure}");
+            }
+            ExitCode::FAILURE
+        }
         Outcome::Invalid(reason) => {
             set_aside(paths, reason);
             ExitCode::FAILURE
@@ -149,21 +162,28 @@ fn run(config: Config, paths: &Paths) -> ExitCode {
 /// Moves the data of a session that cannot be used any more aside, so the
 /// next start logs in as a new device with fresh stores.
 fn set_aside(paths: &Paths, reason: Invalid) {
-    let why = match reason {
-        Invalid::UnknownToken => {
-            "the homeserver no longer accepts this session (M_UNKNOWN_TOKEN)".to_owned()
-        }
-        Invalid::MissingStore => format!(
-            "the session has no store ({} is missing), and a new store would give this \
-             device new encryption keys",
-            paths.store_dir().display()
+    let (why, device) = match reason {
+        Invalid::UnknownToken => (
+            "the homeserver no longer accepts this session (M_UNKNOWN_TOKEN)".to_owned(),
+            "",
+        ),
+        // The access token may still be valid; it moves aside with the data.
+        Invalid::MissingStore => (
+            format!(
+                "the session has no store ({} is missing), and a new store would give this \
+                 device new encryption keys",
+                paths.store_dir().display()
+            ),
+            " The old device stays in the account's device list and can be removed from \
+             another client.",
         ),
     };
     match invalidate::invalidate(paths, invalidate::unix_seconds()) {
         Ok(moved) => {
             error!("{why}; moved the data to {}", moved.display());
             eprintln!(
-                "mxt: {why}. The old data was moved to {}; the next start logs in as a new device.",
+                "mxt: {why}. The old data was moved to {}; the next start logs in as a new \
+                 device.{device}",
                 moved.display()
             );
         }

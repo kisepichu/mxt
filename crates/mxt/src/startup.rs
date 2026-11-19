@@ -1,11 +1,12 @@
 //! The startup flow (design, "Startup"): the session, restored or from a
 //! new login, the recovery after a first login, then the matrix adapter and
 //! the terminal UI until `:q`. `main` prints the outcome, and sets the data
-//! aside when the session is unusable, after the runtime has stopped and the
-//! stores are closed.
+//! aside when the session is unusable or deletes the new store of a failed
+//! first login, after the runtime has stopped and the stores are closed.
 
 use std::error::Error;
 use std::io;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,7 +14,9 @@ use mxt_core::app::App;
 use mxt_core::ids::UserId;
 use mxt_core::keymap::Keymap;
 use mxt_core::settings::Settings;
-use mxt_matrix::{Client, Homeserver, Matrix, RecoveryStatus, SessionWatch, SyncService};
+use mxt_matrix::{
+    Client, Homeserver, Matrix, RecoveryStatus, SavedSession, SessionWatch, SyncService,
+};
 use mxt_tui::Tui;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -37,6 +40,10 @@ pub enum Outcome {
     Invalid(Invalid),
     /// Printed as `mxt: <message>`.
     Failed(String),
+    /// A first login failed before its session was saved: printed like
+    /// `Failed`, then `main` deletes the new store and the cache, which
+    /// belong to no device.
+    FirstLoginFailed(String),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -74,9 +81,11 @@ async fn connect(
     configured: Option<&str>,
     paths: &Paths,
 ) -> Result<(Client, Arc<SyncService>, SessionWatch), Outcome> {
-    let saved = mxt_matrix::load_session(&paths.session_file())
+    let session_file = paths.session_file();
+    let saved = mxt_matrix::load_session(&session_file)
         .map_err(|error| failure("reading the session", &error))?;
-    if saved.is_some() {
+    if let Some(saved) = &saved {
+        check_account(saved.user_id(), user_id, &session_file).map_err(Outcome::Failed)?;
         let store = paths.store_dir();
         let exists = store
             .try_exists()
@@ -98,22 +107,14 @@ async fn connect(
         configured,
         user_id,
     );
-    let client = mxt_matrix::build_client(&server, &paths.store_dirs())
-        .await
-        .map_err(|error| failure("starting the client", &error))?;
-    let session = SessionWatch::new(&client);
-    let first_login = match saved {
-        Some(saved) => {
-            mxt_matrix::restore(&client, saved)
-                .await
-                .map_err(|error| failure("restoring the session", &error))?;
-            info!("restored the session");
-            false
+    let first_login = saved.is_none();
+    let (client, session) = match open(&server, saved, user_id, paths).await {
+        Ok(opened) => opened,
+        // Until the session is saved, the new store belongs to no device.
+        Err(Outcome::Failed(message)) if first_login => {
+            return Err(Outcome::FirstLoginFailed(message));
         }
-        None => {
-            log_in(&client, user_id, paths).await?;
-            true
-        }
+        Err(outcome) => return Err(outcome),
     };
     let sync = mxt_matrix::build_sync_service(&client)
         .await
@@ -124,6 +125,45 @@ async fn connect(
     Ok((client, sync, session))
 }
 
+/// Builds the client, creates the session watch, then restores `saved` or
+/// logs in as a new device.
+async fn open(
+    server: &Homeserver,
+    saved: Option<SavedSession>,
+    user_id: &UserId,
+    paths: &Paths,
+) -> Result<(Client, SessionWatch), Outcome> {
+    let client = mxt_matrix::build_client(server, &paths.store_dirs())
+        .await
+        .map_err(|error| failure("starting the client", &error))?;
+    let session = SessionWatch::new(&client);
+    match saved {
+        Some(saved) => {
+            mxt_matrix::restore(&client, saved)
+                .await
+                .map_err(|error| failure("restoring the session", &error))?;
+            info!("restored the session");
+        }
+        None => log_in(&client, user_id, paths).await?,
+    }
+    Ok((client, session))
+}
+
+/// A session file of another account would show that account's rooms under
+/// the configured one. Nothing is moved: removing the session file switches
+/// accounts, and the next start sets the old store aside. The IDs are
+/// compared as written, so a difference only in case is reported too.
+fn check_account(saved: &str, configured: &UserId, session_file: &Path) -> Result<(), String> {
+    if saved == configured.as_str() {
+        return Ok(());
+    }
+    Err(format!(
+        "the session file {} belongs to {saved}, but account.user_id is {configured}; \
+         removing the session file switches accounts (the old store is then set aside)",
+        session_file.display()
+    ))
+}
+
 /// Asks for the password, logs in as a new device and saves the session at
 /// once, before anything else can fail.
 async fn log_in(client: &Client, user_id: &UserId, paths: &Paths) -> Result<(), Outcome> {
@@ -132,7 +172,6 @@ async fn log_in(client: &Client, user_id: &UserId, paths: &Paths) -> Result<(), 
     let saved = mxt_matrix::login(client, user_id.as_str(), &password)
         .await
         .map_err(|error| failure("login failed", &error))?;
-    drop(password);
     mxt_matrix::save_session(&paths.session_file(), &saved)
         .map_err(|error| failure("logged in, but saving the session failed", &error))?;
     info!("logged in as a new device");
@@ -219,16 +258,18 @@ async fn run_ui(
         }
     };
     let outcome = tokio::select! {
+        // The adapter's panic first: the panic hook has restored the terminal
+        // and printed the panic, and the next frame fails then.
+        biased;
+        panic = matrix.panicked() => {
+            error!("a task of the matrix adapter panicked");
+            Outcome::Failed(format!("the matrix adapter stopped: {panic}"))
+        }
         ended = event_loop::run(&mut app, &mut tui, from_matrix, to_matrix) => match ended {
             Ok(()) => Outcome::Quit,
             Err(error) => Outcome::Failed(format!("terminal: {error}")),
         },
         () = session.unknown_token() => Outcome::Invalid(Invalid::UnknownToken),
-        // The panic hook has restored the terminal and printed the panic.
-        panic = matrix.panicked() => {
-            error!("a task of the matrix adapter panicked");
-            Outcome::Failed(format!("the matrix adapter stopped: {panic}"))
-        }
     };
     let restored = tui.restore();
     matrix.stop().await;
@@ -321,5 +362,22 @@ mod tests {
             homeserver(None, None, &alice),
             Homeserver::Discover("example.org".to_owned())
         );
+    }
+
+    #[test]
+    fn a_session_of_another_account_is_refused() {
+        let file = Path::new("/home/alice/.local/share/mxt/session.json");
+        let alice = UserId::new("@alice:example.org");
+        assert_eq!(check_account("@alice:example.org", &alice, file), Ok(()));
+        assert_eq!(
+            check_account("@bob:example.org", &alice, file),
+            Err(
+                "the session file /home/alice/.local/share/mxt/session.json belongs to \
+                 @bob:example.org, but account.user_id is @alice:example.org; removing the \
+                 session file switches accounts (the old store is then set aside)"
+                    .to_owned()
+            )
+        );
+        assert!(check_account("@Alice:example.org", &alice, file).is_err());
     }
 }

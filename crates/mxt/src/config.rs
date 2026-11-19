@@ -283,7 +283,7 @@ fn binding(
 fn argument_start(spec: &dto::ActionSpec, error: &ActionError) -> Option<usize> {
     let start = |arg: &str| {
         let index = spec.args.iter().position(|(name, _)| name == arg)?;
-        Some(spec.arg_starts[index])
+        spec.arg_starts.get(index).copied()
     };
     match error {
         ActionError::UnknownArgument { arg, .. } => start(arg),

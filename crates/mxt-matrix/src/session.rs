@@ -27,6 +27,13 @@ pub struct SavedSession {
     pub session: MatrixSession,
 }
 
+impl SavedSession {
+    /// The account the session belongs to.
+    pub fn user_id(&self) -> &str {
+        self.session.meta.user_id.as_str()
+    }
+}
+
 impl fmt::Debug for SavedSession {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SavedSession")

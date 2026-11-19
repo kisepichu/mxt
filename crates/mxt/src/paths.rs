@@ -68,6 +68,29 @@ impl Paths {
         }
         Ok(())
     }
+
+    /// The message to print when the data or state directory lies inside the
+    /// cache directory: `invalidate` and `set_aside_orphaned_store` delete
+    /// the cache directory, which would take the crypto store and the held
+    /// lock file, or the logs, with it. `Path::starts_with` compares whole
+    /// components, so `/xdg/mxt2` is not inside `/xdg/mxt`; symlinks are not
+    /// resolved.
+    pub fn check_separate(&self) -> Result<(), String> {
+        for (dir, name, variable) in [
+            (&self.data, "data", "XDG_DATA_HOME"),
+            (&self.state, "state", "XDG_STATE_HOME"),
+        ] {
+            if dir.starts_with(&self.cache) {
+                return Err(format!(
+                    "the cache directory {} contains the {name} directory {}; \
+                     set XDG_CACHE_HOME and {variable} to different directories",
+                    self.cache.display(),
+                    dir.display()
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// An XDG base directory: `$variable`, or `$HOME/<fallback>` when the variable
@@ -204,6 +227,69 @@ mod tests {
             paths.store_dir(),
             Path::new("/home/alice/.local/share/mxt/store")
         );
+    }
+
+    #[test]
+    fn a_data_or_state_directory_inside_the_cache_is_refused() {
+        let equal = Paths::from_env(&env(&[
+            ("HOME", "/home/alice"),
+            ("XDG_DATA_HOME", "/xdg"),
+            ("XDG_CACHE_HOME", "/xdg"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            equal.check_separate(),
+            Err(
+                "the cache directory /xdg/mxt contains the data directory /xdg/mxt; \
+                 set XDG_CACHE_HOME and XDG_DATA_HOME to different directories"
+                    .to_owned()
+            )
+        );
+
+        let nested = Paths::from_env(&env(&[
+            ("HOME", "/home/alice"),
+            ("XDG_DATA_HOME", "/xdg/mxt/data"),
+            ("XDG_CACHE_HOME", "/xdg"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            nested.check_separate(),
+            Err(
+                "the cache directory /xdg/mxt contains the data directory /xdg/mxt/data/mxt; \
+                 set XDG_CACHE_HOME and XDG_DATA_HOME to different directories"
+                    .to_owned()
+            )
+        );
+
+        let state = Paths::from_env(&env(&[
+            ("HOME", "/home/alice"),
+            ("XDG_STATE_HOME", "/home/alice/.cache"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            state.check_separate(),
+            Err(
+                "the cache directory /home/alice/.cache/mxt contains the state directory \
+                 /home/alice/.cache/mxt; set XDG_CACHE_HOME and XDG_STATE_HOME to different \
+                 directories"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn directories_that_only_share_a_name_prefix_are_separate() {
+        let defaults = Paths::from_env(&env(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(defaults.check_separate(), Ok(()));
+
+        let prefix = Paths::from_env(&env(&[
+            ("HOME", "/home/alice"),
+            ("XDG_DATA_HOME", "/xdg/mxt2"),
+            ("XDG_STATE_HOME", "/xdg/mxt-state"),
+            ("XDG_CACHE_HOME", "/xdg"),
+        ]))
+        .unwrap();
+        assert_eq!(prefix.check_separate(), Ok(()));
     }
 
     #[test]

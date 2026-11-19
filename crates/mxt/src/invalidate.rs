@@ -1,5 +1,6 @@
 //! Setting aside data that belongs to a session the homeserver no longer
-//! accepts, or to a device whose session file is gone.
+//! accepts, or to a device whose session file is gone, and deleting the new
+//! store of a first login that failed.
 
 use std::{
     fs, io,
@@ -31,11 +32,7 @@ pub fn invalidate(paths: &Paths, unix_seconds: u64) -> io::Result<PathBuf> {
 /// media. Returns the moved store, `None` when there was none. No-op while
 /// the session file exists.
 pub fn set_aside_orphaned_store(paths: &Paths, unix_seconds: u64) -> io::Result<Option<PathBuf>> {
-    let session_file = paths.session_file();
-    let session_exists = session_file
-        .try_exists()
-        .map_err(|error| with_path(error, &session_file))?;
-    if session_exists {
+    if session_file_exists(paths)? {
         return Ok(None);
     }
     // Recreated here: the SDK would create it with the default mode.
@@ -51,6 +48,27 @@ pub fn set_aside_orphaned_store(paths: &Paths, unix_seconds: u64) -> io::Result<
     let moved = paths.data.join(format!("store.invalid-{unix_seconds}"));
     rename(&store, &moved)?;
     Ok(Some(moved))
+}
+
+/// A first login that failed before its session was saved: deletes the new
+/// store and the cache directory. Before a login the crypto store holds no
+/// Olm account, and after a login whose session was not saved the access
+/// token is lost, so no one can use that device again. No-op while the
+/// session file exists: saving can fail after the rename. The caller has
+/// dropped the SDK client before, so the stores are closed.
+pub fn discard_new_store(paths: &Paths) -> io::Result<()> {
+    if session_file_exists(paths)? {
+        return Ok(());
+    }
+    delete_dir(&paths.store_dir())?;
+    delete_dir(&paths.cache)
+}
+
+fn session_file_exists(paths: &Paths) -> io::Result<bool> {
+    let session_file = paths.session_file();
+    session_file
+        .try_exists()
+        .map_err(|error| with_path(error, &session_file))
 }
 
 /// The current time for the names of set-aside directories.
@@ -150,8 +168,25 @@ mod tests {
             set_aside_orphaned_store(&paths, 1_700_000_000).unwrap(),
             None
         );
+        discard_new_store(&paths).unwrap();
         assert!(paths.store_dir().exists());
         assert!(paths.cache.join("event-cache").exists());
+    }
+
+    #[test]
+    fn the_new_store_of_a_failed_first_login_is_deleted_with_the_cache() {
+        let root = TestDir::new("discard-new-store");
+        let paths = paths_in(&root);
+        fs::create_dir(paths.store_dir()).unwrap();
+        fs::write(paths.store_dir().join("crypto"), "").unwrap();
+        fs::write(paths.lock_file(), "").unwrap();
+        fs::write(paths.cache.join("event-cache"), "").unwrap();
+
+        discard_new_store(&paths).unwrap();
+
+        assert!(!paths.store_dir().exists());
+        assert!(!paths.cache.exists());
+        assert!(paths.lock_file().is_file());
     }
 
     #[test]
