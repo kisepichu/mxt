@@ -3123,3 +3123,84 @@ unit tests.
 git add crates/mxt
 git commit -m "Wire the startup flow, the matrix adapter and the event loop, so mxt logs in or restores its session, syncs and shows the room list"
 ```
+
+---
+
+### Task 13: Classic sync instead of sliding sync (phase 0 decision)
+
+Phase 0 decided the sync path for the target homeserver: simplified sliding
+sync lists 1 of 363 joined rooms (the bridged rooms and DMs never appear),
+while classic `/sync` returns all of them. The design's "Sync path" bullet
+says only the chosen path is implemented, and its classic paragraph applies:
+the adapter builds the room set from `Client::rooms()` and reads `m.bridge`
+from the full room state. This task replaces the sliding sync parts of
+Tasks 10–12. The core is not affected. It starts after phase 2 Tasks 3–4
+(the timeline adapter) have merged, because both change
+`crates/mxt-matrix/src/adapter.rs`.
+
+**Files:**
+- Create: `crates/mxt-matrix/src/sync.rs` (the classic sync loop)
+- Modify: `crates/mxt-matrix/src/{adapter,rooms,bridges,client,error,lib}.rs`,
+  `crates/mxt/src/startup.rs`
+- Delete: the one-off MSC4186 request code in `bridges.rs` (keep
+  `parse_bridge` and the event precedence), the `RoomListService` and
+  `SyncService` uses
+
+**Interfaces:**
+
+```rust
+// mxt-matrix
+/// The classic sync loop. Started once per process; the first login starts
+/// it early so the device keys reach the server before the recovery prompt.
+pub struct SyncLoop { /* task handle, state receiver */ }
+impl SyncLoop {
+    /// Subscribes the event cache (`client.event_cache().subscribe()`; the
+    /// SDK computes unread counts and latest events from it), then runs
+    /// `Client::sync_once` in a loop with `SyncToken::ReusePrevious`, a 30 s
+    /// long-poll timeout, presence offline, and a filter with lazy-loaded
+    /// members and a timeline limit of 10.
+    pub fn start(client: &Client) -> SyncLoop;
+    pub async fn stop(self);
+}
+// `Matrix::start` takes the `SyncLoop` instead of `Arc<SyncService>`;
+// `build_sync_service` and the `SyncService` re-export are removed.
+```
+
+**Behavior:**
+- Sync state: `Starting` until the first successful response; `Synced`
+  after each successful response; on an error, `Offline` when the request
+  did not reach the server (connection or timeout errors), `Retrying`
+  otherwise, then retry with the existing backoff (1 s doubling to 60 s,
+  reset after a success). `M_UNKNOWN_TOKEN` stops the loop (the session
+  watch already ends mxt).
+- Room set: at start, every joined room from `Client::joined_rooms()` that
+  is not a space. After each sync response: rooms in `rooms.join` are
+  recomputed and upserted, rooms in `rooms.leave` become `RoomRemoved`, and
+  newly joined rooms are added. Room info notable updates
+  (`room_info_notable_update_receiver`; read receipts and unread counts
+  change through it) recompute that room; on `Lagged`, recompute every room.
+  Unchanged facts are not re-sent (as now).
+- Bridge info: from the stored state, `room.get_state_events(StateEventType::from("m.bridge"))`
+  and `uk.half-shot.bridge`, parsed with `parse_bridge` and the existing
+  precedence, recomputed when the room's state changes in a sync response.
+- Facts otherwise unchanged (`RoomFacts`, `summary`, DM partner names,
+  notification modes, parent spaces, latest activity via
+  `latest_event_timestamp()`; classic sync registers rooms with the latest
+  events subsystem once the event cache is subscribed, matrix-sdk `sync.rs`
+  `subscribe_to_room_latest_events`).
+- Client: `VersionBuilder::None` for every `Homeserver` variant (no sliding
+  sync, no `/versions` check for it).
+- Effects: `SubscribeTimeline`/`UnsubscribeTimeline` no longer touch room
+  subscriptions (classic sync delivers every room); the timeline handling of
+  phase 2 Task 4 stays.
+- Startup (`startup.rs`): after a first login, start the `SyncLoop` before
+  waiting for the device keys, as before with the sync service.
+
+**Tests:** the sync state mapping from error kinds and the backoff (pure);
+the joined/left bookkeeping from the room ID sets of a response (pure); the
+bridge precedence tests stay.
+
+- [ ] Steps: tests, implement, pass (under the lock), fmt and clippy, then
+  the orchestrator runs mxt against the account (room count, network names,
+  unread badges, sync state), commit
+  ("Sync with classic /sync, because the target homeserver's sliding sync does not list bridged rooms").
