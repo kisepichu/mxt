@@ -405,8 +405,9 @@ covered by unit tests.
 - HTML bodies: `formatted_body` is parsed with `ruma::html` into `RichText`.
   `<mx-reply>` fallbacks are dropped, `<del>` becomes strikethrough,
   `data-mx-spoiler` becomes spoiler style (mentions, emoticons and code
-  blocks inside it are hidden too), and `<img data-mx-emoticon>` becomes its
-  alt text. Reply previews show spoilers as `[spoiler]`.
+  blocks inside it are hidden too, and so are spoilers inside code blocks),
+  and `<img data-mx-emoticon>` becomes its alt text. Reply previews show
+  spoilers as `[spoiler]`.
 - Images: `FetchImage` uses the event's thumbnail source when there is one.
   In encrypted rooms there is often none, and the SDK cannot ask the server to
   scale encrypted media, so the adapter downloads the full file. Files larger
@@ -927,13 +928,14 @@ platforms.
   only when it leaves the send queue: `SendQueued` once the homeserver has
   accepted it, `SendFailed` when the homeserver refuses it for good, and the
   core keeps its draft until then and puts it back under the rule above. The
-  adapter finds the edit's request by its content among the send queue's
-  updates, because the SDK's send handle does not expose its transaction ID.
-  Edits left in the send queue by an earlier session are only reported, and
-  so is an edit of a local echo that the SDK turns into an edit request of
-  its own (when the echo is being sent at that moment, or was sent
-  meanwhile). matrix-sdk-ui 0.19 keeps showing a dropped edit's text on its
-  target, when no other edit applies, until the timeline is built again.
+  adapter finds the edit's request among the send queue's updates by its
+  room, its content and its creation time, because the SDK's send handle
+  does not expose its transaction ID. Edits left in the send queue by an
+  earlier session are only reported, and so is an edit of a local echo that
+  the SDK turns into an edit request of its own (when the echo is being sent
+  at that moment, or was sent meanwhile). matrix-sdk-ui 0.19 keeps showing a
+  dropped edit's text on its target, when no other edit applies, until the
+  timeline is built again.
 - Redaction asks for confirmation in `CONFIRM` mode because it cannot be
   undone.
 - `M_UNKNOWN_TOKEN` is handled as described in "Startup".

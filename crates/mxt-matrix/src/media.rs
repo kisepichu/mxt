@@ -4,10 +4,12 @@
 
 use std::{
     fs::{self, OpenOptions},
-    io::{self, Write as _},
+    io::{self, Cursor, Write as _},
+    mem,
     path::{Path, PathBuf},
 };
 
+use image::{ImageDecoder as _, ImageFormat, ImageReader, metadata::Orientation};
 use matrix_sdk::{
     Client, Room,
     attachment::{
@@ -51,6 +53,18 @@ const NAME_MAX: usize = 255;
 /// its dot: in a longer one, the last dot is part of the name (of a
 /// sentence used as the name, for example).
 const MAX_EXTENSION: usize = 16;
+
+/// The most of a JPEG upload that is read for its dimensions: image's JPEG
+/// decoder copies all it is given before it parses the headers. A JPEG's
+/// frame header comes after its metadata segments. Exif fits in one segment
+/// of at most 64 KiB, but chained segments (extended XMP, which can hold a
+/// depth map or a second image, multi-segment ICC profiles, Photoshop data)
+/// can push the frame header past this; such a JPEG is sent without
+/// dimensions. The other formats get all of their bytes: their decoders
+/// copy nothing large, and they read metadata before they give the
+/// dimensions (a PNG's chunks before its image data, all chunks of an
+/// extended WebP), which a cut would lose.
+const JPEG_HEADER_LIMIT: usize = 1024 * 1024;
 
 /// `MatrixEffect::Download`: the item's file, decrypted in encrypted rooms,
 /// saved in `dir` under the event's file name made safe (see
@@ -154,7 +168,7 @@ pub(crate) async fn upload(room: &Room, path: PathBuf) -> Result<(), Error> {
         name.to_string_lossy().into_owned()
     });
     let mime = mime_guess::from_path(&path).first_or_octet_stream();
-    let config = AttachmentConfig::new().info(attachment_info(&mime, bytes.len()));
+    let config = AttachmentConfig::new().info(attachment_info(&mime, &bytes));
     debug!("uploading {}", path.display());
     enable_sending(room);
     room.send_queue()
@@ -209,15 +223,20 @@ fn fits_preview(size: u64) -> bool {
     size <= PREVIEW_LIMIT
 }
 
-/// The upload's size, in the info of the message type the SDK picks from
-/// `mime`: it drops info of another kind.
-fn attachment_info(mime: &Mime, len: usize) -> AttachmentInfo {
-    let size = UInt::new(len as u64);
+/// The upload's size, and an image's dimensions, in the info of the message
+/// type the SDK picks from `mime`: it drops info of another kind.
+fn attachment_info(mime: &Mime, bytes: &[u8]) -> AttachmentInfo {
+    let size = UInt::new(bytes.len() as u64);
     match mime.type_() {
-        mime::IMAGE => AttachmentInfo::Image(BaseImageInfo {
-            size,
-            ..BaseImageInfo::default()
-        }),
+        mime::IMAGE => {
+            let (width, height) = image_dimensions(bytes).unzip();
+            AttachmentInfo::Image(BaseImageInfo {
+                width,
+                height,
+                size,
+                ..BaseImageInfo::default()
+            })
+        }
         mime::VIDEO => AttachmentInfo::Video(BaseVideoInfo {
             size,
             ..BaseVideoInfo::default()
@@ -228,6 +247,35 @@ fn attachment_info(mime: &Mime, len: usize) -> AttachmentInfo {
         }),
         _ => AttachmentInfo::File(BaseFileInfo { size }),
     }
+}
+
+/// The width and height the image `bytes` is shown at, in the formats the
+/// message view decodes, guessed from the bytes rather than the name: the
+/// header's, swapped when the image's Exif orientation turns it by 90
+/// degrees (phone cameras store portrait photos so). `None` when they
+/// cannot be read (another format, a damaged file), and the image is sent
+/// without them. Nothing past the headers is decoded.
+fn image_dimensions(bytes: &[u8]) -> Option<(UInt, UInt)> {
+    let format = image::guess_format(bytes).ok()?;
+    let header = match format {
+        ImageFormat::Jpeg => &bytes[..bytes.len().min(JPEG_HEADER_LIMIT)],
+        _ => bytes,
+    };
+    let mut decoder = ImageReader::with_format(Cursor::new(header), format)
+        .into_decoder()
+        .ok()?;
+    let (mut width, mut height) = decoder.dimensions();
+    // An orientation that cannot be read turns nothing.
+    if matches!(
+        decoder.orientation(),
+        Ok(Orientation::Rotate90
+            | Orientation::Rotate270
+            | Orientation::Rotate90FlipH
+            | Orientation::Rotate270FlipH)
+    ) {
+        mem::swap(&mut width, &mut height);
+    }
+    Some((width.into(), height.into()))
 }
 
 /// A leading `~/` stands for `home`, as in the configuration; other paths
@@ -493,11 +541,112 @@ mod tests {
     #[test]
     fn uploads_keep_their_size_in_the_message_type_the_sdk_picks() {
         let size = Some(uint!(5));
-        let info = |mime: &str| attachment_info(&mime.parse().unwrap(), 5);
+        let info = |mime: &str| attachment_info(&mime.parse().unwrap(), b"bytes");
         assert_eq!(ImageInfo::from(info("image/png")).size, size);
         assert_eq!(VideoInfo::from(info("video/mp4")).size, size);
         assert_eq!(AudioInfo::from(info("audio/ogg")).size, size);
         assert_eq!(FileInfo::from(info("application/pdf")).size, size);
+    }
+
+    /// The signature and the header chunk of a 640x480 PNG, then the start
+    /// of its image data, which the decoder reads up to.
+    const PNG_HEADER: &[u8] = &[
+        0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, // signature
+        0, 0, 0, 13, b'I', b'H', b'D', b'R', // IHDR
+        0, 0, 0x02, 0x80, 0, 0, 0x01, 0xE0, 8, 2, 0, 0, 0, // 640x480, 8-bit RGB
+        0xBA, 0xB3, 0x4B, 0xB3, // CRC
+        0, 0, 0, 0, b'I', b'D', b'A', b'T', // IDAT
+    ];
+
+    /// The start of a 1920x1080 grayscale JPEG: the frame header, then the
+    /// scan header, which the decoder reads up to.
+    const JPEG_HEADER: &[u8] = &[
+        0xFF, 0xD8, // SOI
+        0xFF, 0xC0, 0, 11, 8, // SOF0, 8-bit samples
+        0x04, 0x38, 0x07, 0x80, // 1080 lines, 1920 columns
+        1, 1, 0x11, 0, // one component
+        0xFF, 0xDA, 0, 8, 1, 1, 0, 0, 0x3F, 0, // SOS
+    ];
+
+    fn image_info(mime: &str, bytes: &[u8]) -> ImageInfo {
+        ImageInfo::from(attachment_info(&mime.parse().unwrap(), bytes))
+    }
+
+    #[test]
+    fn uploaded_images_carry_the_dimensions_in_their_header() {
+        let png = image_info("image/png", PNG_HEADER);
+        assert_eq!(
+            (png.width, png.height),
+            (Some(uint!(640)), Some(uint!(480)))
+        );
+        let jpeg = image_info("image/jpeg", JPEG_HEADER);
+        assert_eq!(
+            (jpeg.width, jpeg.height),
+            (Some(uint!(1920)), Some(uint!(1080)))
+        );
+        // The format comes from the bytes, not from the file name.
+        let misnamed = image_info("image/jpeg", PNG_HEADER);
+        assert_eq!(misnamed.width, Some(uint!(640)));
+    }
+
+    /// `JPEG_HEADER`'s image as phone cameras store a portrait photo: an
+    /// Exif segment before the frame header turns it by 90 degrees
+    /// (orientation 6).
+    fn turned_jpeg() -> Vec<u8> {
+        let exif: &[u8] = &[
+            0xFF, 0xE1, 0, 34, b'E', b'x', b'i', b'f', 0, 0, // APP1, Exif
+            b'M', b'M', 0, 42, 0, 0, 0, 8, // big-endian TIFF header, IFD at 8
+            0, 1, // one entry
+            0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, // orientation, one short: 6
+            0, 0, 0, 0, // no next IFD
+        ];
+        [&JPEG_HEADER[..2], exif, &JPEG_HEADER[2..]].concat()
+    }
+
+    #[test]
+    fn uploaded_images_carry_the_dimensions_their_exif_orientation_turns_them_to() {
+        let jpeg = image_info("image/jpeg", &turned_jpeg());
+        assert_eq!(
+            (jpeg.width, jpeg.height),
+            (Some(uint!(1080)), Some(uint!(1920)))
+        );
+    }
+
+    /// The CRC of a PNG chunk's type and data.
+    fn png_crc(bytes: &[u8]) -> u32 {
+        !bytes.iter().fold(!0, |crc, &byte| {
+            (0..8).fold(crc ^ u32::from(byte), |crc, _| {
+                (crc >> 1) ^ (0xEDB8_8320 & (crc & 1).wrapping_neg())
+            })
+        })
+    }
+
+    #[test]
+    fn only_a_jpeg_is_cut_before_its_dimensions_are_read() {
+        // A PNG's metadata before its image data (here a C2PA manifest) can
+        // be longer than a JPEG's limit.
+        let mut chunk = b"caBX".to_vec();
+        chunk.resize(4 + JPEG_HEADER_LIMIT, 0);
+        let mut png = PNG_HEADER[..33].to_vec(); // signature, IHDR
+        png.extend((chunk.len() as u32 - 4).to_be_bytes());
+        png.extend(&chunk);
+        png.extend(png_crc(&chunk).to_be_bytes());
+        png.extend(&PNG_HEADER[33..]);
+
+        let info = image_info("image/png", &png);
+        assert_eq!(
+            (info.width, info.height),
+            (Some(uint!(640)), Some(uint!(480)))
+        );
+    }
+
+    #[test]
+    fn an_image_whose_header_cannot_be_read_is_sent_without_dimensions() {
+        for bytes in [&b"<svg></svg>"[..], &PNG_HEADER[..20]] {
+            let info = image_info("image/png", bytes);
+            assert_eq!((info.width, info.height), (None, None));
+            assert_eq!(info.size, UInt::new(bytes.len() as u64));
+        }
     }
 
     #[test]

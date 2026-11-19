@@ -14,5 +14,9 @@ nucleo-matcher.workspace = true
 pulldown-cmark.workspace = true
 unicode-segmentation.workspace = true
 
+[features]
+# `SendId::new`, for the adapters' tests: the core numbers its sends.
+testing = []
+
 [lints]
 workspace = true

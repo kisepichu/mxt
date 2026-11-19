@@ -26,12 +26,16 @@ edtui = { version = "0.11", default-features = false, features = ["system-editor
 # The reaction picker's emoji and shortcodes; also what matrix-sdk-ui uses.
 emojis = "0.9"
 futures-util = "0.3"
-# Decoding images for the message view, in the formats Matrix clients send.
-# The default formats (AVIF through rav1e and libfuzzer-sys) pull in a
-# license the policy rejects.
+# Decoding images for the message view, and reading the dimensions of
+# uploaded images from their header, in the formats Matrix clients send. The
+# default formats (AVIF through rav1e and libfuzzer-sys) pull in a license the
+# policy rejects.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 jiff = "1"
 matrix-sdk = { version = "0.19", default-features = false, features = ["e2e-encryption", "sqlite", "rustls-aws-lc-rs"] }
+# Events and sync responses for the tests against `MatrixMockServer`; the
+# version matrix-sdk 0.19.1 uses.
+matrix-sdk-test = "0.19"
 matrix-sdk-ui = { version = "0.19", default-features = false }
 # The MIME type of an upload, guessed from its file name; also the `mime`
 # version matrix-sdk takes. The reverse mapping (extensions of a MIME type)

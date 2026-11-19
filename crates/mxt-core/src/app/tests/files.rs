@@ -1,7 +1,7 @@
 use super::timeline::{item, local, msg, opened, remote, reset, status};
 use super::*;
 use crate::effect::ViewContent;
-use crate::rich::{Block, Inline, MentionTarget, RichText, Style};
+use crate::rich::{Block, CodeRun, Inline, MentionTarget, RichText, Style};
 use crate::settings::ImagePreview;
 use crate::timeline::{ItemRef, MediaBytes, MessageContent, TimelineEntry};
 
@@ -234,8 +234,10 @@ fn gx_on_several_links_picks_one_of_their_urls() {
                 },
                 Block::Code {
                     language: None,
-                    text: "https://example.org/not-a-link".into(),
-                    spoiler: false,
+                    runs: vec![CodeRun {
+                        text: "https://example.org/not-a-link".into(),
+                        spoiler: false,
+                    }],
                 },
             ],
         )],
