@@ -724,6 +724,35 @@ fn keys_left_after_a_binding_which_asks_for_confirmation_are_dropped() {
 }
 
 #[test]
+fn a_question_asked_with_the_recovery_key_prompt_is_shown_and_answered_first() {
+    use Action::{AccountRecover, MessageDelete};
+    for actions in [
+        vec![MessageDelete, AccountRecover],
+        vec![AccountRecover, MessageDelete],
+    ] {
+        let both = Binding::new(actions).unwrap();
+        let mut app = app_with(vec![(TableId::Timeline, seq("D"), both)]);
+        keys(&mut app, "<CR>");
+        reset(&mut app, vec![own(remote(1), "mine")]);
+        assert_eq!(no_timers(keys(&mut app, "D")), vec![]);
+        // The bottom line shows the question, which the next key answers.
+        assert_eq!(app.mode_label(None), "CONFIRM");
+        assert_eq!(app.confirmation(), Some("Delete this message? (y/n)"));
+        assert_eq!(app.secret_prompt(), None);
+        assert_eq!(
+            keys(&mut app, "y"),
+            vec![matrix(MatrixEffect::Redact {
+                room: id(C),
+                item: remote(1),
+            })]
+        );
+        // The answer is not part of the key.
+        assert_eq!(app.mode_label(None), "SECRET");
+        assert_eq!(secret_len(&app), Some(0));
+    }
+}
+
+#[test]
 fn deleted_messages_cannot_be_deleted_or_reacted_to() {
     let mut app = opened();
     reset(

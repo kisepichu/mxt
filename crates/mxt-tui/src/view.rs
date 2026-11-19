@@ -51,6 +51,8 @@ const SEPARATOR: &str = " / ";
 const MIN_NAME_WIDTH: usize = 6;
 /// Before the network part on a row of its own.
 const NETWORK_INDENT: &str = "  ";
+/// Each character of the recovery key in `SECRET` mode.
+const MASK: &str = "*";
 
 /// `ui.room_list.width` and `ui.room_list.network` (design, "Room list").
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -189,7 +191,8 @@ pub(crate) struct Visible {
 /// Draws the frame. The message view covers everything but the bottom line,
 /// and the picker is drawn over the panes. The terminal cursor goes to the
 /// focused editor, the picker's query or the bottom line's prompt, whichever
-/// is drawn last.
+/// is drawn last. In `SECRET` mode the bottom line is the masked recovery
+/// key prompt, drawn from the number of characters typed only.
 pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
     let [main, bottom] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
@@ -250,10 +253,13 @@ pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
     }
     // The message view's editor while it is open, else the focused composer's.
     let editor = view_mode.or_else(|| composer.filter(|_| focused).map(|composer| composer.mode()));
-    match (app.command_line(), search) {
-        (Some(line), _) => draw_command_line(frame, bottom, line),
-        (None, Some(pattern)) => draw_prompt_line(frame, bottom, "/", &pattern),
-        (None, None) => draw_status_line(frame, bottom, app, editor),
+    match (app.secret_prompt(), app.command_line(), search) {
+        (Some((prompt, typed)), _, _) => {
+            draw_prompt_line(frame, bottom, prompt, &MASK.repeat(typed))
+        }
+        (None, Some(line), _) => draw_command_line(frame, bottom, line),
+        (None, None, Some(pattern)) => draw_prompt_line(frame, bottom, "/", &pattern),
+        (None, None, None) => draw_status_line(frame, bottom, app, editor),
     }
     visible
 }
@@ -911,6 +917,30 @@ pub(crate) mod tests {
         screen.draw(&app, Some(&mut view));
         assert!(
             screen.bottom_line().starts_with(" VIEW INSERT "),
+            "{:?}",
+            screen.bottom_line()
+        );
+    }
+
+    #[test]
+    fn the_recovery_key_is_drawn_masked_and_only_while_it_is_typed() {
+        let mut app = app();
+        let mut screen = Screen::new();
+        press(&mut app, ":recover<CR>s3cr<Space>t");
+        screen.draw(&app, None);
+        assert_eq!(screen.bottom_line().trim_end(), "Recovery key: ******");
+        let buffer = screen.terminal.backend().buffer();
+        let drawn: String = buffer.content().iter().map(Cell::symbol).collect();
+        assert!(!drawn.contains("s3cr"), "{drawn}");
+        assert_eq!(
+            screen.terminal.get_cursor_position().unwrap(),
+            Position::new(20, 11)
+        );
+
+        press(&mut app, "<Esc>");
+        screen.draw(&app, None);
+        assert!(
+            screen.bottom_line().starts_with(" NORMAL "),
             "{:?}",
             screen.bottom_line()
         );

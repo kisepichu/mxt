@@ -4,7 +4,10 @@ use std::{fmt, path::PathBuf, sync::Arc};
 
 use matrix_sdk::{
     ClientBuildError, HttpError, NotificationSettingsError, StoreError,
-    encryption::{recovery::RecoveryError, secret_storage::SecretStorageError},
+    encryption::{
+        recovery::RecoveryError,
+        secret_storage::{ImportError, SecretStorageError},
+    },
     event_cache::EventCacheError,
     room::{edit::EditError, reply::ReplyError},
     ruma::api::error::{Error as ServerError, ErrorKind},
@@ -20,8 +23,15 @@ pub enum Error {
     Build(ClientBuildError),
     /// Any other SDK call.
     Sdk(matrix_sdk::Error),
-    /// Recovery, for example with a wrong recovery key.
+    /// Recovery, for example a failed request; see `WrongRecoveryKey` and
+    /// `NoSecretStorage` for the failures the user can act on.
     Recovery(RecoveryError),
+    /// The recovery key (or passphrase) does not open the secret storage.
+    /// The SDK's error is dropped: its message can show parts of the key.
+    WrongRecoveryKey,
+    /// The account has no secret storage, or its key description is missing,
+    /// so there is nothing to recover from.
+    NoSecretStorage,
     /// Reading or writing a file (`path`): the session file, its temporary
     /// file or its directory, a file to upload, or the download directory.
     Io {
@@ -68,11 +78,27 @@ impl Error {
     /// no file either.
     pub(crate) fn brief(&self) -> Brief<'_> {
         let response = match self {
-            Error::Sdk(error)
-            | Error::Recovery(
+            Error::Sdk(error) => sdk_response(error),
+            // Recovery applies no `without_url`; a failed request's URL names
+            // the user. Importing each secret fetches it from account data.
+            Error::Recovery(
                 RecoveryError::Sdk(error)
-                | RecoveryError::SecretStorage(SecretStorageError::Sdk(error)),
-            ) => sdk_response(error),
+                | RecoveryError::SecretStorage(
+                    SecretStorageError::Sdk(error)
+                    | SecretStorageError::ImportError {
+                        error: ImportError::Sdk(error),
+                        ..
+                    },
+                ),
+            ) => {
+                if is_unreachable(error) {
+                    return Brief {
+                        error: &"the request failed",
+                        response: None,
+                    };
+                }
+                sdk_response(error)
+            }
             // Only a shared pagination error is left (see `timeline_error`),
             // and it keeps the URL of a failed request.
             Error::Timeline(timeline::Error::EventCacheError(
@@ -208,6 +234,10 @@ impl fmt::Display for Error {
             Error::Build(error) => error.fmt(f),
             Error::Sdk(error) => error.fmt(f),
             Error::Recovery(error) => error.fmt(f),
+            Error::WrongRecoveryKey => f.write_str("the recovery key is wrong"),
+            Error::NoSecretStorage => f.write_str(
+                "the account has no secret storage; set up recovery in another client first",
+            ),
             Error::Io { path, error } => write!(f, "{}: {error}", path.display()),
             Error::Json { path, error } => write!(f, "{}: {error}", path.display()),
             Error::PasswordLoginUnsupported { offered } => write!(
@@ -249,6 +279,8 @@ impl std::error::Error for Error {
             Error::Timeline(error) => error.source(),
             Error::NotificationSettings(error) => error.source(),
             Error::PasswordLoginUnsupported { .. }
+            | Error::WrongRecoveryKey
+            | Error::NoSecretStorage
             | Error::UnknownToken
             | Error::UnknownRoom
             | Error::InvalidEventId
@@ -290,15 +322,25 @@ impl From<StoreError> for Error {
 
 impl From<RecoveryError> for Error {
     fn from(error: RecoveryError) -> Self {
-        let sdk_error = match &error {
+        match error {
+            // The typed key does not decode or fails the MAC check. Some of
+            // these messages show bytes of the key (a wrong prefix or parity
+            // byte) or a character of it (bad Base58). The few others, about
+            // the key description of a broken secret storage, cannot be told
+            // apart: matrix-sdk does not export the SDK's `DecodeError`.
+            RecoveryError::SecretStorage(SecretStorageError::SecretStorageKey(_)) => {
+                Error::WrongRecoveryKey
+            }
+            RecoveryError::SecretStorage(SecretStorageError::MissingKeyInfo { .. }) => {
+                Error::NoSecretStorage
+            }
             RecoveryError::Sdk(error)
-            | RecoveryError::SecretStorage(SecretStorageError::Sdk(error)) => Some(error),
-            _ => None,
-        };
-        if sdk_error.is_some_and(is_unknown_token) {
-            Error::UnknownToken
-        } else {
-            Error::Recovery(error)
+            | RecoveryError::SecretStorage(SecretStorageError::Sdk(error))
+                if is_unknown_token(&error) =>
+            {
+                Error::UnknownToken
+            }
+            error => Error::Recovery(error),
         }
     }
 }
@@ -341,9 +383,12 @@ mod tests {
 
     use matrix_sdk::{
         reqwest::StatusCode,
-        ruma::api::{
-            client::uiaa::UiaaResponse,
-            error::{ErrorBody, FromHttpResponseError, StandardErrorBody},
+        ruma::{
+            api::{
+                client::uiaa::UiaaResponse,
+                error::{ErrorBody, FromHttpResponseError, StandardErrorBody},
+            },
+            events::secret::request::SecretName,
         },
     };
 
@@ -371,8 +416,22 @@ mod tests {
         );
         let recovery = RecoveryError::Sdk(server_error("M_UNKNOWN_TOKEN").into());
         assert!(Error::from(recovery).is_unknown_token());
+        let storage = SecretStorageError::Sdk(server_error("M_UNKNOWN_TOKEN").into());
+        assert!(Error::from(RecoveryError::SecretStorage(storage)).is_unknown_token());
         let cached = HttpError::Cached(Arc::new(server_error("M_UNKNOWN_TOKEN")));
         assert!(Error::from(cached).is_unknown_token());
+    }
+
+    #[test]
+    fn missing_secret_storage_says_to_set_up_recovery_elsewhere() {
+        for key_id in [None, Some("abc".to_owned())] {
+            let missing = SecretStorageError::MissingKeyInfo { key_id };
+            let error = Error::from(RecoveryError::SecretStorage(missing));
+            assert_eq!(
+                error.brief().to_string(),
+                "the account has no secret storage; set up recovery in another client first"
+            );
+        }
     }
 
     #[test]
@@ -503,5 +562,33 @@ mod tests {
             brief_sdk(&refused).to_string(),
             "the homeserver answered 403 M_FORBIDDEN"
         );
+    }
+
+    #[test]
+    fn brief_recovery_errors_have_no_url_and_no_server_message() {
+        let storage = |error: HttpError| SecretStorageError::Sdk(error.into());
+        let import = |error: HttpError| SecretStorageError::ImportError {
+            name: SecretName::CrossSigningMasterKey,
+            error: ImportError::Sdk(error.into()),
+        };
+        for error in [
+            RecoveryError::Sdk(failed_request().into()),
+            RecoveryError::SecretStorage(storage(failed_request())),
+            RecoveryError::SecretStorage(import(failed_request())),
+        ] {
+            let error = Error::from(error);
+            assert!(error.to_string().contains("!room"), "debug keeps the URL");
+            assert_eq!(error.brief().to_string(), "the request failed");
+        }
+        for refused in [
+            storage(server_error("M_FORBIDDEN")),
+            import(server_error("M_FORBIDDEN")),
+        ] {
+            let refused = Error::from(RecoveryError::SecretStorage(refused));
+            assert_eq!(
+                refused.brief().to_string(),
+                "the homeserver answered 403 M_FORBIDDEN"
+            );
+        }
     }
 }
