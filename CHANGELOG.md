@@ -8,6 +8,8 @@ marked **Breaking:**.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-20
+
 ### Added
 
 - `ui.image_preview` takes `"iterm2"`, `"sixel"`, `"kitty"` and
@@ -68,5 +70,6 @@ The first release.
   prebuilt binaries for x86_64 Linux and Apple Silicon macOS on GitHub
   Releases, which `mise use -g github:kisepichu/mxt` installs.
 
-[Unreleased]: https://github.com/kisepichu/mxt/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/kisepichu/mxt/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/kisepichu/mxt/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kisepichu/mxt/releases/tag/v0.1.0
