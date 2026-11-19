@@ -27,6 +27,9 @@ tracing.workspace = true
 # without them.
 matrix-sdk = { workspace = true, features = ["testing"] }
 matrix-sdk-test.workspace = true
+# `SendId::new`, for the IDs of the tests' sends; also a dev-dependency
+# feature.
+mxt-core = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

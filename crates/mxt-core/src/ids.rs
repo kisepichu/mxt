@@ -58,7 +58,8 @@ pub struct SendId(pub(crate) u64);
 
 impl SendId {
     /// The core numbers its sends and an adapter only passes the IDs back,
-    /// so this is for the adapters' tests.
+    /// so this is only for the adapters' tests (the `testing` feature).
+    #[cfg(any(test, feature = "testing"))]
     pub fn new(n: u64) -> SendId {
         SendId(n)
     }
