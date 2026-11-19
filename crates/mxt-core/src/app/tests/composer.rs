@@ -124,6 +124,27 @@ fn composer_focus_needs_an_open_room_and_loads_members_once_per_room() {
 }
 
 #[test]
+fn keys_resolved_after_composer_focus_use_insert_mode() {
+    // `:` ends `]`, which focuses the composer in insert mode, so `:` goes
+    // to the editor instead of opening the command line, as in nvim.
+    let focus_insert = Binding::single(Action::ComposerFocus(FocusMode::Insert));
+    let mut app = app_with(vec![
+        (TableId::Timeline, seq("]"), focus_insert),
+        (TableId::Normal, seq("]gq"), Binding::single(Action::Nop)),
+    ]);
+    keys(&mut app, "<CR>");
+    assert_eq!(
+        no_timers(keys(&mut app, "]:")),
+        vec![
+            focus(C),
+            load_members(C),
+            ui(UiEffect::ReplayKeys(seq(":").keys().to_vec())),
+        ]
+    );
+    assert!(app.command_line().is_none());
+}
+
+#[test]
 fn composer_keys_ask_the_tui_for_the_text_a_newline_and_the_external_editor() {
     let mut app = opened();
     keys(&mut app, "i");
@@ -138,6 +159,38 @@ fn composer_keys_ask_the_tui_for_the_text_a_newline_and_the_external_editor() {
     assert_eq!(
         normal(&mut app, "<C-x><C-e>"),
         vec![ui(UiEffect::ExternalEditor(id(C)))]
+    );
+}
+
+#[test]
+fn keys_resolved_after_a_timeout_use_the_editor_mode_of_the_last_key() {
+    // The timeout runs `<C-x>`, and `<C-y>` is resolved afresh in insert
+    // mode, where it is bound, though `Msg::Timeout` reports no mode.
+    let mut app = app_with(vec![
+        (
+            TableId::ComposerInsert,
+            seq("<C-x>"),
+            Binding::single(Action::ComposerNewline),
+        ),
+        (
+            TableId::ComposerInsert,
+            seq("<C-x><C-y><C-z>"),
+            Binding::single(Action::Nop),
+        ),
+        (
+            TableId::ComposerInsert,
+            seq("<C-y>"),
+            Binding::single(Action::ComposerExternalEditor),
+        ),
+    ]);
+    keys(&mut app, "<CR>i");
+    let timer = last_timer(&keys_in(&mut app, "<C-x><C-y>", Some(EditorMode::Insert)));
+    assert_eq!(
+        app.update(Msg::Timeout { id: timer }),
+        vec![
+            ui(UiEffect::InsertNewline(id(C))),
+            ui(UiEffect::ExternalEditor(id(C))),
+        ]
     );
 }
 
@@ -458,24 +511,39 @@ fn message_delete_asks_for_confirmation() {
 }
 
 #[test]
-fn a_key_that_ends_a_binding_which_asks_for_confirmation_answers_it() {
-    // `g` is also a prefix of `gg`, so the next key ends it: `message.delete`
-    // runs, and the key answers its question.
-    let delete = Binding::single(Action::MessageDelete);
-    let mut app = app_with(vec![(TableId::Timeline, seq("g"), delete)]);
+fn keys_left_after_a_binding_which_asks_for_confirmation_are_dropped() {
+    // `g` is also a prefix of `gg` and `gyq`, so a key that matches nothing
+    // or the timeout ends it. `message.delete` runs, and the keys after `g`
+    // are dropped instead of answering, so keys typed ahead never confirm a
+    // redaction.
+    let mut app = app_with(vec![
+        (
+            TableId::Timeline,
+            seq("g"),
+            Binding::single(Action::MessageDelete),
+        ),
+        (TableId::Timeline, seq("gyq"), Binding::single(Action::Nop)),
+    ]);
     keys(&mut app, "<CR>");
     reset(&mut app, vec![own(remote(1), "one"), own(remote(2), "two")]);
+    let question = Some("Delete this message? (y/n)");
+    assert_eq!(no_timers(keys(&mut app, "gyk")), vec![]);
+    assert_eq!(app.confirmation(), question);
+    assert_eq!(app.timeline_cursor(), Some(1));
+    // A key typed after the question answers it.
+    assert_eq!(keys(&mut app, "n"), vec![]);
+    assert_eq!(app.confirmation(), None);
+
+    let timer = last_timer(&keys(&mut app, "gy"));
+    assert_eq!(app.update(Msg::Timeout { id: timer }), vec![]);
+    assert_eq!(app.confirmation(), question);
     assert_eq!(
-        no_timers(keys(&mut app, "gy")),
+        keys(&mut app, "y"),
         vec![matrix(MatrixEffect::Redact {
             room: id(C),
             item: remote(2),
         })]
     );
-    assert_eq!(app.confirmation(), None);
-    assert_eq!(no_timers(keys(&mut app, "gk")), vec![]);
-    assert_eq!(app.confirmation(), None);
-    assert_eq!(app.timeline_cursor(), Some(1));
 }
 
 #[test]

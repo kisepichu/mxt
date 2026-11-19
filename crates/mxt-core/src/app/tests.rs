@@ -77,6 +77,12 @@ fn no_timers(effects: Vec<Effect>) -> Vec<Effect> {
         .filter(|e| !matches!(e, Effect::Ui(UiEffect::StartTimer { .. })))
         .collect()
 }
+fn last_timer(effects: &[Effect]) -> TimerId {
+    match effects.last() {
+        Some(Effect::Ui(UiEffect::StartTimer { id, .. })) => *id,
+        _ => panic!("{effects:?}"),
+    }
+}
 
 #[test]
 fn starts_on_the_room_list_with_the_cursor_on_the_first_room() {
@@ -342,13 +348,65 @@ fn status_clears_on_the_next_key() {
 #[test]
 fn timeout_drops_a_pending_prefix_in_the_room_list() {
     let mut app = app();
-    let fx = keys(&mut app, "g");
-    let Some(Effect::Ui(UiEffect::StartTimer { id, .. })) = fx.last().cloned() else {
-        panic!("{fx:?}")
-    };
+    let id = last_timer(&keys(&mut app, "g"));
     assert_eq!(app.pending_keys(), seq("g").keys());
     assert_eq!(app.update(Msg::Timeout { id }), vec![]);
     assert!(app.pending_keys().is_empty());
+}
+
+/// `]` in the room list and `]gq` in `normal`, the bindings the comparison
+/// with nvim 0.12.4 used.
+fn brackets() -> App {
+    app_with(vec![
+        (
+            TableId::RoomList,
+            seq("]"),
+            Binding::single(Action::CursorFirst),
+        ),
+        (
+            TableId::Normal,
+            seq("]gq"),
+            Binding::single(Action::RoomMarkRead),
+        ),
+    ])
+}
+
+#[test]
+fn a_mismatch_runs_the_longest_binding_and_resolves_the_rest_afresh() {
+    let mut app = brackets();
+    keys(&mut app, "G");
+    // `]` runs, `gj` matches nothing, `g` is dropped and `j` runs.
+    keys(&mut app, "]gj");
+    assert_eq!(cursor_id(&app), "!b:example.org");
+}
+
+#[test]
+fn a_timeout_runs_the_longest_binding_and_the_rest_waits_again() {
+    let mut app = brackets();
+    keys(&mut app, "G");
+    let id = last_timer(&keys(&mut app, "]g"));
+    let fx = app.update(Msg::Timeout { id });
+    assert_eq!(cursor_id(&app), "!c:example.org");
+    assert_eq!(app.pending_keys(), seq("g").keys());
+    assert_ne!(last_timer(&fx), id);
+}
+
+#[test]
+fn keys_left_after_a_binding_which_changes_the_context_go_to_the_new_context() {
+    // `g` opens the command line and `gx` is only a prefix of `gxy`.
+    let mut app = app_with(vec![
+        (
+            TableId::RoomList,
+            seq("g"),
+            Binding::single(Action::CommandLineOpen),
+        ),
+        (TableId::RoomList, seq("gxy"), Binding::single(Action::Nop)),
+    ]);
+    let id = last_timer(&keys(&mut app, "gx"));
+    app.update(Msg::Timeout { id });
+    assert_eq!(line(&app), Some((LineKind::Command, "x")));
+    keys(&mut app, "<Esc>gxz");
+    assert_eq!(line(&app), Some((LineKind::Command, "xz")));
 }
 
 #[test]

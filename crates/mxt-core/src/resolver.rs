@@ -2,7 +2,7 @@
 //! timers to start, like nvim's mappings with `timeoutlen`. It reads no
 //! clock: the tui adapter runs the timers and reports when they expire.
 
-use std::mem;
+use std::slice;
 
 use crate::action::Binding;
 use crate::keymap::EffectiveMap;
@@ -23,19 +23,30 @@ pub enum Resolved {
     Release(Vec<Key>),
     /// Wait for more keys and ask the tui adapter for a timer.
     StartTimer { id: TimerId, after_ms: u64 },
+    /// Keys to resolve afresh, in order, after the output before them (the
+    /// keys after a binding that ran or a key that was released). The caller
+    /// feeds them again one by one in the input context current then, which
+    /// the binding may have changed.
+    Refeed(Vec<Key>),
 }
 
 /// Larger count prefixes are cut to this.
 const MAX_COUNT: u32 = 9999;
 
+/// Keys typed so far, a prefix of a longer binding, and the timer for them.
+/// Never empty: a timer without keys cannot exist.
+#[derive(Clone, Debug)]
+struct Pending {
+    keys: Vec<Key>,
+    /// Older timers are stale.
+    timer: TimerId,
+}
+
 /// The pending key sequence and count prefix (design, "Keymap resolver").
 #[derive(Clone, Debug, Default)]
 pub struct Resolver {
-    /// Keys typed so far, a prefix of a longer binding.
-    keys: Vec<Key>,
+    pending: Option<Pending>,
     count: Option<u32>,
-    /// The timer for `keys`; older timers are stale.
-    timer: Option<TimerId>,
     next_timer: u64,
 }
 
@@ -47,9 +58,8 @@ impl Resolver {
     /// Resolves `key` against `map`. `counts` lets digits start a count
     /// prefix; `timeoutlen_ms` is how long a prefix of a longer binding waits.
     ///
-    /// When `key` makes the pending sequence match nothing, the pending keys
-    /// run if they are a binding and are released otherwise, and `key` is
-    /// resolved afresh.
+    /// When `key` makes the pending sequence match nothing, the sequence ends
+    /// as described at [`Resolver::timeout`].
     pub fn feed(
         &mut self,
         map: &EffectiveMap,
@@ -57,72 +67,76 @@ impl Resolver {
         timeoutlen_ms: u64,
         key: Key,
     ) -> Vec<Resolved> {
-        let mut out = Vec::new();
-        self.step(map, counts, timeoutlen_ms, key, &mut out);
-        out
+        if counts && self.pending.is_none() && self.extend_count(map, key) {
+            return Vec::new();
+        }
+        let found = match &mut self.pending {
+            Some(pending) => {
+                pending.keys.push(key);
+                map.lookup(&pending.keys)
+            }
+            None => map.lookup(slice::from_ref(&key)),
+        };
+        if found.is_prefix {
+            let timer = TimerId(self.next_timer);
+            self.next_timer += 1;
+            match &mut self.pending {
+                Some(pending) => pending.timer = timer,
+                None => {
+                    self.pending = Some(Pending {
+                        keys: vec![key],
+                        timer,
+                    });
+                }
+            }
+            vec![Resolved::StartTimer {
+                id: timer,
+                after_ms: timeoutlen_ms,
+            }]
+        } else if let Some(binding) = found.binding {
+            self.pending = None;
+            vec![Resolved::Run {
+                binding: binding.clone(),
+                count: self.count.take(),
+            }]
+        } else {
+            // The whole sequence is no binding; a shorter prefix may be.
+            let keys = self
+                .pending
+                .take()
+                .map_or_else(|| vec![key], |pending| pending.keys);
+            let longest = keys.len() - 1;
+            self.finish(map, keys, longest)
+        }
     }
 
-    /// The timer `id` expired: the pending keys run if they are a binding and
-    /// are released otherwise. Stale or unknown ids return nothing.
-    pub fn timeout(&mut self, map: &EffectiveMap, id: TimerId) -> Option<Resolved> {
-        (self.timer == Some(id)).then(|| self.finish(map))
+    /// The timer `id` expired, so the pending sequence ends as in nvim: the
+    /// longest binding that is a prefix of it runs with the count, or the
+    /// first key is released when there is none. The keys after it come
+    /// back as [`Resolved::Refeed`]. Stale or unknown ids return nothing.
+    pub fn timeout(&mut self, map: &EffectiveMap, id: TimerId) -> Vec<Resolved> {
+        let Some(Pending { keys, .. }) = self.pending.take_if(|pending| pending.timer == id) else {
+            return Vec::new();
+        };
+        let longest = keys.len();
+        self.finish(map, keys, longest)
     }
 
     /// Drops pending keys and the count (when the input context changes).
     pub fn reset(&mut self) {
-        self.keys.clear();
+        self.pending = None;
         self.count = None;
-        self.timer = None;
     }
 
     /// Pending keys, for the status line.
     pub fn pending(&self) -> &[Key] {
-        &self.keys
+        self.pending
+            .as_ref()
+            .map_or(&[], |pending| pending.keys.as_slice())
     }
 
     pub fn count(&self) -> Option<u32> {
         self.count
-    }
-
-    fn step(
-        &mut self,
-        map: &EffectiveMap,
-        counts: bool,
-        timeoutlen_ms: u64,
-        key: Key,
-        out: &mut Vec<Resolved>,
-    ) {
-        if counts && self.keys.is_empty() && self.extend_count(map, key) {
-            return;
-        }
-        self.keys.push(key);
-        let found = map.lookup(&self.keys);
-        if found.is_prefix {
-            let id = TimerId(self.next_timer);
-            self.next_timer += 1;
-            self.timer = Some(id);
-            out.push(Resolved::StartTimer {
-                id,
-                after_ms: timeoutlen_ms,
-            });
-        } else if let Some(binding) = found.binding {
-            out.push(Resolved::Run {
-                binding: binding.clone(),
-                count: self.count.take(),
-            });
-            self.keys.clear();
-            self.timer = None;
-        } else {
-            self.keys.pop();
-            if self.keys.is_empty() {
-                self.count = None;
-                out.push(Resolved::Release(vec![key]));
-            } else {
-                out.push(self.finish(map));
-                // Nothing is pending now, so this does not come back here.
-                self.step(map, counts, timeoutlen_ms, key, out);
-            }
-        }
     }
 
     /// Adds an unmodified digit to the count: `1` to `9` when no binding
@@ -146,18 +160,26 @@ impl Resolver {
         extends
     }
 
-    /// Ends the pending sequence: runs it if it is a binding, otherwise
-    /// releases its keys. Clears the count and the timer.
-    fn finish(&mut self, map: &EffectiveMap) -> Resolved {
+    /// Ends the sequence `keys`, no longer pending and never empty (see
+    /// [`Resolver::timeout`]), trying bindings of at most `longest` keys.
+    /// Clears the count.
+    fn finish(&mut self, map: &EffectiveMap, mut keys: Vec<Key>, longest: usize) -> Vec<Resolved> {
         let count = self.count.take();
-        self.timer = None;
-        match map.lookup(&self.keys).binding {
-            Some(binding) => {
-                let binding = binding.clone();
-                self.keys.clear();
-                Resolved::Run { binding, count }
-            }
-            None => Resolved::Release(mem::take(&mut self.keys)),
+        let ran = (1..=longest)
+            .rev()
+            .find_map(|len| map.get(&keys[..len]).map(|binding| (len, binding)));
+        let rest = keys.split_off(ran.map_or(1, |(len, _)| len));
+        let first = match ran {
+            Some((_, binding)) => Resolved::Run {
+                binding: binding.clone(),
+                count,
+            },
+            None => Resolved::Release(keys),
+        };
+        if rest.is_empty() {
+            vec![first]
+        } else {
+            vec![first, Resolved::Refeed(rest)]
         }
     }
 }
@@ -191,12 +213,49 @@ mod tests {
     }
     /// Feeds keys and returns all outputs, with timer ids erased for comparison.
     fn feed_all(r: &mut Resolver, km: &Keymap, ctx: InputContext, text: &str) -> Vec<Resolved> {
-        seq(text)
+        let mut out = Vec::new();
+        for &key in seq(text).keys() {
+            let next = r.feed(km.effective(ctx), ctx.counts(), T, key);
+            settle(r, km, ctx, next, &mut out);
+        }
+        out
+    }
+    /// The outputs of a timeout, collected like `feed_all`.
+    fn timeout_all(r: &mut Resolver, km: &Keymap, ctx: InputContext, id: TimerId) -> Vec<Resolved> {
+        let next = r.timeout(km.effective(ctx), id);
+        let mut out = Vec::new();
+        settle(r, km, ctx, next, &mut out);
+        out
+    }
+    /// Collects `outputs` with timer ids erased. Keys handed back by `Refeed`
+    /// are fed again, as the app does.
+    fn settle(
+        r: &mut Resolver,
+        km: &Keymap,
+        ctx: InputContext,
+        outputs: Vec<Resolved>,
+        out: &mut Vec<Resolved>,
+    ) {
+        for output in outputs {
+            match output {
+                Resolved::Refeed(keys) => {
+                    for key in keys {
+                        let next = r.feed(km.effective(ctx), ctx.counts(), T, key);
+                        settle(r, km, ctx, next, out);
+                    }
+                }
+                other => out.push(erase(other)),
+            }
+        }
+    }
+    /// Feeds keys that stay pending and returns the timer of the last one.
+    fn pending_timer(r: &mut Resolver, km: &Keymap, ctx: InputContext, text: &str) -> TimerId {
+        let out: Vec<Resolved> = seq(text)
             .keys()
             .iter()
             .flat_map(|&key| r.feed(km.effective(ctx), ctx.counts(), T, key))
-            .map(erase)
-            .collect()
+            .collect();
+        last_timer(&out)
     }
     fn erase(r: Resolved) -> Resolved {
         match r {
@@ -225,6 +284,25 @@ mod tests {
     }
     fn defaults() -> Keymap {
         Keymap::new(&space(), [])
+    }
+    /// `]` in `timeline` and `]gq` in `normal`, the bindings the comparison
+    /// with nvim 0.12.4 used.
+    fn brackets() -> Keymap {
+        Keymap::new(
+            &space(),
+            [
+                (
+                    TableId::Timeline,
+                    seq("]"),
+                    Binding::single(Action::CursorLast),
+                ),
+                (
+                    TableId::Normal,
+                    seq("]gq"),
+                    Binding::single(Action::RoomMarkRead),
+                ),
+            ],
+        )
     }
 
     #[test]
@@ -308,7 +386,7 @@ mod tests {
         let id = last_timer(&out);
         assert_eq!(
             r.timeout(km.effective(InputContext::Timeline), id),
-            Some(release("g"))
+            vec![release("g")]
         );
         assert!(r.pending().is_empty());
     }
@@ -338,7 +416,7 @@ mod tests {
         let id = last_timer(&out);
         assert_eq!(
             r.timeout(km.effective(ctx), id),
-            Some(run(Action::CursorLast, Some(2)))
+            vec![run(Action::CursorLast, Some(2))]
         );
     }
 
@@ -352,7 +430,7 @@ mod tests {
             feed_all(&mut r, &km, ctx, "g"),
             vec![run(Action::CursorFirst, None)]
         );
-        assert_eq!(r.timeout(km.effective(ctx), first), None);
+        assert_eq!(r.timeout(km.effective(ctx), first), vec![]);
     }
 
     #[test]
@@ -446,11 +524,46 @@ mod tests {
     }
 
     #[test]
-    fn a_pending_sequence_runs_only_when_it_is_a_binding_itself() {
-        // `]` is a binding and `]a` is only a prefix of `]ab`. The design runs
-        // the pending keys only when they are a binding themselves, so `]a`
-        // is released on a timeout and on a mismatch.
-        let km = Keymap::new(
+    fn mismatch_runs_the_longest_binding_then_resolves_the_rest_afresh() {
+        // As in nvim: `]` runs, `g` waits again, `gj` matches nothing and `g`
+        // is no binding, so `g` is released and `j` runs.
+        let km = brackets();
+        let mut r = Resolver::new();
+        assert_eq!(
+            feed_all(&mut r, &km, InputContext::Timeline, "]gj"),
+            vec![
+                timer(),
+                timer(),
+                run(Action::CursorLast, None),
+                timer(),
+                release("g"),
+                run(Action::CursorDown, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn timeout_runs_the_longest_binding_then_hands_back_the_rest() {
+        // As in nvim: `]g` then the timeout runs `]`, and `g` waits again.
+        let km = brackets();
+        let ctx = InputContext::Timeline;
+        let mut r = Resolver::new();
+        let id = pending_timer(&mut r, &km, ctx, "]g");
+        assert_eq!(
+            r.timeout(km.effective(ctx), id),
+            vec![
+                run(Action::CursorLast, None),
+                Resolved::Refeed(seq("g").keys().to_vec()),
+            ]
+        );
+        assert_eq!(feed_all(&mut r, &km, ctx, "g"), vec![timer()]);
+        assert_eq!(r.pending(), seq("g").keys());
+    }
+
+    /// `]` and `]g` in `timeline` and `]gqx` in `normal`: two bindings are
+    /// prefixes of the pending keys.
+    fn nested_brackets() -> Keymap {
+        Keymap::new(
             &space(),
             [
                 (
@@ -459,25 +572,97 @@ mod tests {
                     Binding::single(Action::CursorLast),
                 ),
                 (
+                    TableId::Timeline,
+                    seq("]g"),
+                    Binding::single(Action::CursorFirst),
+                ),
+                (
                     TableId::Normal,
-                    seq("]ab"),
+                    seq("]gqx"),
                     Binding::single(Action::RoomMarkRead),
                 ),
             ],
-        );
-        let ctx = InputContext::Timeline;
+        )
+    }
+
+    #[test]
+    fn mismatch_runs_the_longest_of_several_bindings() {
+        // As in nvim (`]Xzz` with `]`, `]X` and `]Xq` mapped runs `]X`).
+        let km = nested_brackets();
         let mut r = Resolver::new();
-        r.feed(km.effective(ctx), true, T, k("]"));
-        let id = last_timer(&r.feed(km.effective(ctx), true, T, k("a")));
-        assert_eq!(r.timeout(km.effective(ctx), id), Some(release("]a")));
         assert_eq!(
-            feed_all(&mut r, &km, ctx, "]aj"),
+            feed_all(&mut r, &km, InputContext::Timeline, "]gj"),
             vec![
                 timer(),
                 timer(),
-                release("]a"),
-                run(Action::CursorDown, None)
+                run(Action::CursorFirst, None),
+                run(Action::CursorDown, None),
             ]
+        );
+    }
+
+    #[test]
+    fn timeout_runs_the_longest_of_several_bindings() {
+        // `]gq` is no binding, so `]g` runs and `q` is handed back.
+        let km = nested_brackets();
+        let ctx = InputContext::Timeline;
+        let mut r = Resolver::new();
+        let id = pending_timer(&mut r, &km, ctx, "]gq");
+        assert_eq!(
+            r.timeout(km.effective(ctx), id),
+            vec![
+                run(Action::CursorFirst, None),
+                Resolved::Refeed(seq("q").keys().to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_full_miss_releases_only_the_first_key() {
+        // As in nvim: no prefix of `<C-x><C-y>a` is a binding, so `<C-x>` is
+        // released and `<C-y>a` is resolved afresh.
+        let km = Keymap::new(
+            &space(),
+            [
+                (
+                    TableId::ComposerInsert,
+                    seq("<C-x><C-y><C-z>"),
+                    Binding::single(Action::Nop),
+                ),
+                (
+                    TableId::ComposerInsert,
+                    seq("<C-y>a"),
+                    Binding::single(Action::ComposerNewline),
+                ),
+            ],
+        );
+        let mut r = Resolver::new();
+        assert_eq!(
+            feed_all(&mut r, &km, InputContext::ComposerInsert, "<C-x><C-y>a"),
+            vec![
+                timer(),
+                timer(),
+                release("<C-x>"),
+                timer(),
+                run(Action::ComposerNewline, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_count_goes_to_the_binding_that_runs_and_not_to_the_rest() {
+        let km = brackets();
+        let ctx = InputContext::Timeline;
+        let mut r = Resolver::new();
+        let id = pending_timer(&mut r, &km, ctx, "2]g");
+        assert_eq!(
+            timeout_all(&mut r, &km, ctx, id),
+            vec![run(Action::CursorLast, Some(2)), timer()]
+        );
+        assert_eq!(r.count(), None);
+        assert_eq!(
+            feed_all(&mut r, &km, ctx, "g"),
+            vec![run(Action::CursorFirst, None)]
         );
     }
 

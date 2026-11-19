@@ -8,6 +8,7 @@ use crate::ids::{RoomId, UserId};
 use crate::mention::{
     Member, MentionRef, mention_text, mentions_for_edit, rank_members, render_mentions,
 };
+use crate::msg::EditorMode;
 use crate::timeline::{Draft, ItemRef, MessageContent, OwnEvent, TimelineEntry};
 
 /// The most candidates the mention menu keeps, so a lone `@` in a room with
@@ -73,12 +74,17 @@ impl App {
     /// `composer.focus`: the open room's composer gets the keys. The first
     /// time for a room, its members are requested for mention completion.
     /// A menu from an earlier focus is closed; the tui reports the token.
+    /// With insert mode, keys resolved again after it are resolved in insert
+    /// mode. With `Keep`, the core learns the mode with the next key.
     pub(super) fn focus_composer(&mut self, mode: FocusMode, effects: &mut Vec<Effect>) {
         let Some(room) = self.open_room.clone() else {
             return self.set_status(StatusKind::Error, "No room is open");
         };
         self.focus = Focus::Composer;
         self.mention_menu = None;
+        if mode == FocusMode::Insert {
+            self.editor = Some(EditorMode::Insert);
+        }
         effects.push(Effect::Ui(UiEffect::FocusComposer {
             room: room.clone(),
             mode,

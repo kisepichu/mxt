@@ -93,6 +93,13 @@ pub struct App {
     /// The input context of the last key, where the resolver's pending keys
     /// started.
     key_context: InputContext,
+    /// The editor mode reported with the last key, for the keys resolved
+    /// again after a binding, also after a timeout. `composer.focus` with
+    /// insert mode sets it to insert, as the tui adapter enters insert mode
+    /// for it. Other mode changes before the next key are unknown to the
+    /// core, such as a released `a` in `composer.normal` that starts insert
+    /// mode: keys resolved again after it still use the mode reported last.
+    editor: Option<EditorMode>,
     rooms: RoomList,
     /// The room list cursor, once a cursor action, a search or opening a room
     /// placed it. Until then, and while the list is empty, it is `None` and
@@ -134,6 +141,7 @@ impl App {
             me,
             resolver: Resolver::new(),
             key_context,
+            editor: None,
             rooms: RoomList::new(settings.room_sort),
             room_cursor: None,
             open_room: None,
@@ -318,51 +326,41 @@ impl App {
     }
 
     fn key(&mut self, key: Key, editor: Option<EditorMode>, effects: &mut Vec<Effect>) {
-        // Outside `feed`, so a status set by a binding that `key` ended
-        // survives when `key` is fed again.
+        // Outside `feed`, so a status set by a binding survives the keys fed
+        // again after it.
         self.status = None;
+        self.editor = editor;
         // The mention menu belongs to insert mode, and the tui reports the
         // editor mode with every key.
         if editor != Some(EditorMode::Insert) {
             self.cancel_completion();
         }
-        self.feed(key, editor, effects);
+        self.feed(key, effects);
     }
 
-    /// Resolves `key` in the current input context. When a binding that ran
-    /// before `key` was resolved (the pending keys `key` ended) changes the
-    /// context or asks for confirmation, the rest of the outputs belong to
-    /// the old context, so `key` is resolved afresh in the new one (design,
+    /// Resolves `key` in the current input context. The keys the resolver
+    /// hands back after a binding ran come here again one by one, so when
+    /// the binding changed the context, they go to the new context (design,
     /// "Keymap resolver").
-    fn feed(&mut self, key: Key, editor: Option<EditorMode>, effects: &mut Vec<Effect>) {
+    fn feed(&mut self, key: Key, effects: &mut Vec<Effect>) {
         if let Some(confirm) = self.confirm.take() {
             // Keys pending from before the question go with it.
             self.resolver.reset();
             return self.answer(confirm, key, effects);
         }
-        let context = self.input_context(editor);
+        let context = self.input_context(self.editor);
         if context != self.key_context {
             self.resolver.reset();
             self.key_context = context;
         }
-        let map = self.keymap.effective(context);
-        let timeoutlen_ms = self.settings.timeoutlen_ms;
-        let mut resolved = self
-            .resolver
-            .feed(map, context.counts(), timeoutlen_ms, key)
-            .into_iter();
-        while let Some(next) = resolved.next() {
-            let ran = matches!(next, Resolved::Run { .. });
+        let resolved = self.resolver.feed(
+            self.keymap.effective(context),
+            context.counts(),
+            self.settings.timeoutlen_ms,
+            key,
+        );
+        for next in resolved {
             self.resolved(context.sink(), next, effects);
-            // `key` was not part of the run when outputs follow it, or when
-            // `key` started a count after it (a run takes the count).
-            let key_left = resolved.len() > 0 || self.resolver.count().is_some();
-            let moved = self.confirm.is_some() || self.input_context(editor) != context;
-            if ran && key_left && moved {
-                // The reset in the new context drops the old outputs and the
-                // count. Nothing is pending then, so this does not come back.
-                return self.feed(key, editor, effects);
-            }
         }
     }
 
@@ -378,11 +376,12 @@ impl App {
         }
     }
 
-    /// Resolves the pending keys in the context they started in.
+    /// Resolves the pending keys in the context they started in; the keys
+    /// handed back go through `feed` like typed keys.
     fn timeout(&mut self, id: TimerId, effects: &mut Vec<Effect>) {
         let context = self.key_context;
-        if let Some(resolved) = self.resolver.timeout(self.keymap.effective(context), id) {
-            self.resolved(context.sink(), resolved, effects);
+        for next in self.resolver.timeout(self.keymap.effective(context), id) {
+            self.resolved(context.sink(), next, effects);
         }
     }
 
@@ -392,6 +391,17 @@ impl App {
             Resolved::Release(keys) => self.release(sink, keys, effects),
             Resolved::StartTimer { id, after_ms } => {
                 effects.push(Effect::Ui(UiEffect::StartTimer { id, after_ms }));
+            }
+            Resolved::Refeed(keys) => {
+                for key in keys {
+                    // Unlike nvim, a question drops the keys left over
+                    // instead of taking one as the answer, so keys typed
+                    // ahead never confirm a redaction.
+                    if self.confirm.is_some() {
+                        break;
+                    }
+                    self.feed(key, effects);
+                }
             }
         }
     }
