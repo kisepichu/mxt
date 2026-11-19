@@ -132,4 +132,6 @@ pub enum Msg {
         item: ItemRef,
         reason: String,
     },
+    /// `MatrixEffect::Recover` imported the secrets.
+    Recovered,
 }

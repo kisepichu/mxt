@@ -6,7 +6,15 @@
 use std::{collections::VecDeque, fs, time::Duration};
 
 use matrix_sdk::{
-    ruma::{self, event_id, owned_device_id},
+    ruma::{
+        self, event_id,
+        events::secret_storage::key::{
+            SecretStorageEncryptionAlgorithm, SecretStorageKeyEventContent,
+            SecretStorageV1AesHmacSha2Properties,
+        },
+        owned_device_id,
+        serde::Base64,
+    },
     send_queue::{LocalEcho, LocalEchoContent},
     test_utils::mocks::MatrixMockServer,
 };
@@ -151,8 +159,9 @@ impl Core {
         }
     }
 
-    /// The next answer of a send or report of a failure (`SendQueued`,
-    /// `SendFailed`, `EffectFailed`); other messages are skipped.
+    /// The next answer of a send, of a recovery, or report of a failure
+    /// (`SendQueued`, `SendFailed`, `Recovered`, `EffectFailed`); other
+    /// messages are skipped.
     async fn report(&mut self) -> Msg {
         loop {
             if let Some(report) = self.reports.pop_front() {
@@ -168,6 +177,7 @@ impl Core {
             Ok(Some(
                 report @ (Msg::SendQueued { .. }
                 | Msg::SendFailed { .. }
+                | Msg::Recovered
                 | Msg::EffectFailed { .. }),
             )) => self.reports.push_back(report),
             Ok(Some(_)) => {}
@@ -350,4 +360,69 @@ async fn a_refused_reaction_is_dropped_from_the_timeline_and_reported() {
         })
         .await;
     assert!(adapter.queued().await.is_empty());
+}
+
+/// The adapter, and secret storage with the key description of
+/// matrix-sdk's mock examples, which `EXAMPLE_RECOVERY_KEY` opens.
+async fn with_secret_storage() -> Adapter {
+    let adapter = Adapter::start().await;
+    let me = ruma::UserId::parse(ME).unwrap();
+    let server = &adapter.server;
+    server
+        .mock_get_default_secret_storage_key()
+        .ok(&me, "abc")
+        .mount()
+        .await;
+    let properties = SecretStorageV1AesHmacSha2Properties::new(
+        Some(Base64::parse("xv5b6/p3ExEw++wTyfSHEg==").unwrap()),
+        Some(Base64::parse("ujBBbXahnTAMkmPUX2/0+VTfUh63pGyVRuBcDMgmJC8=").unwrap()),
+    );
+    let description = SecretStorageKeyEventContent::new(
+        "abc".to_owned(),
+        SecretStorageEncryptionAlgorithm::V1AesHmacSha2(properties),
+    );
+    server
+        .mock_get_secret_storage_key()
+        .ok(&me, &description)
+        .mount()
+        .await;
+    adapter
+}
+
+/// The recovery key of the doc example of matrix-sdk's
+/// `mock_get_secret_storage_key`.
+const EXAMPLE_RECOVERY_KEY: &str = "EsTj 3yST y93F SLpB jJsz eAXc 2XzA ygD3 w69H fGaN TKBj jXEd";
+
+const WRONG_KEY: &str = "Recovery failed: the recovery key is wrong";
+
+/// The status line's text of the failure that answers `key`.
+async fn recovery_failure(adapter: &mut Adapter, key: &str) -> String {
+    adapter.effect(MatrixEffect::Recover(key.to_owned().into()));
+    match adapter.core.report().await {
+        Msg::EffectFailed { error } => error,
+        other => panic!("not a failure: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_wrong_recovery_key_is_reported_without_any_of_the_key() {
+    let mut adapter = with_secret_storage().await;
+    // The SDK's errors would show the first two bytes of the first key
+    // (`[10, 50]`, not the prefix of a recovery key) and the `+` of the
+    // second.
+    for key in [
+        "2222 2222 2222 2222 2222 2222 2222 2222 2222 2222 2222 2222",
+        "made+up",
+    ] {
+        assert_eq!(recovery_failure(&mut adapter, key).await, WRONG_KEY);
+    }
+}
+
+#[tokio::test]
+async fn a_failure_after_the_right_recovery_key_is_not_a_wrong_key() {
+    let mut adapter = with_secret_storage().await;
+    // The key opens the secret storage; importing the secrets fails next,
+    // since the mock homeserver has none.
+    let error = recovery_failure(&mut adapter, EXAMPLE_RECOVERY_KEY).await;
+    assert_ne!(error, WRONG_KEY);
 }

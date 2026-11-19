@@ -30,7 +30,7 @@ use tracing::{debug, warn};
 use crate::{
     Error, SyncLoop,
     error::without_url,
-    media, rooms,
+    media, recovery, rooms,
     send_queue::{self, Edits},
     timeline::{Answer, Subscription, event_id, redact, resend, send_message, toggle_reaction},
 };
@@ -288,6 +288,15 @@ async fn run_effects(
                     let open = open_timeline(&timeline, &room);
                     let fetched = async move { media::fetch_image(&client, &*open?, item).await };
                     running.spawn(answered(&to_core, "Loading the image failed", fetched));
+                }
+                Some(MatrixEffect::Recover(key)) => {
+                    let client = client.clone();
+                    // The key is dropped with the task.
+                    let recovered = async move {
+                        recovery::recover(&client, key.expose()).await?;
+                        Ok(Msg::Recovered)
+                    };
+                    running.spawn(answered(&to_core, "Recovery failed", recovered));
                 }
                 None => break,
             },
@@ -550,7 +559,8 @@ fn sdk_room(client: &Client, room: &RoomId) -> Result<Room, Error> {
         .ok_or(Error::UnknownRoom)
 }
 
-/// The status line and the `warn` log get the brief error, without event
+/// The status line and the `warn` log, which the event loop writes for
+/// every failure it passes to the core, get the brief error, without event
 /// contents or room IDs; `debug` gets the full one.
 fn report(to_core: &UnboundedSender<Msg>, what: &str, error: &Error) {
     report_brief(to_core, what, &error.brief(), error);
@@ -588,10 +598,9 @@ pub(crate) fn report_brief(
     let _ = to_core.send(Msg::EffectFailed { error });
 }
 
-/// Logs a failure, `brief` to `warn` and `full` to `debug`, and returns the
-/// status line's text.
+/// Logs the full failure to `debug` and returns the status line's text,
+/// which the event loop logs to `warn`.
 fn logged(what: &str, brief: &dyn Display, full: &dyn Display) -> String {
-    warn!("{what}: {brief}");
     debug!("{what}: {full}");
     format!("{what}: {brief}")
 }

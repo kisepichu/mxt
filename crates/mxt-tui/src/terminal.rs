@@ -310,10 +310,10 @@ impl Tui {
                     msgs.push(cannot_show(error));
                 }
             }
-            UiEffect::OpenPath(path) => self.open(&path, &mut msgs),
-            UiEffect::OpenUrl(url) if is_web_url(&url) => self.open(&url, &mut msgs),
-            UiEffect::OpenUrl(url) => msgs.push(Msg::EffectFailed {
-                error: format!("Not opening {url}: only http and https links are opened"),
+            UiEffect::OpenPath(path) => msgs.extend(open(&self.opener, &path)),
+            UiEffect::OpenUrl(url) if is_web_url(&url) => msgs.extend(open(&self.opener, &url)),
+            UiEffect::OpenUrl(_) => msgs.push(Msg::EffectFailed {
+                error: "Not opening the link: only http and https links are opened".to_owned(),
             }),
             UiEffect::CloseView => self.view = None,
             UiEffect::Yank(text) => self.register.copy(text),
@@ -346,15 +346,6 @@ impl Tui {
             UiEffect::Quit => self.should_quit = true,
         }
         msgs
-    }
-
-    /// Runs `files.opener` on `target`.
-    fn open(&self, target: &str, msgs: &mut Vec<Msg>) {
-        if let Err(error) = self.opener.open(target) {
-            msgs.push(Msg::EffectFailed {
-                error: format!("Cannot open {target}: {error}"),
-            });
-        }
     }
 
     /// Runs the external editor on the room's composer.
@@ -439,6 +430,16 @@ impl Drop for Tui {
         // Nothing is left to report the error to.
         let _ = self.restore();
     }
+}
+
+/// Runs `files.opener` on `target`. A failure is the opener's, so its text,
+/// which the event loop also logs, leaves out the link or file name, which
+/// come from a message.
+fn open(opener: &Opener, target: &str) -> Option<Msg> {
+    let error = opener.open(target).err()?;
+    Some(Msg::EffectFailed {
+        error: format!("Cannot start files.opener: {error}"),
+    })
 }
 
 /// The status for an image that could not be decoded or encoded.
@@ -567,5 +568,22 @@ mod tests {
         repaint(&mut screen.terminal).unwrap();
         screen.draw(&app, None);
         assert_eq!(screen.terminal.backend().buffer(), &frame);
+    }
+
+    #[test]
+    fn failures_to_open_name_neither_the_link_nor_the_file() {
+        let missing = Opener::new(vec!["/nonexistent/mxt-opener".into()]);
+        for target in [
+            "https://example.org/plans",
+            "/home/alice/Downloads/plans.pdf",
+        ] {
+            match open(&missing, target) {
+                Some(Msg::EffectFailed { error }) => {
+                    assert!(error.starts_with("Cannot start files.opener: "), "{error}");
+                    assert!(!error.contains("plans"), "{error}");
+                }
+                other => panic!("not a failure: {other:?}"),
+            }
+        }
     }
 }

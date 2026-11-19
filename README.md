@@ -11,8 +11,8 @@ user interface around it. It runs on Linux and macOS.
 ## Features
 
 - Password login, end-to-end encryption, and the recovery key on the first
-  start, so the new device is cross-signed and reads older messages from the
-  key backup.
+  start or later with `:recover`, so the new device is cross-signed and
+  reads older messages from the key backup.
 - A room list that names bridged rooms `<network> / <room>` (for example
   `Discord / Alice`) and shows one unread badge per room: mentions,
   notifications, unread messages (in muted rooms too) or the manual unread
@@ -140,13 +140,11 @@ PKG_CONFIG_PATH="$(brew --prefix sqlite)/lib/pkgconfig" \
    so and continues; set up recovery in another client.
 
    An empty input skips recovery, and a failed recovery prints the reason
-   and continues. After an empty input, mxt says that `:recover` asks again
-   later, but in this version `:recover` only answers "account.recover is
-   not available yet".
-   To enter the key later, log in again as a new device: quit mxt, delete
-   `session.json` in the data directory (see [Files](#files)) and start mxt.
-   The old device stays in your account's device list; remove it from
-   another client.
+   and continues. To enter the key later, or again after a failure, run
+   `:recover` in the terminal UI: it asks for the key in the status line,
+   shown as `*` (`<CR>` submits, `<Esc>` cancels), and then says
+   `Recovery complete` or why it failed, for example
+   `Recovery failed: the recovery key is wrong`.
 
 5. The terminal UI starts. `:q` quits. The keys are in [Keys](docs/keys.md).
 
@@ -175,6 +173,9 @@ last seven are kept; nothing is logged to the terminal. `MXT_LOG` takes a
 [tracing `EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html)
 directive, for example `MXT_LOG=debug` or `MXT_LOG=warn,mxt_matrix=debug`.
 The default is `warn,mxt=info,mxt_core=info,mxt_matrix=info,mxt_tui=info`.
+Failed requests to the homeserver, and failures of the opener, the external
+editor and image display, are also logged at `warn`, so the log keeps the
+errors the status line has replaced.
 
 When the session cannot be used any more, mxt moves its data aside, prints
 why, and exits; the next start logs in as a new device, and asks for the

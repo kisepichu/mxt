@@ -311,7 +311,7 @@ message under the timeline cursor.
 | `focus.room_list` | | Moves the focus to the room list, and shows it if it is hidden. |
 | `focus.timeline` | | Moves the focus to the timeline. |
 | `file.upload` | `path`, required | Uploads the file at `path` to the open room. `~/` is your home directory; a relative path is relative to the directory mxt was started in. |
-| `account.recover` | | Not available yet: says "account.recover is not available yet". |
+| `account.recover` | | Asks for the recovery key in `SECRET` mode, masked; `<CR>` submits and `<Esc>` cancels. As on the first start, the key cross-signs this device and lets it fetch room keys from the key backup. |
 | `app.quit` | | Quits mxt. |
 | `nop` | | Does nothing. |
 
