@@ -12,6 +12,7 @@ publish = false
 futures-util.workspace = true
 matrix-sdk.workspace = true
 matrix-sdk-ui.workspace = true
+mime_guess.workspace = true
 mxt-core.workspace = true
 ruma.workspace = true
 serde.workspace = true

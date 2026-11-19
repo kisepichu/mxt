@@ -267,7 +267,7 @@ async fn fetch_reply_details(timeline: Arc<Timeline>, mut ids: UnboundedReceiver
 /// edit, which keeps its mentions in the new content. The local echo shows
 /// the send state, so only a failure to queue is an error here.
 pub(crate) async fn send_message(timeline: &Timeline, message: Outgoing) -> Result<(), Error> {
-    enable_sending(timeline);
+    enable_sending(timeline.room());
     let content = outgoing_content(&message.body);
     let queued = match message.kind {
         OutgoingKind::New => timeline
@@ -305,7 +305,7 @@ pub(crate) async fn toggle_reaction(
     item: &ItemRef,
     key: &str,
 ) -> Result<(), Error> {
-    enable_sending(timeline);
+    enable_sending(timeline.room());
     timeline
         .toggle_reaction(&item_id(item)?, key)
         .await
@@ -328,7 +328,7 @@ pub(crate) async fn redact(timeline: &Timeline, item: &ItemRef) -> Result<(), Er
             .map(drop)
             .map_err(|error| without_url(error.into()).into()),
         ItemRef::Local(_) => {
-            enable_sending(timeline);
+            enable_sending(timeline.room());
             timeline
                 .redact(&item_id(item)?, None)
                 .await
@@ -351,20 +351,40 @@ pub(crate) async fn resend(timeline: &Timeline, txn: &TxnId) -> Result<(), Error
         .unwedge()
         .await
         .map_err(|error| Error::Timeline(error.into()))?;
-    enable_sending(timeline);
+    enable_sending(timeline.room());
     Ok(())
+}
+
+/// The message type of `item`, with its latest edit applied, for the
+/// attachment it carries; `None` when the item is not a message.
+pub(crate) async fn message_type(
+    timeline: &Timeline,
+    item: &ItemRef,
+) -> Result<Option<MessageType>, Error> {
+    let id = item_id(item)?;
+    let items = timeline.items().await;
+    let event = items
+        .iter()
+        .rev()
+        .find_map(|item| item.as_event().filter(|event| event.identifier() == id));
+    let event = event.ok_or_else(|| Error::Timeline(sdk::Error::EventNotInTimeline(id)))?;
+    Ok(event
+        .content()
+        .as_message()
+        .map(|message| message.msgtype().clone()))
 }
 
 /// The SDK disables a room's send queue after any failed request, and only
 /// `Client::resume` enables it again, so every request the user queues or
 /// deletes enables it (the adapter also enables every queue when the sync
-/// connects); otherwise later messages, reactions and redactions would wait
-/// for good. A request that failed with a recoverable error (the network,
-/// for example) stays queued and goes out first, which keeps the order; one
-/// that failed otherwise holds back the ones after it until it is resent or
-/// deleted, or, for an edit or a reaction, dropped (see `send_queue`).
-fn enable_sending(timeline: &Timeline) {
-    timeline.room().send_queue().set_enabled(true);
+/// connects); otherwise later messages, uploads, reactions and redactions
+/// would wait for good. A request that failed with a recoverable error (the
+/// network, for example) stays queued and goes out first, which keeps the
+/// order; one that failed otherwise holds back the ones after it until it is
+/// resent or deleted, or, for an edit or a reaction, dropped (see
+/// `send_queue`).
+pub(crate) fn enable_sending(room: &Room) {
+    room.send_queue().set_enabled(true);
 }
 
 /// The content of a message from the composer (design, "Matrix adapter",

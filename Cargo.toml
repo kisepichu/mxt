@@ -33,6 +33,10 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 jiff = "1"
 matrix-sdk = { version = "0.19", default-features = false, features = ["e2e-encryption", "sqlite", "rustls-aws-lc-rs"] }
 matrix-sdk-ui = { version = "0.19", default-features = false }
+# The MIME type of an upload, guessed from its file name; also the `mime`
+# version matrix-sdk takes. The reverse mapping (extensions of a MIME type)
+# is left out.
+mime_guess = { version = "2", default-features = false }
 nucleo-matcher = "0.3"
 # Only the offsets of code spans and blocks, for mentions; the HTML renderer
 # and the command line tool are left out.

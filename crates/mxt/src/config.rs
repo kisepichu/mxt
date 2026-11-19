@@ -37,10 +37,6 @@ pub struct Config {
     /// `ui.room_list.width` and `ui.room_list.network`, for `mxt-tui`.
     pub room_list_layout: RoomListLayout,
     /// Absolute.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "file downloads (phase 4) save here")
-    )]
     pub download_dir: PathBuf,
     pub opener: Vec<String>,
 }

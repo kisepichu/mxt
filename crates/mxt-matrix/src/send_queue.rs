@@ -1,11 +1,18 @@
-//! Edits, reactions and redactions that fail for good are dropped from their
-//! room's send queue, so they do not hold back the room's later requests.
+//! Requests that fail for good in a room's send queue: edits, reactions and
+//! redactions are dropped, so they do not hold back the room's later
+//! requests, and failed uploads are reported.
 
 use std::collections::BTreeMap;
 
 use matrix_sdk::{
     Client, QueueWedgeError,
-    ruma::{OwnedRoomId, RoomId, events::room::encrypted::Relation},
+    ruma::{
+        OwnedRoomId, RoomId,
+        events::{
+            AnyMessageLikeEventContent,
+            room::{encrypted::Relation, message::MessageType},
+        },
+    },
     send_queue::{LocalEcho, LocalEchoContent, RoomSendQueueUpdate, SendQueueUpdate},
     store::SerializableEventContent,
 };
@@ -27,8 +34,11 @@ use crate::{adapter::report_brief, error::brief_sdk};
 /// good. So it is aborted, which takes it off its target item, its room's
 /// queue is enabled again, and the failure is reported. Recoverable failures
 /// stay queued: they go out with the next request or when the sync connects.
-/// Failed messages are left alone: their local echo shows the failure.
-pub(crate) async fn drop_failed_aggregations(
+/// Failed messages are left alone: their local echo shows the failure. A
+/// failed upload is reported as well: it fails long after `:upload`, behind
+/// the room's earlier requests, and its reason (a file above the
+/// homeserver's limit, for example) is something the user can act on.
+pub(crate) async fn handle_failures(
     client: Client,
     mut updates: broadcast::Receiver<SendQueueUpdate>,
     to_core: UnboundedSender<Msg>,
@@ -50,14 +60,17 @@ pub(crate) async fn drop_failed_aggregations(
                     .flatten()
                     .find(|echo| echo.transaction_id == transaction_id);
                 if let Some(echo) = failed
-                    && let Some(what) = drop_aggregation(&client, &room_id, echo).await
+                    && let Some(what) = drop_aggregation(&client, &room_id, echo)
+                        .await
+                        .or_else(|| upload(&echo.content))
                 {
                     report_brief(&to_core, what, &brief_sdk(&error), &error);
                 }
             }
             Ok(_) => {}
             // A missed update may have been such a failure; the store keeps
-            // the error of a request that failed for good.
+            // the error of a request that failed for good. A failed upload
+            // keeps its local echo, which shows the failure.
             Err(RecvError::Lagged(_)) => {
                 for (room_id, echoes) in local_echoes(&client).await {
                     for echo in &echoes {
@@ -135,6 +148,31 @@ fn event_aggregation(event: &SerializableEventContent) -> Option<&'static str> {
     }
 }
 
+/// What failed, for the report, when `content` is an upload.
+fn upload(content: &LocalEchoContent) -> Option<&'static str> {
+    match content {
+        LocalEchoContent::Event {
+            serialized_event, ..
+        } => event_upload(serialized_event),
+        LocalEchoContent::React { .. } | LocalEchoContent::Redaction { .. } => None,
+    }
+}
+
+/// Messages with an attachment: `:upload` sends them.
+fn event_upload(event: &SerializableEventContent) -> Option<&'static str> {
+    let AnyMessageLikeEventContent::RoomMessage(message) = event.deserialize().ok()? else {
+        return None;
+    };
+    matches!(
+        message.msgtype,
+        MessageType::Image(_)
+            | MessageType::File(_)
+            | MessageType::Video(_)
+            | MessageType::Audio(_)
+    )
+    .then_some("Uploading the file failed")
+}
+
 /// The error of a request that failed for good. A reaction to a local echo
 /// waits for its target, and is then sent as an event of its own.
 fn wedge(content: &LocalEchoContent) -> Option<&QueueWedgeError> {
@@ -149,12 +187,13 @@ fn wedge(content: &LocalEchoContent) -> Option<&QueueWedgeError> {
 mod tests {
     use matrix_sdk::ruma::{
         events::{
-            AnyMessageLikeEventContent,
             reaction::ReactionEventContent,
             relation::{Annotation, Reply},
-            room::message::{self, ReplacementMetadata, RoomMessageEventContent},
+            room::message::{
+                self, FileMessageEventContent, ReplacementMetadata, RoomMessageEventContent,
+            },
         },
-        owned_event_id,
+        owned_event_id, owned_mxc_uri,
     };
 
     use super::*;
@@ -179,5 +218,23 @@ mod tests {
         let mut reply = RoomMessageEventContent::text_plain("hi");
         reply.relates_to = Some(message::Relation::Reply(Reply::with_event_id(target)));
         assert_eq!(aggregation_of(reply), None);
+    }
+
+    #[test]
+    fn failed_attachments_are_uploads_and_text_messages_are_not() {
+        let event = |content: RoomMessageEventContent| {
+            SerializableEventContent::new(&content.into()).unwrap()
+        };
+        let file = FileMessageEventContent::plain(
+            "notes.pdf".to_owned(),
+            owned_mxc_uri!("mxc://send-queue.localhost/notes"),
+        );
+        let file = RoomMessageEventContent::new(MessageType::File(file));
+        assert_eq!(
+            event_upload(&event(file)),
+            Some("Uploading the file failed")
+        );
+        let text = RoomMessageEventContent::text_plain("hi");
+        assert_eq!(event_upload(&event(text)), None);
     }
 }
