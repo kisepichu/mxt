@@ -77,28 +77,21 @@ impl Adapter {
 
         let (to_core, from_adapter) = mpsc::unbounded_channel();
         let (effects, queue) = mpsc::unbounded_channel();
-        let edits = Edits::default();
-        let mut tasks = JoinSet::new();
-        tasks.spawn(send_queue::handle_failures(
-            client.clone(),
-            edits.clone(),
-            client.send_queue().subscribe(),
-            to_core.clone(),
-        ));
         let settings = client.notification_settings().await;
         let files = Files {
             download_dir: PathBuf::new(),
             home: PathBuf::new(),
         };
-        tasks.spawn(run_effects(
+        let mut tasks = JoinSet::new();
+        spawn_send_paths(
+            &mut tasks,
             client.clone(),
             settings,
             ReceiptKind::Public,
             files,
-            edits,
             to_core,
             queue,
-        ));
+        );
         let mut adapter = Adapter {
             server,
             client,
@@ -127,7 +120,8 @@ impl Adapter {
 }
 
 /// What the adapter sends to the core: the open room's entries, built as
-/// the core builds them, and the other messages.
+/// the core builds them, and the answers of sends and the failures (see
+/// `report`).
 struct Core {
     from_adapter: UnboundedReceiver<Msg>,
     entries: Vec<TimelineEntry>,
@@ -157,7 +151,8 @@ impl Core {
         }
     }
 
-    /// The next message that is not a timeline change.
+    /// The next answer of a send or report of a failure (`SendQueued`,
+    /// `SendFailed`, `EffectFailed`); other messages are skipped.
     async fn report(&mut self) -> Msg {
         loop {
             if let Some(report) = self.reports.pop_front() {
@@ -170,7 +165,12 @@ impl Core {
     async fn receive(&mut self, what: &str) {
         match timeout(WAIT, self.from_adapter.recv()).await {
             Ok(Some(Msg::Timeline { diffs, .. })) => self.diffs.extend(diffs),
-            Ok(Some(report)) => self.reports.push_back(report),
+            Ok(Some(
+                report @ (Msg::SendQueued { .. }
+                | Msg::SendFailed { .. }
+                | Msg::EffectFailed { .. }),
+            )) => self.reports.push_back(report),
+            Ok(Some(_)) => {}
             Ok(None) => panic!("the adapter stopped while waiting for {what}"),
             Err(_) => panic!("waited {WAIT:?} for {what}"),
         }
@@ -255,6 +255,8 @@ async fn an_edit_of_a_sent_message_is_answered_with_send_queued_once_sent() {
     });
 
     assert_eq!(adapter.core.report().await, Msg::SendQueued { id });
+    // Answered once it left the send queue, not when it was queued.
+    assert!(adapter.queued().await.is_empty());
 }
 
 #[tokio::test]
