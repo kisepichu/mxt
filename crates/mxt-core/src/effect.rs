@@ -41,7 +41,7 @@ pub enum OutgoingKind {
 /// The recovery key (or passphrase) typed in `SECRET` mode, on its way to
 /// the matrix adapter. `Debug` shows nothing of it, so effects can be
 /// printed, in test failures for example, without it.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RecoveryKey(String);
 
 impl RecoveryKey {

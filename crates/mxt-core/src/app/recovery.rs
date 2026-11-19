@@ -12,8 +12,12 @@ const PROMPT: &str = "Recovery key: ";
 impl App {
     /// In `SECRET` mode: the prompt and the number of characters typed, for
     /// the masked input. The key itself leaves the core only in
-    /// `MatrixEffect::Recover`.
+    /// `MatrixEffect::Recover`. A binding can also ask a question, which
+    /// `feed` answers first, so the prompt waits until it is answered.
     pub fn secret_prompt(&self) -> Option<(&'static str, usize)> {
+        if self.confirm.is_some() {
+            return None;
+        }
         let typed = self.secret.as_ref()?.expose().chars().count();
         Some((PROMPT, typed))
     }
@@ -21,7 +25,10 @@ impl App {
     /// `account.recover` enters `SECRET` mode; keys pending from before go.
     pub(super) fn start_recovery(&mut self) {
         self.resolver.reset();
-        self.secret = Some(RecoveryKey::default());
+        // Room for a recovery key (59 characters) or a long passphrase, so
+        // typing it reallocates nothing and leaves no partial copies of it
+        // in freed memory.
+        self.secret = Some(RecoveryKey::from(String::with_capacity(128)));
     }
 
     /// A key in `SECRET` mode, which bypasses the keymap: `<CR>` submits

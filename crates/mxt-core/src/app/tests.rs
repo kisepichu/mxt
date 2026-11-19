@@ -84,6 +84,10 @@ fn last_timer(effects: &[Effect]) -> TimerId {
         _ => panic!("{effects:?}"),
     }
 }
+/// The number of characters on the recovery key prompt.
+fn secret_len(app: &App) -> Option<usize> {
+    app.secret_prompt().map(|(_, typed)| typed)
+}
 
 #[test]
 fn starts_on_the_room_list_with_the_cursor_on_the_first_room() {
@@ -334,7 +338,7 @@ fn recover_takes_the_key_masked_in_secret_mode_and_submits_it() {
     let mut app = app();
     assert_eq!(keys(&mut app, ":recover<CR>"), vec![]);
     assert_eq!(app.mode_label(None), "SECRET");
-    assert_eq!(app.secret_prompt(), Some(("Recovery key: ", 0)));
+    assert_eq!(secret_len(&app), Some(0));
 
     // Keys bypass the keymap: `j` and `:` are text, `<BS>`, `<C-w>` and
     // `<C-u>` edit as on the command line, and other keys do nothing.
@@ -345,7 +349,7 @@ fn recover_takes_the_key_masked_in_secret_mode_and_submits_it() {
     assert_eq!(typed, vec![]);
     assert_eq!(app.command_line(), None);
     assert_eq!(cursor_id(&app), "!c:example.org");
-    assert_eq!(app.secret_prompt(), Some(("Recovery key: ", 11)));
+    assert_eq!(secret_len(&app), Some(11));
 
     let effects = keys(&mut app, "<CR>");
     let key = RecoveryKey::from("Ej: Abc dEF".to_owned());
@@ -372,13 +376,34 @@ fn escape_cancels_the_recovery_and_a_blank_key_skips_it() {
     assert_eq!(app.mode_label(None), "NORMAL");
     // The next prompt starts empty.
     keys(&mut app, ":recover<CR>");
-    assert_eq!(app.secret_prompt(), Some(("Recovery key: ", 0)));
+    assert_eq!(secret_len(&app), Some(0));
     assert_eq!(keys(&mut app, "<Space><Space><CR>"), vec![]);
     assert_eq!(app.secret_prompt(), None);
     assert_eq!(app.status(), None);
     // The keymap applies again.
     keys(&mut app, "j");
     assert_eq!(cursor_id(&app), "!b:example.org");
+}
+
+#[test]
+fn keys_typed_in_secret_mode_never_reach_the_composer() {
+    let recover = Binding::single(Action::AccountRecover);
+    let mut app = app_with(vec![(TableId::ComposerInsert, seq("<C-r>"), recover)]);
+    keys(&mut app, "<CR>i");
+    let insert = |app: &mut App, text: &str| keys_in(app, text, Some(EditorMode::Insert));
+    assert_eq!(no_timers(insert(&mut app, "<C-r>")), vec![]);
+    assert_eq!(app.mode_label(Some(EditorMode::Insert)), "SECRET");
+    // Outside `SECRET` mode, insert mode replays these keys to the composer.
+    for (n, key) in ["a", "j", ":", "<Space>", "Z"].into_iter().enumerate() {
+        assert_eq!(insert(&mut app, key), vec![]);
+        assert_eq!(secret_len(&app), Some(n + 1));
+    }
+    let key = RecoveryKey::from("aj: Z".to_owned());
+    assert_eq!(
+        insert(&mut app, "<CR>"),
+        vec![Effect::Matrix(MatrixEffect::Recover(key))]
+    );
+    assert_eq!(app.mode_label(Some(EditorMode::Insert)), "INSERT");
 }
 
 #[test]
