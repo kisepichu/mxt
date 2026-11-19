@@ -1030,8 +1030,7 @@ dependencies = [
 [[package]]
 name = "edtui"
 version = "0.11.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "457e07adc705be57fe2b9c9b7ffd2816091540fe2a9aaeb960209b63aef6174b"
+source = "git+https://github.com/kisepichu/edtui?rev=4e0d019d5542011138af1bfd12e4ee769fafc560#4e0d019d5542011138af1bfd12e4ee769fafc560"
 dependencies = [
  "crossterm",
  "edit",
@@ -1039,6 +1038,7 @@ dependencies = [
  "enum_dispatch",
  "ratatui-core",
  "ratatui-widgets",
+ "unicode-segmentation",
  "unicode-width",
 ]
 

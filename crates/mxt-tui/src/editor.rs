@@ -251,10 +251,10 @@ impl Editor {
     }
 
     /// The rows the text takes at `width` columns, at least one. Like
-    /// edtui's wrapping, a character that does not fit on a row moves to the
-    /// next one whole, and an empty line takes a row. In insert mode the
-    /// cursor after the end of its line takes a column too: edtui draws it
-    /// on the next row when the line's last row is full.
+    /// edtui's wrapping, a grapheme cluster that does not fit on a row moves
+    /// to the next one whole, and an empty line takes a row. In insert mode
+    /// the cursor after the end of its line takes a column too: edtui draws
+    /// it on the next row when the line's last row is full.
     pub(crate) fn rows(&self, width: usize) -> usize {
         let state = &self.state;
         let insert = state.mode == edtui::EditorMode::Insert;
@@ -474,9 +474,10 @@ fn find_col(line: &[char], col: usize, find: Find, repeat: bool) -> Option<usize
 /// The rows `line` takes at `width` columns; with `cursor_after`, the cursor
 /// after its end takes a column as well.
 fn wrapped_rows(line: &[char], width: usize, cursor_after: bool) -> usize {
-    let columns = line.iter().map(|&c| match c {
-        '\t' => TAB_WIDTH,
-        c => grapheme_width(c.encode_utf8(&mut [0; 4])),
+    let text: String = line.iter().collect();
+    let columns = text.graphemes(true).map(|cluster| match cluster {
+        "\t" => TAB_WIDTH,
+        cluster => grapheme_width(cluster),
     });
     let mut rows = 1;
     let mut used = 0;
@@ -783,5 +784,16 @@ pub(crate) mod tests {
         // whole emoji.
         let mut editor = holding("ok👍🏽");
         assert_eq!(cols(&mut editor, &["$", "h"]), [3, 1]);
+    }
+
+    #[test]
+    fn word_motions_use_vim_character_classes() {
+        // As in vim, kanji, hiragana and katakana are separate classes:
+        // 日本語 の テキスト start at columns 0, 3 and 4.
+        let mut editor = holding("日本語のテキスト");
+        let steps = ["w", "w", "b", "b", "e", "e", "e"];
+        assert_eq!(cols(&mut editor, &steps), [3, 4, 3, 0, 2, 3, 7]);
+        feed(&mut editor, "0dw");
+        assert_eq!(text(&editor), "のテキスト");
     }
 }

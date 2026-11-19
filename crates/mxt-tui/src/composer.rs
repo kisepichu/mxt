@@ -496,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn rows_wrap_whole_characters_and_the_insert_cursor() {
+    fn rows_wrap_whole_grapheme_clusters_and_the_insert_cursor() {
         let rows = |mut composer: Composer, text: &str, width| {
             composer.load(text, &mut Vec::new());
             composer.rows(width)
@@ -507,6 +507,12 @@ mod tests {
         // `う` does not fit after `あい` in five columns.
         assert_eq!(rows(composer(), "あいう", 5), 2);
         assert_eq!(rows(composer(), "a\n\nb", 4), 3);
+        // A grapheme cluster takes its own width, not the sum of its
+        // characters': a family is two columns, and `👍🏽` moves to the next
+        // row whole.
+        let family = "👨\u{200d}👩\u{200d}👧";
+        assert_eq!(rows(composer(), &family.repeat(2), 4), 1);
+        assert_eq!(rows(composer(), "ab👍🏽", 3), 2);
         // The insert cursor after the text needs a column.
         assert_eq!(rows(focused(""), "abcd", 4), 2);
         assert_eq!(rows(focused(""), "abc", 4), 1);
@@ -521,7 +527,17 @@ mod tests {
 
     #[test]
     fn edtui_draws_the_insert_cursor_on_the_counted_rows() {
-        for (text, width) in [("abcd", 4), ("abc", 4), ("あい", 4), ("abcdabcd", 4)] {
+        let families = "👨\u{200d}👩\u{200d}👧".repeat(2);
+        let texts = [
+            ("abcd", 4),
+            ("abc", 4),
+            ("あい", 4),
+            ("abcdabcd", 4),
+            ("ab👍🏽", 4),
+            (families.as_str(), 4),
+            ("a❤\u{fe0f}", 4),
+        ];
+        for (text, width) in texts {
             let mut composer = focused("");
             composer.load(text, &mut Vec::new());
             let rows = u16::try_from(composer.rows(width)).unwrap();
@@ -531,8 +547,27 @@ mod tests {
             terminal
                 .draw(|frame| composer.draw(frame, area, Block::new(), true))
                 .unwrap();
+            // The cursor after the text is on the last counted row.
             let cursor = composer.editor.state.cursor_screen_position().unwrap();
-            assert!(cursor.y < rows, "{text:?} at {width}: {cursor:?}");
+            assert_eq!(cursor.y, rows - 1, "{text:?} at {width}: {cursor:?}");
+        }
+    }
+
+    #[test]
+    fn the_terminal_cursor_follows_grapheme_clusters() {
+        // Each emoji takes two columns, however many characters it has, so
+        // the insert cursor (where an input method puts its preedit) after
+        // it, before `b`, is on column 3.
+        for text in ["a👍🏽b", "a👨\u{200d}👩\u{200d}👧b", "a❤\u{fe0f}b"] {
+            let mut composer = focused("");
+            composer.load(text, &mut Vec::new());
+            type_keys(&mut composer, "<Left>");
+            let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
+            terminal
+                .draw(|frame| composer.draw(frame, frame.area(), Block::new(), true))
+                .unwrap();
+            let cursor = terminal.get_cursor_position().unwrap();
+            assert_eq!((cursor.x, cursor.y), (3, 0), "{text:?}");
         }
     }
 }
