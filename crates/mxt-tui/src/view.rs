@@ -813,7 +813,7 @@ pub(crate) mod tests {
 
     /// A terminal and the panes' state between its frames.
     pub(crate) struct Screen {
-        terminal: Terminal<TestBackend>,
+        pub(crate) terminal: Terminal<TestBackend>,
         room_list: ListState,
         room_list_layout: RoomListLayout,
         timeline: TimelinePane,

@@ -191,7 +191,7 @@ impl Blocks {
                     .iter()
                     .any(|attr| &*attr.name.local == "data-mx-emoticon")
                 {
-                    self.line.emoticon(alt.to_owned());
+                    self.line.emoticon(alt.to_owned(), inherited.style.spoiler);
                 } else {
                     self.line.text(alt, inherited);
                 }
@@ -287,9 +287,9 @@ impl Line {
         self.push(word, inherited.style, inherited.link.clone());
     }
 
-    fn emoticon(&mut self, alt: String) {
+    fn emoticon(&mut self, alt: String, spoiler: bool) {
         self.flush_space(None);
-        self.inlines.push(Inline::Emoticon { alt });
+        self.inlines.push(Inline::Emoticon { alt, spoiler });
         self.last_link = None;
     }
 
@@ -337,9 +337,15 @@ impl Line {
                     last.push_str(text);
                     return;
                 }
-                // Mentions have no style; all of the `<a>`'s text is the mention.
-                Some(Inline::Mention { text: last, .. }) => {
+                // All of the `<a>`'s text is the mention, which has no style
+                // but is hidden when a spoiler covers any of it.
+                Some(Inline::Mention {
+                    text: last,
+                    spoiler,
+                    ..
+                }) => {
                     last.push_str(text);
+                    *spoiler |= style.spoiler;
                     return;
                 }
                 _ => {}
@@ -356,6 +362,7 @@ impl Line {
             Some(Link::Mention(target)) => Inline::Mention {
                 text,
                 target: target.clone(),
+                spoiler: style.spoiler,
             },
         });
         self.last_link = link;
@@ -468,6 +475,7 @@ mod tests {
         Inline::Mention {
             text: text.into(),
             target,
+            spoiler: false,
         }
     }
     fn user(id: &str) -> MentionTarget {
@@ -567,6 +575,42 @@ mod tests {
                 text(" and "),
                 spoiler("twist"),
                 text("red"),
+            ])]
+        );
+    }
+
+    #[test]
+    fn mentions_and_emoticons_in_spoilers_are_spoilers() {
+        let spoiler = |t| styled(t, |s| s.spoiler = true);
+        let alice = "<a href=\"https://matrix.to/#/@alice:example.org\">Alice</a>";
+        let cat = "<img data-mx-emoticon src=\"mxc://example.org/abc\" alt=\":cat:\">";
+        let pill = |spoiler| Inline::Mention {
+            text: "Alice".into(),
+            target: user("@alice:example.org"),
+            spoiler,
+        };
+        assert_eq!(
+            blocks(&format!(
+                "<span data-mx-spoiler>{alice} {cat}</span> {alice} {cat} \
+                 <a href=\"https://matrix.to/#/@alice:example.org\">Al<span data-mx-spoiler>ice</span></a>"
+            )),
+            vec![paragraph(vec![
+                pill(true),
+                spoiler(" "),
+                Inline::Emoticon {
+                    alt: ":cat:".into(),
+                    spoiler: true,
+                },
+                text(" "),
+                pill(false),
+                text(" "),
+                Inline::Emoticon {
+                    alt: ":cat:".into(),
+                    spoiler: false,
+                },
+                text(" "),
+                // A spoiler over part of a mention hides all of it.
+                pill(true),
             ])]
         );
     }
@@ -696,7 +740,8 @@ mod tests {
             vec![paragraph(vec![
                 text("hi "),
                 Inline::Emoticon {
-                    alt: ":wave:".into()
+                    alt: ":wave:".into(),
+                    spoiler: false,
                 },
                 text(" a cat"),
             ])]

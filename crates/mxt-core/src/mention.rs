@@ -520,6 +520,7 @@ mod tests {
         let pill = |text: &str, target: MentionTarget| Inline::Mention {
             text: text.into(),
             target,
+            spoiler: false,
         };
         let content = RichText {
             blocks: vec![

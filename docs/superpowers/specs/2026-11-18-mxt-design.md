@@ -428,7 +428,8 @@ covered by unit tests.
   `Msg::Submit { room, body }`. If the body is blank, nothing happens.
   Otherwise the core returns the send effect and
   `Effect::Ui(ClearComposer(room))`, and the room's draft returns to `New`.
-  Failed sends are shown on the local echo (see "Error handling").
+  Failed sends are shown on the local echo, and a send that cannot be queued
+  puts its draft back (see "Error handling").
 - Editing an existing message: `message.edit` requires an empty composer and
   otherwise reports "Clear the composer first" in the status line. On success
   the core loads the message's plain body (without a reply fallback) with
@@ -892,6 +893,15 @@ platforms.
   it again; a transient failure also goes out by itself when the sync is back.
   Edits and reactions that the server refuses for good are dropped from the
   timeline with an error in the status line (see "The send queue").
+- A message that cannot be queued (its room is not open, or the replied-to or
+  edited event cannot be fetched) gets no local echo. `MatrixEffect::Send`
+  carries a `SendId`, and the matrix adapter answers it with
+  `Msg::SendQueued` or `Msg::SendFailed`. Until then the core keeps the
+  submitted draft (text, mentions and kind: new, reply or edit) under that ID.
+  On `SendFailed` it shows the error and loads the draft back into the
+  composer if its room is open and the composer is still empty with a new
+  draft. Otherwise the user has moved on, and only the status message is
+  shown.
 - Redaction asks for confirmation in `CONFIRM` mode because it cannot be
   undone.
 - `M_UNKNOWN_TOKEN` is handled as described in "Startup".

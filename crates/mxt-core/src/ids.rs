@@ -51,6 +51,11 @@ string_id! {
     UserId
 }
 
+/// Identifies a `MatrixEffect::Send` in its answer, `Msg::SendQueued` or
+/// `Msg::SendFailed`. The core numbers its sends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SendId(pub(crate) u64);
+
 /// UTC milliseconds since the Unix epoch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp(u64);

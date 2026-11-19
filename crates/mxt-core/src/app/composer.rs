@@ -5,7 +5,7 @@ use super::timeline::NOT_SENT;
 use super::{App, Focus, StatusKind};
 use crate::action::FocusMode;
 use crate::effect::{Effect, MatrixEffect, Outgoing, OutgoingKind, UiEffect};
-use crate::ids::{RoomId, UserId};
+use crate::ids::{RoomId, SendId, UserId};
 use crate::mention::{
     Member, MentionRef, mention_text, mentions_for_edit, rank_members, render_mentions,
 };
@@ -51,6 +51,16 @@ pub(super) struct MentionMenu {
     query: String,
     candidates: Vec<Member>,
     selected: usize,
+}
+
+/// A submitted draft, kept until its send is queued or fails (design, "Error
+/// handling").
+pub(super) struct PendingSend {
+    room: RoomId,
+    /// The composer text as submitted, before the mentions were rendered.
+    text: String,
+    draft: Draft,
+    mentions: Vec<MentionRef>,
 }
 
 impl App {
@@ -110,7 +120,7 @@ impl App {
 
     /// `Msg::Submit`: a blank body does nothing; otherwise the body is sent
     /// as the draft says, with the mentions still in it, and the composer
-    /// starts over.
+    /// starts over. The submitted draft is kept until the send is answered.
     pub(super) fn submit(&mut self, room: RoomId, body: String, effects: &mut Vec<Effect>) {
         if body.trim().is_empty() {
             return;
@@ -123,12 +133,56 @@ impl App {
                 target: target.item().clone(),
             },
         };
-        let body = render_mentions(&body, &composer.mentions);
+        let rendered = render_mentions(&body, &composer.mentions);
+        let id = SendId(self.next_send);
+        self.next_send += 1;
+        let pending = PendingSend {
+            room: room.clone(),
+            text: body,
+            draft: std::mem::take(&mut composer.draft),
+            mentions: std::mem::take(&mut composer.mentions),
+        };
+        self.pending_sends.insert(id, pending);
         effects.push(Effect::Matrix(MatrixEffect::Send {
             room: room.clone(),
-            message: Outgoing { body, kind },
+            id,
+            message: Outgoing {
+                body: rendered,
+                kind,
+            },
         }));
         self.clear_composer(room, effects);
+    }
+
+    /// `Msg::SendQueued`: the local echo has the message now.
+    pub(super) fn send_queued(&mut self, id: SendId) {
+        self.pending_sends.remove(&id);
+    }
+
+    /// `Msg::SendFailed`: the error goes to the status line, and the draft
+    /// back into its room's composer if that room is open and its composer
+    /// is as the send left it: empty, with a new draft. Otherwise the user
+    /// has moved on and the draft is dropped.
+    pub(super) fn send_failed(&mut self, id: SendId, error: String, effects: &mut Vec<Effect>) {
+        self.set_status(StatusKind::Error, error);
+        let Some(pending) = self.pending_sends.remove(&id) else {
+            return;
+        };
+        if self.open_room.as_ref() != Some(&pending.room) {
+            return;
+        }
+        let composer = self.composers.entry(pending.room.clone()).or_default();
+        if !composer.empty || composer.draft != Draft::New {
+            return;
+        }
+        composer.draft = pending.draft;
+        composer.mentions = pending.mentions;
+        // A submitted body is not blank.
+        composer.empty = false;
+        effects.push(Effect::Ui(UiEffect::LoadComposer {
+            room: pending.room,
+            text: pending.text,
+        }));
     }
 
     /// `composer.cancel`: a reply draft becomes new and keeps its text; an
