@@ -324,6 +324,11 @@ impl EffectiveMap {
         EffectiveMap { map }
     }
 
+    /// The binding for exactly `keys`.
+    pub fn get(&self, keys: &[Key]) -> Option<&Binding> {
+        self.map.get(keys)
+    }
+
     pub fn lookup(&self, keys: &[Key]) -> Lookup<'_> {
         // Sequences order lexicographically, so every longer sequence that
         // starts with `keys` directly follows `keys`.
@@ -331,7 +336,7 @@ impl EffectiveMap {
             .map
             .range::<[Key], _>((Bound::Excluded(keys), Bound::Unbounded));
         Lookup {
-            binding: self.map.get(keys),
+            binding: self.get(keys),
             is_prefix: after
                 .next()
                 .is_some_and(|(longer, _)| longer.keys().starts_with(keys)),

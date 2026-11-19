@@ -279,11 +279,12 @@ covered by unit tests.
 - A key sequence that is a prefix of a longer binding stays pending. The
   resolver returns `Effect::Ui(StartTimer)` with `ui.timeoutlen` (default 1000 ms,
   like nvim's `timeoutlen`).
-- On `Msg::Timeout`: if the pending sequence is itself a binding, it runs.
-  Otherwise the pending keys are released (see below).
-- When the next key makes the sequence match nothing: a pending complete
-  binding runs first, and the new key is resolved afresh. Without a complete
-  binding, the pending keys are released.
+- On `Msg::Timeout`, and when the next key makes the pending sequence match
+  nothing: the longest binding that is a prefix of the pending keys (with the
+  new key, in the second case) runs, and the keys after it are resolved
+  afresh, one by one. When no prefix is a binding, only the first pending key
+  is released, and the keys after it are resolved afresh. This is nvim's
+  behavior.
 - Released keys go to the text input that would have received them: the
   composer's or the message view's editor through
   `Effect::Ui(ReplayKeys(keys))`, or the picker or command line query. In
