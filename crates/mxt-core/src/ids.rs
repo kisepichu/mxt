@@ -56,6 +56,14 @@ string_id! {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SendId(pub(crate) u64);
 
+impl SendId {
+    /// The core numbers its sends and an adapter only passes the IDs back,
+    /// so this is for the adapters' tests.
+    pub fn new(n: u64) -> SendId {
+        SendId(n)
+    }
+}
+
 /// UTC milliseconds since the Unix epoch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp(u64);

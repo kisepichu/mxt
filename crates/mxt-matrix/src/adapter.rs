@@ -569,3 +569,6 @@ fn logged(what: &str, brief: &dyn Display, full: &dyn Display) -> String {
     debug!("{what}: {full}");
     format!("{what}: {brief}")
 }
+
+#[cfg(test)]
+mod tests;
