@@ -14,6 +14,10 @@ pub enum EditorMode {
     Visual,
     Insert,
     Search,
+    /// Normal or visual mode while a key waits for its character (`f`,
+    /// `t`, `r`): the next key goes to the editor without the keymap. Only
+    /// keys carry it; the status line shows the editor's own mode.
+    AwaitingChar,
 }
 
 /// A pane that shows a list of items.

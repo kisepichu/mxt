@@ -88,6 +88,11 @@ impl Composer {
         self.editor.mode()
     }
 
+    /// The mode the core resolves the next key in (see [`Editor::key_mode`]).
+    pub(crate) fn key_mode(&self) -> EditorMode {
+        self.editor.key_mode()
+    }
+
     /// The search pattern while the editor is in search mode.
     pub(crate) fn search(&self) -> Option<String> {
         self.editor.search()
@@ -109,10 +114,11 @@ impl Composer {
 
     /// `FocusComposer`. Insert mode starts after the character under the
     /// cursor, like `a`, so the text continues where leaving insert mode
-    /// left it; a visual selection is dropped. `Keep` keeps the mode. The
-    /// core closed its mention menu, so the token is reported even when it
-    /// did not change.
+    /// left it; a visual selection is dropped. `Keep` keeps the mode. A key
+    /// waiting for the next one is cancelled. The core closed its mention
+    /// menu, so the token is reported even when it did not change.
     fn focus(&mut self, mode: FocusMode, msgs: &mut Vec<Msg>) {
+        self.editor.cancel_pending();
         let state = &mut self.editor.state;
         if mode == FocusMode::Insert && state.mode != edtui::EditorMode::Insert {
             // edtui keeps the selection when switching to insert mode, and
@@ -172,8 +178,9 @@ impl Composer {
     }
 
     /// A fresh editor state holding `text`, so undo does not bring back the
-    /// sent or replaced text. Insert mode is kept; other modes become normal,
-    /// which needs no selection or search.
+    /// sent or replaced text, and no key waiting for the next one. Insert
+    /// mode is kept; other modes become normal, which needs no selection or
+    /// search.
     fn reset(&mut self, text: &str) {
         let insert = self.editor.state.mode == edtui::EditorMode::Insert;
         let mut state = EditorState::new(Lines::from(text));
@@ -182,6 +189,7 @@ impl Composer {
             state.mode = edtui::EditorMode::Insert;
         }
         self.editor.state = state;
+        self.editor.cancel_pending();
     }
 
     /// `ReplaceMentionToken`: the token, from its `@` to the cursor, becomes
@@ -428,6 +436,35 @@ mod tests {
         composer.focus(FocusMode::Insert, &mut Vec::new());
         assert_eq!(composer.mode(), EditorMode::Insert);
         assert!(composer.editor.state.selection.is_none());
+    }
+
+    #[test]
+    fn focus_and_reset_cancel_a_waiting_key() {
+        let mut composer = focused("abc<Esc>0f");
+        assert_eq!(composer.key_mode(), EditorMode::AwaitingChar);
+        composer.focus(FocusMode::Keep, &mut Vec::new());
+        assert_eq!(composer.key_mode(), EditorMode::Normal);
+        // In insert mode the first key is typed.
+        type_keys(&mut composer, "f");
+        composer.focus(FocusMode::Insert, &mut Vec::new());
+        type_keys(&mut composer, "z");
+        assert_eq!(composer.text(), "azbc");
+
+        // edtui's own `df` is cancelled too, so `<Esc>` leaves insert mode.
+        let mut composer = focused("abc<Esc>0df");
+        composer.focus(FocusMode::Insert, &mut Vec::new());
+        type_keys(&mut composer, "z<Esc>");
+        assert_eq!(
+            (composer.text().as_str(), composer.mode()),
+            ("azbc", EditorMode::Normal)
+        );
+
+        // `LoadComposer` while `r` waits: `x` deletes rather than replaces.
+        let mut composer = focused("abc<Esc>r");
+        composer.load("xyz", &mut Vec::new());
+        assert_eq!(composer.key_mode(), EditorMode::Normal);
+        type_keys(&mut composer, "x");
+        assert_eq!(composer.text(), "xy");
     }
 
     #[test]

@@ -202,11 +202,11 @@ impl Tui {
     }
 
     /// Converts one terminal event. Key presses and repeats become `Msg::Key`
-    /// with the mode of the editor that has the keys: the message view's
-    /// while it is open, otherwise the open room's composer's while it has
-    /// focus. Focus events become `Msg::TerminalFocus`; resizes produce
-    /// nothing (the loop redraws after every event anyway). Mouse and paste
-    /// events are not enabled.
+    /// with the key mode (see `Editor::key_mode`) of the editor that has the
+    /// keys: the message view's while it is open, otherwise the open room's
+    /// composer's while it has focus. Focus events become
+    /// `Msg::TerminalFocus`; resizes produce nothing (the loop redraws after
+    /// every event anyway). Mouse and paste events are not enabled.
     pub fn handle_event(&mut self, app: &App, event: Event) -> Vec<Msg> {
         let msg = match event {
             Event::Key(event) => key_from_crossterm(event).map(|key| Msg::Key {
@@ -222,13 +222,13 @@ impl Tui {
 
     fn editor_mode(&self, app: &App) -> Option<EditorMode> {
         if let Some(view) = &self.view {
-            return Some(view.editor.mode());
+            return Some(view.editor.key_mode());
         }
         if app.focus() != Focus::Composer {
             return None;
         }
         let room = app.open_room()?;
-        self.composers.get(room).map(Composer::mode)
+        self.composers.get(room).map(Composer::key_mode)
     }
 
     /// Executes a UI effect and returns what it reports to the core.
