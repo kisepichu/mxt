@@ -41,7 +41,9 @@ pub async fn recovery_status(client: &Client) -> RecoveryStatus {
 }
 
 /// Imports the secrets from secret storage with the recovery key (or
-/// passphrase) and signs this device with them.
+/// passphrase) and signs this device with them: at startup, and for
+/// `MatrixEffect::Recover`. Fails with `Error::WrongRecoveryKey` or
+/// `Error::NoSecretStorage` when the user can act on the failure.
 pub async fn recover(client: &Client, key: &str) -> Result<(), Error> {
     client.encryption().recovery().recover(key.trim()).await?;
     Ok(())

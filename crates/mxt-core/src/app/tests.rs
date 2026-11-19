@@ -1,6 +1,6 @@
 use super::*;
 use crate::action::{Action, Binding};
-use crate::effect::{Effect, MatrixEffect, UiEffect};
+use crate::effect::{Effect, MatrixEffect, RecoveryKey, UiEffect};
 use crate::ids::{RoomId, Timestamp, UserId};
 use crate::keymap::{Keymap, TableId};
 use crate::keys::KeySeq;
@@ -323,16 +323,62 @@ fn removing_rooms_at_the_end_clamps_then_unplaces_the_cursor() {
 }
 
 #[test]
-fn quit_and_unavailable_actions() {
-    let mut app = app();
-    assert_eq!(keys(&mut app, ":recover<CR>"), vec![]);
-    assert_eq!(
-        app.status().unwrap().text,
-        "account.recover is not available yet"
-    );
+fn quit() {
     let quit = Binding::single(Action::AppQuit);
     let mut app = app_with(vec![(TableId::Normal, seq("Q"), quit)]);
     assert_eq!(keys(&mut app, "Q"), vec![Effect::Ui(UiEffect::Quit)]);
+}
+
+#[test]
+fn recover_takes_the_key_masked_in_secret_mode_and_submits_it() {
+    let mut app = app();
+    assert_eq!(keys(&mut app, ":recover<CR>"), vec![]);
+    assert_eq!(app.mode_label(None), "SECRET");
+    assert_eq!(app.secret_prompt(), Some(("Recovery key: ", 0)));
+
+    // Keys bypass the keymap: `j` and `:` are text, `<BS>`, `<C-w>` and
+    // `<C-u>` edit as on the command line, and other keys do nothing.
+    let typed = keys(
+        &mut app,
+        "x<C-u>Ej:<Space>w<C-w>Abc<Space>dEf<BS>F<Tab><Up>",
+    );
+    assert_eq!(typed, vec![]);
+    assert_eq!(app.command_line(), None);
+    assert_eq!(cursor_id(&app), "!c:example.org");
+    assert_eq!(app.secret_prompt(), Some(("Recovery key: ", 11)));
+
+    let effects = keys(&mut app, "<CR>");
+    let key = RecoveryKey::from("Ej: Abc dEF".to_owned());
+    assert_eq!(effects, vec![Effect::Matrix(MatrixEffect::Recover(key))]);
+    let printed = format!("{effects:?}");
+    assert!(!printed.contains("Abc"), "{printed}");
+    assert_eq!(app.secret_prompt(), None);
+    assert_eq!(app.mode_label(None), "NORMAL");
+    assert_eq!(app.status().unwrap().text, "Recovering…");
+
+    app.update(Msg::Recovered);
+    let status = app.status().unwrap();
+    assert_eq!(
+        (status.kind, status.text.as_str()),
+        (StatusKind::Info, "Recovery complete")
+    );
+}
+
+#[test]
+fn escape_cancels_the_recovery_and_a_blank_key_skips_it() {
+    let mut app = app();
+    assert_eq!(keys(&mut app, ":recover<CR>abc<Esc>"), vec![]);
+    assert_eq!(app.secret_prompt(), None);
+    assert_eq!(app.mode_label(None), "NORMAL");
+    // The next prompt starts empty.
+    keys(&mut app, ":recover<CR>");
+    assert_eq!(app.secret_prompt(), Some(("Recovery key: ", 0)));
+    assert_eq!(keys(&mut app, "<Space><Space><CR>"), vec![]);
+    assert_eq!(app.secret_prompt(), None);
+    assert_eq!(app.status(), None);
+    // The keymap applies again.
+    keys(&mut app, "j");
+    assert_eq!(cursor_id(&app), "!b:example.org");
 }
 
 #[test]

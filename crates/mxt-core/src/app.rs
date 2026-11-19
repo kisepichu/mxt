@@ -4,6 +4,7 @@
 mod command_line;
 mod composer;
 mod picker;
+mod recovery;
 mod rooms;
 mod search;
 #[cfg(test)]
@@ -13,7 +14,7 @@ mod timeline;
 use std::collections::HashMap;
 
 use crate::action::{Action, Binding};
-use crate::effect::{Effect, MatrixEffect, UiEffect};
+use crate::effect::{Effect, MatrixEffect, RecoveryKey, UiEffect};
 use crate::ids::{RoomId, SendId, UserId};
 use crate::keymap::{InputContext, KeySink, Keymap};
 use crate::keys::Key;
@@ -132,6 +133,8 @@ pub struct App {
     picker: Option<OpenPicker>,
     /// `CONFIRM` mode: the next key answers.
     confirm: Option<Confirm>,
+    /// `SECRET` mode: the recovery key typed so far.
+    secret: Option<RecoveryKey>,
 }
 
 impl App {
@@ -167,6 +170,7 @@ impl App {
             mention_menu: None,
             picker: None,
             confirm: None,
+            secret: None,
             settings,
         }
     }
@@ -210,6 +214,7 @@ impl App {
             Msg::Downloaded { path } => self.downloaded(path, &mut effects),
             Msg::ImageFetched { item, bytes } => self.image_fetched(item, bytes, &mut effects),
             Msg::ImageUnavailable { item, reason } => self.image_unavailable(&item, &reason),
+            Msg::Recovered => self.recovered(),
         }
         effects
     }
@@ -289,16 +294,19 @@ impl App {
         self.resolver.count()
     }
 
-    /// "CONFIRM" while an action asks for confirmation, "COMMAND" while a
-    /// command or search line is open, "PICKER" while a picker is open,
-    /// "VIEW" and the mode of its editor while the message view is open
-    /// ("VIEW INSERT": keys go to the editor, `q` included), "NORMAL", or
-    /// for the composer's editor "INSERT", "NORMAL", "VISUAL" or "SEARCH".
-    /// `EditorMode::AwaitingChar` only comes with keys, and counts as normal
-    /// mode here.
+    /// "CONFIRM" while an action asks for confirmation, "SECRET" while the
+    /// recovery key is typed, "COMMAND" while a command or search line is
+    /// open, "PICKER" while a picker is open, "VIEW" and the mode of its
+    /// editor while the message view is open ("VIEW INSERT": keys go to the
+    /// editor, `q` included), "NORMAL", or for the composer's editor
+    /// "INSERT", "NORMAL", "VISUAL" or "SEARCH". `EditorMode::AwaitingChar`
+    /// only comes with keys, and counts as normal mode here.
     pub fn mode_label(&self, editor: Option<EditorMode>) -> &'static str {
         if self.confirm.is_some() {
             return "CONFIRM";
+        }
+        if self.secret.is_some() {
+            return "SECRET";
         }
         if self.command_line.is_some() {
             return "COMMAND";
@@ -323,8 +331,8 @@ impl App {
         }
     }
 
-    /// Where `key` goes (design, "Tables and resolution"); `CONFIRM` mode
-    /// takes keys before the keymap.
+    /// Where `key` goes (design, "Tables and resolution"); `CONFIRM` and
+    /// `SECRET` mode take keys before the keymap.
     fn input_context(&self, editor: Option<EditorMode>) -> InputContext {
         if self.command_line.is_some() {
             return InputContext::CommandLine;
@@ -379,6 +387,9 @@ impl App {
             // Keys pending from before the question go with it.
             self.resolver.reset();
             return self.answer(confirm, key, effects);
+        }
+        if self.secret.is_some() {
+            return self.type_secret(key, effects);
         }
         let context = self.input_context(self.editor);
         if context != self.key_context {
@@ -533,13 +544,9 @@ impl App {
             }
             Action::FocusTimeline => self.focus = Focus::Timeline,
             Action::FileUpload { path } => self.upload(path, effects),
+            Action::AccountRecover => self.start_recovery(),
             Action::AppQuit => effects.push(Effect::Ui(UiEffect::Quit)),
             Action::Nop => {}
-            // The phase that implements the action replaces this.
-            Action::AccountRecover => self.set_status(
-                StatusKind::Info,
-                format!("{} is not available yet", action.name()),
-            ),
         }
     }
 

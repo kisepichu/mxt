@@ -6,7 +6,15 @@
 use std::{collections::VecDeque, fs, time::Duration};
 
 use matrix_sdk::{
-    ruma::{self, event_id, owned_device_id},
+    ruma::{
+        self, event_id,
+        events::secret_storage::key::{
+            SecretStorageEncryptionAlgorithm, SecretStorageKeyEventContent,
+            SecretStorageV1AesHmacSha2Properties,
+        },
+        owned_device_id,
+        serde::Base64,
+    },
     send_queue::{LocalEcho, LocalEchoContent},
     test_utils::mocks::MatrixMockServer,
 };
@@ -151,8 +159,9 @@ impl Core {
         }
     }
 
-    /// The next answer of a send or report of a failure (`SendQueued`,
-    /// `SendFailed`, `EffectFailed`); other messages are skipped.
+    /// The next answer of a send, of a recovery, or report of a failure
+    /// (`SendQueued`, `SendFailed`, `Recovered`, `EffectFailed`); other
+    /// messages are skipped.
     async fn report(&mut self) -> Msg {
         loop {
             if let Some(report) = self.reports.pop_front() {
@@ -168,6 +177,7 @@ impl Core {
             Ok(Some(
                 report @ (Msg::SendQueued { .. }
                 | Msg::SendFailed { .. }
+                | Msg::Recovered
                 | Msg::EffectFailed { .. }),
             )) => self.reports.push_back(report),
             Ok(Some(_)) => {}
@@ -350,4 +360,46 @@ async fn a_refused_reaction_is_dropped_from_the_timeline_and_reported() {
         })
         .await;
     assert!(adapter.queued().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_wrong_recovery_key_is_reported_without_any_of_the_key() {
+    let mut adapter = Adapter::start().await;
+    let me = ruma::UserId::parse(ME).unwrap();
+    let server = &adapter.server;
+    server
+        .mock_get_default_secret_storage_key()
+        .ok(&me, "abc")
+        .mount()
+        .await;
+    // The key description of matrix-sdk's mock examples.
+    let properties = SecretStorageV1AesHmacSha2Properties::new(
+        Some(Base64::parse("xv5b6/p3ExEw++wTyfSHEg==").unwrap()),
+        Some(Base64::parse("ujBBbXahnTAMkmPUX2/0+VTfUh63pGyVRuBcDMgmJC8=").unwrap()),
+    );
+    let description = SecretStorageKeyEventContent::new(
+        "abc".to_owned(),
+        SecretStorageEncryptionAlgorithm::V1AesHmacSha2(properties),
+    );
+    server
+        .mock_get_secret_storage_key()
+        .ok(&me, &description)
+        .mount()
+        .await;
+
+    // The SDK's errors would show the first two bytes of the first key
+    // (`[10, 50]`, not the prefix of a recovery key) and the `+` of the
+    // second.
+    for key in [
+        "2222 2222 2222 2222 2222 2222 2222 2222 2222 2222 2222 2222",
+        "made+up",
+    ] {
+        adapter.effect(MatrixEffect::Recover(key.to_owned().into()));
+        match adapter.core.report().await {
+            Msg::EffectFailed { error } => {
+                assert_eq!(error, "Recovery failed: the recovery key is wrong");
+            }
+            other => panic!("not a failure: {other:?}"),
+        }
+    }
 }

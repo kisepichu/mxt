@@ -1,5 +1,7 @@
 //! Effects: what `App::update` asks the adapters to do, as plain data.
 
+use std::fmt;
+
 use crate::action::FocusMode;
 use crate::ids::{EventId, RoomId, SendId, TxnId};
 use crate::keys::Key;
@@ -34,6 +36,40 @@ pub enum OutgoingKind {
     Edit {
         target: ItemRef,
     },
+}
+
+/// The recovery key (or passphrase) typed in `SECRET` mode, on its way to
+/// the matrix adapter. `Debug` shows nothing of it, so effects can be
+/// printed, in test failures for example, without it.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct RecoveryKey(String);
+
+impl RecoveryKey {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+
+    /// Empty or only whitespace: entering it skips recovery.
+    pub fn is_blank(&self) -> bool {
+        self.0.trim().is_empty()
+    }
+
+    /// The text while it is typed.
+    pub(crate) fn text_mut(&mut self) -> &mut String {
+        &mut self.0
+    }
+}
+
+impl From<String> for RecoveryKey {
+    fn from(key: String) -> RecoveryKey {
+        RecoveryKey(key)
+    }
+}
+
+impl fmt::Debug for RecoveryKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RecoveryKey(..)")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,6 +138,11 @@ pub enum MatrixEffect {
         room: RoomId,
         item: ItemRef,
     },
+    /// Import the secrets from secret storage with the key, which signs this
+    /// device (design, "Startup"); answered with `Msg::Recovered`, or with
+    /// `Msg::EffectFailed` for a wrong key or an account without secret
+    /// storage.
+    Recover(RecoveryKey),
 }
 
 /// What the message view shows.

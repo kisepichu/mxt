@@ -30,7 +30,7 @@ use tracing::{debug, warn};
 use crate::{
     Error, SyncLoop,
     error::without_url,
-    media, rooms,
+    media, recovery, rooms,
     send_queue::{self, Edits},
     timeline::{Answer, Subscription, event_id, redact, resend, send_message, toggle_reaction},
 };
@@ -288,6 +288,15 @@ async fn run_effects(
                     let open = open_timeline(&timeline, &room);
                     let fetched = async move { media::fetch_image(&client, &*open?, item).await };
                     running.spawn(answered(&to_core, "Loading the image failed", fetched));
+                }
+                Some(MatrixEffect::Recover(key)) => {
+                    let client = client.clone();
+                    // The key is dropped with the task.
+                    let recovered = async move {
+                        recovery::recover(&client, key.expose()).await?;
+                        Ok(Msg::Recovered)
+                    };
+                    running.spawn(answered(&to_core, "Recovery failed", recovered));
                 }
                 None => break,
             },

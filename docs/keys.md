@@ -50,6 +50,7 @@ come between messages.
 | `PICKER` | a picker is open | the `picker` table, then the query |
 | `VIEW NORMAL`, `VIEW INSERT`, `VIEW VISUAL`, `VIEW SEARCH` | the message view is open; the mode of its editor | the `message_view` table in normal and visual mode, then the editor |
 | `CONFIRM` | an action asks first, as `dd` does | `y` confirms, any other key cancels |
+| `SECRET` | `:recover` asks for the recovery key; the status line shows `Recovery key:` and a `*` for each character | typed text, `<BS>`, `<C-u>` and `<C-w>`; `<CR>` submits, `<Esc>` cancels; no keymap |
 
 In `NORMAL`, the room list and the timeline have no character cursor: the
 cursor moves one room or one message at a time. That leaves `<Space>` free
@@ -156,7 +157,7 @@ use the commands below:
 | `room.mark_read` | |
 | `room.mute`, `room.unmute` | `:mute`, `:unmute` |
 | `file.upload` | `:upload <path>` |
-| `account.recover` | `:recover` |
+| `account.recover`, which asks for the recovery key | `:recover` |
 | `app.quit` | `:q` |
 
 `room.mark_read` marks the room under the cursor (in the room list) or the
@@ -193,7 +194,7 @@ command names, and room names after `:open`.
 | `:mute` | Mutes the room: the room under the cursor in the room list, otherwise the open room. |
 | `:unmute` | Unmutes it: its own notification setting is removed, so the account's default applies. A room that is not muted is left alone. |
 | `:upload <path>` | Sends the file to the open room as an image, video, audio or file message, by the type its name suggests. `~/` is your home directory; a relative path is relative to where mxt was started. Anything that is not a regular file, and files larger than the homeserver's upload limit, are refused. |
-| `:recover` | Not available yet: says "account.recover is not available yet" (see [First start](../README.md#first-start)). |
+| `:recover` | Asks for the recovery key in `SECRET` mode and, as on the first start, cross-signs this device with it and lets it fetch room keys from the key backup (see [First start](../README.md#first-start)). An empty key changes nothing. The status line then says `Recovery complete` or why it failed: a wrong key, or an account without secret storage, which needs recovery set up in another client first. |
 | `:q` | Quits. |
 
 `:mute`, `:unmute`, `:recover` and `:q` take no argument, and `:open` and

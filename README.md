@@ -11,8 +11,8 @@ user interface around it. It runs on Linux and macOS.
 ## Features
 
 - Password login, end-to-end encryption, and the recovery key on the first
-  start, so the new device is cross-signed and reads older messages from the
-  key backup.
+  start or later with `:recover`, so the new device is cross-signed and
+  reads older messages from the key backup.
 - A room list that names bridged rooms `<network> / <room>` (for example
   `Discord / Alice`) and shows one unread badge per room: mentions,
   notifications, unread messages (in muted rooms too) or the manual unread
@@ -140,13 +140,11 @@ PKG_CONFIG_PATH="$(brew --prefix sqlite)/lib/pkgconfig" \
    so and continues; set up recovery in another client.
 
    An empty input skips recovery, and a failed recovery prints the reason
-   and continues. After an empty input, mxt says that `:recover` asks again
-   later, but in this version `:recover` only answers "account.recover is
-   not available yet".
-   To enter the key later, log in again as a new device: quit mxt, delete
-   `session.json` in the data directory (see [Files](#files)) and start mxt.
-   The old device stays in your account's device list; remove it from
-   another client.
+   and continues. To enter the key later, or again after a failure, run
+   `:recover` in the terminal UI: it asks for the key in the status line,
+   shown as `*` (`<CR>` submits, `<Esc>` cancels), and then says
+   `Recovery complete` or why it failed, for example
+   `Recovery failed: the recovery key is wrong`.
 
 5. The terminal UI starts. `:q` quits. The keys are in [Keys](docs/keys.md).
 
