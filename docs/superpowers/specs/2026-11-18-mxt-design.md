@@ -141,7 +141,7 @@ flowchart BT
 | Crate | Responsibility | May depend on |
 |---|---|---|
 | `mxt-core` | Domain types, keymap and its resolver, action registry, pickers, mention rendering, `App` state and `update` | `std` and small pure crates without I/O (`nucleo-matcher`, `emojis`, `pulldown-cmark`, `unicode-segmentation`). Not the SDK, `ruma`, an async runtime, a terminal library, `serde` or `toml`. |
-| `mxt-matrix` | Builds the SDK client, converts SDK data into domain types, executes matrix effects, forwards SDK streams as `Msg`s, reads bridge state, renders HTML bodies into domain rich text, reads and writes the session file | `mxt-core`, `matrix-sdk`, `matrix-sdk-ui`, tokio, `serde`/`serde_json` (the session file holds the SDK's serde session type); HTML parsing through `matrix_sdk::ruma::html`, plus a feature-only `ruma` dependency of the SDK's ruma version that enables `html-matrix` (the SDK enables only `html`) |
+| `mxt-matrix` | Builds the SDK client, converts SDK data into domain types, executes matrix effects, forwards SDK streams as `Msg`s, reads bridge state, renders HTML bodies into domain rich text, reads and writes the session file | `mxt-core`, `matrix-sdk`, `matrix-sdk-ui`, tokio, `serde`/`serde_json` (the session file holds the SDK's serde session type); HTML parsing through `matrix_sdk::ruma::html`, plus a feature-only `ruma` dependency of the SDK's ruma version that enables `html-matrix` (the SDK enables only `html`) and `markdown` (`FormattedBody::markdown`) |
 | `mxt-tui` | Layout and widgets, input routing, the composers and the message view (edtui), image decoding and previews, OSC 52 clipboard, local time formatting, executing UI effects | `mxt-core`, ratatui, crossterm, edtui, ratatui-image, image, jiff |
 | `mxt` | Command line, startup flow, configuration file loading (TOML DTOs), paths, the data directory lock, logging, wiring the adapters and the event loop | all of the above, `serde`, `toml`, `tracing` |
 
@@ -311,7 +311,19 @@ covered by unit tests.
 - Bridge state: classic sync delivers each room's full state (members are
   lazy-loaded), so `m.bridge` and `uk.half-shot.bridge` are read from the
   stored room state. `mxt-matrix` parses them itself and keeps, per room,
-  either the bridge information or the fact that the room has none.
+  either the bridge information or the fact that the room has none. Besides
+  the network and protocol names it reads the bridge bot (`bridgebot`) and
+  the room type that mautrix bridges declare (`com.beeper.room_type.v2`, else
+  `com.beeper.room_type`: `dm`, `group_dm`, or another value).
+- Members: after subscribing the open room's timeline, the adapter loads the
+  room's members in the background (`Timeline::fetch_members`) when the room
+  has at most 500 joined members, so sender names replace bare user IDs. The
+  SDK marks a room's members as missing after every `limited` sync, so this
+  is one `/members` request on the first open of a busy room per session.
+  Bridged channels usually have few joined members (bridged users join when
+  they first speak); phase 0 measured 0.4 to 2.1 KB per request. Mention
+  completion loads the full list on the first composer focus, whatever the
+  size.
 - Network names, for every room including direct messages, first match wins:
   1. `network.displayname` of the room's `m.bridge` event (or
      `uk.half-shot.bridge`)
@@ -328,8 +340,10 @@ covered by unit tests.
   `auto_enable_cross_signing` stay off, because creating them is out of
   scope.
 - Mute: the SDK notification settings. Muting sets the room mode to mute.
-  Unmuting removes the user-defined room rule, so the account default applies
-  again.
+  Unmuting a muted room removes the user-defined room rule, so the account
+  default applies again. `room.unmute` on a room that is not muted does
+  nothing, so a "mentions and keywords only" rule set in another client
+  stays.
 - Sending: the composer text is Markdown. The core's
   `render_mentions(text, mentions)` returns three things:
   - the plain body: the editor text unchanged, so mentions read as
@@ -341,14 +355,30 @@ covered by unit tests.
   - the user IDs of the mentions that remain.
 
   The adapter converts the Markdown with ruma's `FormattedBody::markdown`
-  and sends `RoomMessageEventContent::text_html(plain, html)` with
-  `m.mentions.user_ids` set. When the Markdown has no formatting at all, it
-  sends `text_plain(plain)`. ruma turns soft line breaks into hard breaks, so
-  newlines from `<C-j>` stay newlines in HTML. Bridges turn the links into
-  mentions on the remote network. Replies and edits use the timeline's reply
-  and edit calls.
+  and sends `RoomMessageEventContent::text_html(plain, html)`, or
+  `text_plain(plain)` when the Markdown has no formatting at all. Every
+  message carries `m.mentions` with the remaining user IDs, and an empty
+  `m.mentions` when there are none, so the legacy display-name and `@room`
+  push rules never fire for mxt's messages. ruma turns soft line breaks into
+  hard breaks, so newlines from `<C-j>` stay newlines in HTML. Bridges turn
+  the links into mentions on the remote network. Replies use the timeline's
+  reply call; edits of sent messages are built with `Room::make_edit_event`
+  and sent through the timeline (so they work after the target has left the
+  loaded timeline), edits of local echoes use `Timeline::edit`.
+- The send queue: messages, edits and reactions go through the SDK's send
+  queue, fed by one sequential task, so they keep their order without
+  holding up other effects. The SDK disables a room's queue after a failed
+  request; mxt enables it again on every write and whenever the sync state
+  becomes synced, so a message that failed for a transient reason goes out
+  when the connection returns. A failed message stays as a local echo with a
+  failed marker until `message.resend` or its deletion. An edit or reaction
+  that the server refuses for good would block the room's queue; mxt aborts
+  it (the timeline drops it) and reports the failure.
 - Reactions: `Timeline::toggle_reaction`. Choosing a reaction the user already
   sent removes it.
+- Redaction: a sent message is redacted with `Room::redact` directly, not
+  through the send queue, so a refused redaction is reported at once and
+  never blocks the queue. A local echo is aborted instead.
 - Read receipts: the core requests a receipt for the latest event when the
   room is open, the timeline shows its newest item, and the terminal has
   focus. The terminal counts as focused from startup until a crossterm
@@ -491,8 +521,8 @@ why, and exits. The next start logs in as a new device with fresh stores.
 | `NORMAL` | the room list or the timeline has focus | keymap |
 | composer modes | the composer has focus; the status line shows edtui's mode (`INSERT`, `NORMAL`, `VISUAL`, `SEARCH`) | see "Input routing" above |
 | `COMMAND` | the `:` command line is open | `command_line` table, then text input |
-| `PICKER` | the room picker or the emoji picker is open | `picker` table, then text input |
-| `VIEW` | the message view is open | `message_view` table while its editor is in normal or visual mode, then edtui |
+| `PICKER` | the room picker, the emoji picker or the link picker is open | `picker` table, then text input |
+| `VIEW` | the message view is open; the status line shows `VIEW` and the view editor's mode (`VIEW NORMAL`, `VIEW INSERT`, `VIEW VISUAL`, `VIEW SEARCH`) | `message_view` table while its editor is in normal or visual mode, then edtui |
 | `CONFIRM` | an action asks for confirmation | `y` confirms, any other key cancels |
 | `SECRET` | the recovery key is being entered | masked text input, `<CR>` submits, `<Esc>` cancels |
 
@@ -508,6 +538,14 @@ and is the default leader.
   workspace as `network` reads `<workspace> / Alice`.
 - Rooms without a network name: the room's display name, or the other user's
   display name for direct messages.
+- Bridged direct messages: bridges such as mautrix-discord keep their bot in
+  the rooms they bridge, so a bridged DM has two other members and the SDK
+  would name it after both. A bridged room is a direct message with one
+  person when its joined members besides the user and the bridge bot are
+  exactly that person, and the bridge declares the room a `dm` or declares no
+  type and the room has no `m.room.name`. mautrix names every channel it
+  bridges, so a quiet channel where only one person has spoken stays a
+  channel; `group_dm` and other declared types are never taken for DMs.
 
 ### Unread badges
 
@@ -649,24 +687,43 @@ list, so mxt does not offer an event-level mention list.
 
 ### Files and images
 
+- `gx` on a message with links opens the link with `files.opener`, or offers
+  a link picker when there are several. Links are the message's anchors and
+  the bare `http://`/`https://` URLs in its text (not inside inline code;
+  surrounding brackets, quotes and sentence punctuation, including
+  full-width punctuation, are not part of the URL). Other schemes
+  (`mailto:`, `matrix:`) are not offered. The status line shows
+  `Opening <url>`, because the link text may differ from its target.
 - `gx` on an attachment downloads it to `files.download_dir` and runs
   `files.opener` with the file path appended. If a file with the same name
   exists, the download is saved as `name (1).ext`, `name (2).ext`, and so on.
+  The opener gets the path or URL as one argument and never runs through a
+  shell; mxt does not wait for it, and its output is discarded.
 - `:upload <path>` sends the file as an image or a file message, using the
-  MIME type guessed from the file.
+  MIME type guessed from the file. A leading `~/` is the home directory;
+  relative paths are relative to the directory mxt was started in.
 - Image previews use ratatui-image, which detects the terminal's graphics
   protocol (sixel, kitty, iTerm2) and falls back to half blocks. They appear
   only in the message view (`message.view`), which keeps the timeline's width
   fixed. The image comes from the thumbnail source when the event has one and
-  from the full file otherwise, up to 10 MB, scaled down locally.
-  `ui.image_preview = "off"` shows only the file name and size in the view.
+  from the full file otherwise, up to 10 MB, scaled down locally. Decoding
+  is limited to 128 MiB of memory, so an image that claims huge dimensions
+  shows an error instead. `ui.image_preview = "off"` shows only the file name
+  and size in the view, and mxt then never queries the terminal for its
+  graphics protocol.
 
 ### Clipboard and terminal focus
 
 `message.yank` and edtui copies use OSC 52. Inside tmux, OSC 52 reaches the
 outer terminal only with `set -g set-clipboard on`, and focus events reach mxt
 only with `set -g focus-events on`. Without focus events, mxt treats the
-terminal as always focused. The user documentation says so.
+terminal as always focused. With `ui.image_preview = "auto"` under tmux,
+ratatui-image turns tmux's `allow-passthrough` on for the active pane of the
+tmux session's current window (mxt's own pane when mxt's window is in
+front), and the option stays on after mxt exits. When mxt runs over SSH from
+inside a local tmux, the local tmux needs `set -g allow-passthrough on` for
+sixel or kitty images; otherwise mxt falls back to half blocks. The user
+documentation says so.
 
 ## Configuration
 
@@ -823,13 +880,18 @@ platforms.
 - Runtime failures of effects come back as `Msg::EffectFailed`. They are shown
   in the status line and logged. They never panic. The status line shows only
   the latest message, so the log is the place to look for earlier ones.
-- Sync state (synced, offline, retrying) is shown in the status line. When the
-  sync service stops with an error, mxt restarts it with backoff.
+- Sync state (synced, offline, retrying) is shown in the status line. The
+  client's request configuration retries a request that fails with a server
+  error (5xx) or a rate limit up to three times, and the state shows
+  `retrying` meanwhile; when a sync request still fails, the sync loop tries
+  again with backoff, and the state shows `offline` after network errors.
 - Events that cannot be decrypted yet show a placeholder. With
   `AfterDecryptionFailure` the SDK asks the key backup for the missing key,
   and the `Timeline` retries decryption when a key arrives.
 - Failed sends keep the local echo with a failed marker. `message.resend` sends
-  it again.
+  it again; a transient failure also goes out by itself when the sync is back.
+  Edits and reactions that the server refuses for good are dropped from the
+  timeline with an error in the status line (see "The send queue").
 - Redaction asks for confirmation in `CONFIRM` mode because it cannot be
   undone.
 - `M_UNKNOWN_TOKEN` is handled as described in "Startup".
@@ -936,12 +998,18 @@ separate device) and the edtui check program. Counts are from that account.
    (timeline limit 1, lazy-loaded members) returns all 363 joined rooms, about
    10 MiB of JSON and 13 655 state events, in 6 s. Decision: classic sync
    ("Matrix adapter").
-2. **Bridge state and network names:** open. The one-off MSC4186 request is
-   moot with classic sync; `m.bridge` is read from the room state that classic
-   sync delivers. Checked with mxt itself once its adapter syncs classically.
-3. **Unread counts after a long offline period:** open, measured with mxt.
-   The SDK's event cache computes the counts (not sliding sync), so classic
-   sync keeps them when mxt subscribes the event cache.
+2. **Bridge state and network names:** with classic sync, `m.bridge` comes
+   from the stored room state, and the network names work on the target
+   account: bridged Discord channels read `<server> / #<channel>`, traQ
+   channels `traQ / <channel>`. Bridged Discord DMs first read
+   `Discord / Discord bridge bot, <name>`, because the bridge bot is a member;
+   the rule in "Room names" makes them `Discord / <name>`.
+3. **Unread counts after a long offline period:** partly answered. After a
+   first sync many rooms showed a count of 1, and within a minute, as
+   receipts arrived, they settled (1 of 69 visible rooms kept a badge).
+   Whether settled counts match the real number after a long offline period,
+   especially in muted rooms, needs a comparison with another client over
+   time.
 4. **`/notifications`:** answers 200 with an empty list and no `next_token`
    on an account with hundreds of rooms. Treated as unsupported; there is no
    event-level mention list ("Mentions").
@@ -960,12 +1028,14 @@ separate device) and the edtui check program. Counts are from that account.
    `b` treat every non-ASCII character as its own word), `F`/`T`/`;`/`,`, and
    a linewise `p` on the last line (pastes above). `r` is unbound rather than
    redo.
-6. **Mentions on the remote network:** open; needs a bridged channel, a
-   second person, and mxt with classic sync and sending (phase 3).
-7. **Key backup with `AfterDecryptionFailure`:** recovery imported the
-   cross-signing keys and enabled the backup for the new device, and the
-   device is cross-signed. Whether old messages of bridged rooms decrypt is
-   checked with mxt's timeline (phase 2).
+6. **Mentions on the remote network:** open; needs a bridged channel and a
+   second person. Sending, mentions and mention completion work in mxt
+   (checked in a test room), so this is a check by the account owner.
+7. **Key backup with `AfterDecryptionFailure`:** answered. Recovery imported
+   the cross-signing keys and enabled the backup for the new device. In mxt's
+   timeline, a bridged DM paged back months before the device existed, and a
+   bridged channel paged back two days, show every message; the SDK logged
+   the initial decryption failures, then the keys arrived from the backup.
 
 Also found: `Recovery::recover` signs the device and therefore needs the
 device keys on the server first, so a first start waits for them before
@@ -992,11 +1062,15 @@ asking for the recovery key ("Startup").
   checks this for the target bridges.
 - **Member lists of large rooms.** Mention completion needs the room's member
   list. Bridged rooms with thousands of members load slowly the first time.
-  The list is loaded once per room, and completion works on what has loaded
-  so far.
-- **Network names for other bridges.** Discord rooms carry the server name in
-  `m.bridge`. Other bridges are expected to fill `network` or `protocol`
-  similarly, which is not yet verified.
+  The SDK forgets that a room's members are loaded after every `limited` sync,
+  so the full list is requested again on the first composer focus (and, for
+  rooms up to 500 members, on the first open) of each session, and the SDK
+  rotates the room's outbound key each time. Completion works on what has
+  loaded so far.
+- **Network names for other bridges.** Discord and traQ rooms on the target
+  account get their network names from `m.bridge`. Other bridges are
+  expected to fill `network` or `protocol` similarly, which is not yet
+  verified.
 - **SDK API churn.** matrix-rust-sdk is pre-1.0, and upgrades can break its
   API. The adapter boundary keeps that work inside `mxt-matrix`.
 
