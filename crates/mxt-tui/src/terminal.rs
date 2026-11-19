@@ -80,8 +80,14 @@ impl Tui {
 
     /// Sends the last copy to the terminal clipboard if it has not reached
     /// it yet, draws the frame, and returns `Msg::Viewport` for panes whose
-    /// visible range changed since the last draw.
+    /// visible range changed since the last draw. Fails once the terminal
+    /// has been restored, which while the UI runs only the panic hook does,
+    /// so a panic in any task ends the event loop instead of drawing onto
+    /// the main screen.
     pub fn draw(&mut self, app: &App) -> io::Result<Vec<Msg>> {
+        if !ACTIVE.load(Ordering::SeqCst) {
+            return Err(io::Error::other("the terminal was restored after a panic"));
+        }
         if let Some(sequence) = self.register.take_unsent() {
             let backend = self.terminal.backend_mut();
             backend.write_all(sequence.as_bytes())?;

@@ -14,7 +14,6 @@ pub struct DataLock {
     _file: File,
 }
 
-#[allow(dead_code)] // Used by `main` once the startup flow is wired.
 #[derive(Debug)]
 pub enum LockError {
     /// Another process holds the lock.
@@ -22,7 +21,6 @@ pub enum LockError {
     Io(io::Error),
 }
 
-#[allow(dead_code)] // Used by `main` once the startup flow is wired.
 impl DataLock {
     /// `File::try_lock` on `path`, which is created with mode 0600 if needed.
     pub fn acquire(path: &Path) -> Result<DataLock, LockError> {

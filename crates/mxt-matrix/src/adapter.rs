@@ -21,7 +21,7 @@ use mxt_core::{
 };
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
-    task::{JoinHandle, JoinSet},
+    task::{JoinError, JoinSet},
     time::{Instant, sleep_until},
 };
 use tracing::{debug, warn};
@@ -41,8 +41,7 @@ pub async fn build_sync_service(client: &Client) -> Result<Arc<SyncService>, Err
 
 /// The running matrix adapter.
 pub struct Matrix {
-    effects: UnboundedSender<MatrixEffect>,
-    tasks: Vec<JoinHandle<()>>,
+    tasks: JoinSet<()>,
     sync: Arc<SyncService>,
 }
 
@@ -50,58 +49,59 @@ impl Matrix {
     /// Starts the sync service if it is not running, and the tasks that turn
     /// the room list, room info updates, notification settings changes and
     /// bridge state into `Msg::RoomUpserted` / `Msg::RoomRemoved`, and the
-    /// sync service state into `Msg::SyncState`.
+    /// sync service state into `Msg::SyncState`. The effects sent to
+    /// `effects` run in the background; failures arrive as
+    /// `Msg::EffectFailed`.
     pub async fn start(
         client: Client,
         sync: Arc<SyncService>,
         receipts: ReceiptKind,
         to_core: UnboundedSender<Msg>,
+        effects: UnboundedReceiver<MatrixEffect>,
     ) -> Result<Matrix, Error> {
         let room_list = sync.room_list_service();
         let all_rooms = room_list.all_rooms().await?;
         let settings = client.notification_settings().await;
         let (to_bridges, listed) = mpsc::unbounded_channel();
         let (bridge_states, from_bridges) = mpsc::unbounded_channel();
-        let (effects, queue) = mpsc::unbounded_channel();
         let rooms = rooms::Rooms::new(client.clone(), settings, to_core.clone(), to_bridges);
-        let tasks = vec![
-            tokio::spawn(watch_sync(sync.clone(), to_core.clone())),
-            tokio::spawn(rooms::run(all_rooms, rooms, from_bridges)),
-            tokio::spawn(bridges::run(
-                client.clone(),
-                room_list.clone(),
-                listed,
-                bridge_states,
-            )),
-            tokio::spawn(run_effects(client, room_list, receipts, to_core, queue)),
-        ];
+        let mut tasks = JoinSet::new();
+        tasks.spawn(watch_sync(sync.clone(), to_core.clone()));
+        tasks.spawn(rooms::run(all_rooms, rooms, from_bridges));
+        tasks.spawn(bridges::run(
+            client.clone(),
+            room_list.clone(),
+            listed,
+            bridge_states,
+        ));
+        tasks.spawn(run_effects(client, room_list, receipts, to_core, effects));
         if !matches!(
             sync.state().get(),
             sync_service::State::Running | sync_service::State::Offline
         ) {
             sync.start().await;
         }
-        Ok(Matrix {
-            effects,
-            tasks,
-            sync,
-        })
+        Ok(Matrix { tasks, sync })
     }
 
-    /// Runs the effect in the background. Failures arrive as `Msg::EffectFailed`.
-    pub fn execute(&self, effect: MatrixEffect) {
-        // The queue lives as long as `self`.
-        let _ = self.effects.send(effect);
+    /// Waits until one of the tasks panics and returns its error; pending
+    /// while they run and once they have all ended otherwise. The panic hook
+    /// has restored the terminal by then, so the caller ends the program.
+    /// Cancel safe.
+    pub async fn panicked(&mut self) -> JoinError {
+        while let Some(finished) = self.tasks.join_next().await {
+            if let Err(error) = finished
+                && error.is_panic()
+            {
+                return error;
+            }
+        }
+        std::future::pending().await
     }
 
     /// Stops the tasks and the sync service.
-    pub async fn stop(self) {
-        for task in &self.tasks {
-            task.abort();
-        }
-        for task in self.tasks {
-            let _ = task.await;
-        }
+    pub async fn stop(mut self) {
+        self.tasks.shutdown().await;
         self.sync.stop().await;
     }
 }
@@ -155,11 +155,12 @@ async fn run_effects(
                 }
                 None => break,
             },
-            Some(finished) = running.join_next(), if !running.is_empty() => {
-                if let Err(error) = finished {
-                    warn!("a matrix effect task ended abnormally: {error}");
-                }
-            }
+            Some(finished) = running.join_next(), if !running.is_empty() => match finished {
+                // Passed on, so `Matrix::panicked` sees it.
+                Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+                Err(error) => warn!("a matrix effect task ended abnormally: {error}"),
+                Ok(()) => {}
+            },
         }
     }
 }
