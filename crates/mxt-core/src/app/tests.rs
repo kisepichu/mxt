@@ -542,6 +542,35 @@ fn a_paste_in_the_room_list_or_the_timeline_does_nothing() {
     assert_eq!(app.confirmation(), None);
 }
 
+#[test]
+fn a_paste_larger_than_256_kib_is_refused() {
+    let mut app = app();
+    keys(&mut app, "<CR>i");
+    let limit = "x".repeat(256 * 1024);
+    assert_eq!(
+        paste(&mut app, &limit, Some(EditorMode::Insert)),
+        vec![Effect::Ui(UiEffect::Paste(limit.clone()))]
+    );
+    let refused = |app: &App| {
+        let status = app.status().unwrap();
+        (status.kind, status.text.clone())
+    };
+    let too_large = (
+        StatusKind::Info,
+        "Paste too large (257 KiB; the limit is 256 KiB)".to_owned(),
+    );
+    let over = format!("{limit}y");
+    assert_eq!(paste(&mut app, &over, Some(EditorMode::Insert)), vec![]);
+    assert_eq!(refused(&app), too_large);
+
+    // Also where only its first line would go.
+    let mut app = self::app();
+    keys(&mut app, ":open ");
+    assert_eq!(paste(&mut app, &format!("b\n{limit}"), None), vec![]);
+    assert_eq!(line(&app), Some((LineKind::Command, "open ")));
+    assert_eq!(refused(&app), too_large);
+}
+
 fn line(app: &App) -> Option<(LineKind, &str)> {
     app.command_line().map(|l| (l.kind, l.text.as_str()))
 }

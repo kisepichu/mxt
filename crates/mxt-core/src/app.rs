@@ -32,6 +32,10 @@ use picker::OpenPicker;
 use search::Direction;
 use timeline::Timeline;
 
+/// The largest paste in bytes that goes where text would go: four times the
+/// 64 KiB limit on a Matrix event (design, "Input routing").
+const PASTE_LIMIT: usize = 256 * 1024;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
     RoomList,
@@ -374,11 +378,13 @@ impl App {
     /// A paste (design, "Input routing") goes where typed text would go,
     /// without the keymap: to the editor that has the keys, the first line
     /// to the command line or the picker query, and nowhere in the room list
-    /// and the timeline. Pending keys end first, as on their timeout, so
-    /// they keep their order with the text; keys pending in another input
-    /// context are dropped, as a key there would drop them. Like any key
-    /// but `y`, a paste cancels a question, and it never answers one that a
-    /// binding ending before it asks.
+    /// and the timeline. Where the text would go, a paste larger than
+    /// [`PASTE_LIMIT`] goes nowhere, and the status line says so. Pending
+    /// keys end first, as on their timeout, so they keep their order with
+    /// the text; keys pending in another input context are dropped, as a
+    /// key there would drop them. Like any key but `y`, a paste cancels a
+    /// question, and it never answers one that a binding ending before it
+    /// asks.
     fn paste(&mut self, text: String, editor: Option<EditorMode>, effects: &mut Vec<Effect>) {
         self.status = None;
         self.editor = editor;
@@ -410,6 +416,14 @@ impl App {
         };
         match context.sink() {
             KeySink::Drop => {}
+            _ if text.len() > PASTE_LIMIT => self.set_status(
+                StatusKind::Info,
+                format!(
+                    "Paste too large ({} KiB; the limit is {} KiB)",
+                    text.len().div_ceil(1024),
+                    PASTE_LIMIT / 1024
+                ),
+            ),
             KeySink::Editor => effects.push(Effect::Ui(UiEffect::Paste(text))),
             KeySink::Text => {
                 let mut line = text;

@@ -56,6 +56,13 @@ break stays a line break and never sends the message.
   text up to its first line break.
 - The room list and the timeline ignore a paste.
 - A paste never opens the mention menu, even when it ends in `@name`.
+- A paste larger than 256 KiB goes nowhere, and the status line says
+  "Paste too large". Matrix limits a message to 64 KiB anyway.
+
+A terminal without bracketed paste (most have it) types a paste as keys
+instead: a line break in the text arrives as `<CR>`, which sends the
+message in insert mode. There, paste text with several lines into the
+external editor (`<C-x><C-e>`).
 
 ## Focus and read receipts
 

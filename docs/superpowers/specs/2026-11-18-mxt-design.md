@@ -517,6 +517,11 @@ covered by unit tests.
   - the room list and the timeline: nowhere.
   - `CONFIRM` mode: nowhere, and the question is cancelled, as by any key
     but `y`.
+  - where the text would go, a paste larger than 256 KiB (four times the
+    64 KiB limit on a Matrix event): nowhere, and the status line says
+    "Paste too large (N KiB; the limit is 256 KiB)". The limit bounds the
+    memory a mistaken paste of a whole file takes: edtui keeps a copy of
+    the whole text for each undo step.
 - The external editor (`composer.external_editor`) uses edtui's
   `system-editor` feature, which opens `$VISUAL` or `$EDITOR`.
 - The tui adapter reports `Msg::Viewport { pane, first, last }` after a render
