@@ -12,6 +12,7 @@ use mxt_core::msg::Msg;
 use mxt_tui::Tui;
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tracing::warn;
 
 /// Runs until `UiEffect::Quit`. `from_matrix` delivers adapter messages;
 /// matrix effects are sent to `to_matrix`.
@@ -66,7 +67,8 @@ fn draw(
 
 /// Feeds the queued messages to `update` in order and routes the effects.
 /// What the tui adapter reports while executing an effect (the composer's
-/// text and edits) joins the end of the queue.
+/// text and edits) joins the end of the queue. Every failure for the status
+/// line passes here, so this is where it is logged.
 fn update(
     app: &mut App,
     tui: &mut Tui,
@@ -74,6 +76,7 @@ fn update(
     queue: &mut VecDeque<Msg>,
 ) {
     while let Some(msg) = queue.pop_front() {
+        log_failure(&msg);
         for effect in app.update(msg) {
             match effect {
                 Effect::Ui(effect) => queue.extend(tui.execute(effect, Instant::now())),
@@ -90,5 +93,15 @@ fn update(
                 }
             }
         }
+    }
+}
+
+/// Logs a failure of an effect at `warn` with the status line's text, which
+/// the adapters keep brief: no room IDs and no message contents (design,
+/// "Error handling"). The matrix adapter logs only the full error, at
+/// `debug`, so nothing is logged twice.
+fn log_failure(msg: &Msg) {
+    if let Msg::EffectFailed { error } | Msg::SendFailed { error, .. } = msg {
+        warn!("{error}");
     }
 }

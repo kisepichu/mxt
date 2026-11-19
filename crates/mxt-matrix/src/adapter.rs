@@ -559,7 +559,8 @@ fn sdk_room(client: &Client, room: &RoomId) -> Result<Room, Error> {
         .ok_or(Error::UnknownRoom)
 }
 
-/// The status line and the `warn` log get the brief error, without event
+/// The status line and the `warn` log, which the event loop writes for
+/// every failure it passes to the core, get the brief error, without event
 /// contents or room IDs; `debug` gets the full one.
 fn report(to_core: &UnboundedSender<Msg>, what: &str, error: &Error) {
     report_brief(to_core, what, &error.brief(), error);
@@ -597,10 +598,9 @@ pub(crate) fn report_brief(
     let _ = to_core.send(Msg::EffectFailed { error });
 }
 
-/// Logs a failure, `brief` to `warn` and `full` to `debug`, and returns the
-/// status line's text.
+/// Logs the full failure to `debug` and returns the status line's text,
+/// which the event loop logs to `warn`.
 fn logged(what: &str, brief: &dyn Display, full: &dyn Display) -> String {
-    warn!("{what}: {brief}");
     debug!("{what}: {full}");
     format!("{what}: {brief}")
 }

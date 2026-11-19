@@ -173,6 +173,9 @@ last seven are kept; nothing is logged to the terminal. `MXT_LOG` takes a
 [tracing `EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html)
 directive, for example `MXT_LOG=debug` or `MXT_LOG=warn,mxt_matrix=debug`.
 The default is `warn,mxt=info,mxt_core=info,mxt_matrix=info,mxt_tui=info`.
+Failed requests to the homeserver, and failures of the opener, the external
+editor and image display, are also logged at `warn`, so the log keeps the
+errors the status line has replaced.
 
 When the session cannot be used any more, mxt moves its data aside, prints
 why, and exits; the next start logs in as a new device, and asks for the
