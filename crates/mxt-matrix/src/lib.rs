@@ -13,11 +13,14 @@ mod bridges;
 mod client;
 mod error;
 mod html;
+mod media;
 mod recovery;
 mod rooms;
 mod send_queue;
 mod session;
 mod sync;
+#[cfg(test)]
+mod test_dir;
 mod timeline;
 
 pub use adapter::Matrix;

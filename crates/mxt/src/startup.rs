@@ -232,6 +232,7 @@ async fn run_ui(
         settings,
         time_format,
         room_list_layout,
+        download_dir,
         opener,
         ..
     } = config;
@@ -240,7 +241,7 @@ async fn run_ui(
     let mut app = App::new(keymap, settings, user_id);
     let (to_core, from_matrix) = mpsc::unbounded_channel();
     let (to_matrix, effects) = mpsc::unbounded_channel();
-    let mut matrix = Matrix::start(client, sync, receipts, to_core, effects).await;
+    let mut matrix = Matrix::start(client, sync, receipts, download_dir, to_core, effects).await;
     mxt_tui::install_panic_hook();
     let mut tui = match Tui::new(opener, image_preview) {
         Ok(tui) => tui,

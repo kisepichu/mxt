@@ -3,7 +3,7 @@
 use std::{fmt, path::PathBuf, sync::Arc};
 
 use matrix_sdk::{
-    ClientBuildError, HttpError, StoreError,
+    ClientBuildError, HttpError, NotificationSettingsError, StoreError,
     encryption::{recovery::RecoveryError, secret_storage::SecretStorageError},
     event_cache::EventCacheError,
     room::{edit::EditError, reply::ReplyError},
@@ -22,8 +22,8 @@ pub enum Error {
     Sdk(matrix_sdk::Error),
     /// Recovery, for example with a wrong recovery key.
     Recovery(RecoveryError),
-    /// Reading or writing the session file, its temporary file or its
-    /// directory (`path`).
+    /// Reading or writing a file (`path`): the session file, its temporary
+    /// file or its directory, a file to upload, or the download directory.
     Io {
         path: PathBuf,
         error: std::io::Error,
@@ -46,6 +46,10 @@ pub enum Error {
     InvalidEventId,
     /// An effect acts on the items of a room whose timeline is not open.
     TimelineNotOpen,
+    /// Muting or unmuting a room.
+    NotificationSettings(NotificationSettingsError),
+    /// A download asks for a message that has no attachment.
+    NoAttachment,
 }
 
 impl Error {
@@ -55,7 +59,8 @@ impl Error {
         matches!(self, Error::UnknownToken)
     }
 
-    /// The error for the status line and `warn` logs, see `Brief`.
+    /// The error for the status line and `warn` logs, see `Brief`; it names
+    /// no file either.
     pub(crate) fn brief(&self) -> Brief<'_> {
         let response = match self {
             Error::Sdk(error)
@@ -75,6 +80,20 @@ impl Error {
                     };
                 }
                 sdk_response(error)
+            }
+            // The path names the file, which only `debug` logs get.
+            Error::Io { error, .. } => {
+                return Brief {
+                    error,
+                    response: None,
+                };
+            }
+            // The ID of a room's rule is the room ID.
+            Error::NotificationSettings(NotificationSettingsError::RuleNotFound(_)) => {
+                return Brief {
+                    error: &"the room's push rule was not found",
+                    response: None,
+                };
             }
             _ => None,
         };
@@ -198,6 +217,8 @@ impl fmt::Display for Error {
             Error::UnknownRoom => f.write_str("the room is not known to this client"),
             Error::InvalidEventId => f.write_str("the event ID is not valid"),
             Error::TimelineNotOpen => f.write_str("the room's timeline is not open"),
+            Error::NotificationSettings(error) => error.fmt(f),
+            Error::NoAttachment => f.write_str("the message has no attachment"),
         }
     }
 }
@@ -211,11 +232,13 @@ impl std::error::Error for Error {
             Error::Io { error, .. } => error.source(),
             Error::Json { error, .. } => error.source(),
             Error::Timeline(error) => error.source(),
+            Error::NotificationSettings(error) => error.source(),
             Error::PasswordLoginUnsupported { .. }
             | Error::UnknownToken
             | Error::UnknownRoom
             | Error::InvalidEventId
-            | Error::TimelineNotOpen => None,
+            | Error::TimelineNotOpen
+            | Error::NoAttachment => None,
         }
     }
 }
@@ -357,6 +380,22 @@ mod tests {
             Error::UnknownRoom.brief().to_string(),
             Error::UnknownRoom.to_string()
         );
+    }
+
+    #[test]
+    fn brief_file_and_push_rule_errors_name_no_file_and_no_room() {
+        let file = Error::Io {
+            path: "/home/alice/Downloads/plans.pdf".into(),
+            error: std::io::ErrorKind::PermissionDenied.into(),
+        };
+        assert!(!file.brief().to_string().contains("plans"), "{file}");
+        assert!(
+            file.to_string().contains("plans.pdf"),
+            "debug names the file"
+        );
+        let rule = NotificationSettingsError::RuleNotFound("!room:example.org".to_owned());
+        let rule = Error::NotificationSettings(rule);
+        assert!(!rule.brief().to_string().contains("!room"), "{rule}");
     }
 
     #[test]

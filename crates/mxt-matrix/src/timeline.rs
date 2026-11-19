@@ -355,6 +355,25 @@ pub(crate) async fn resend(timeline: &Timeline, txn: &TxnId) -> Result<(), Error
     Ok(())
 }
 
+/// The message type of `item`, with its latest edit applied, for the
+/// attachment it carries; `None` when the item is not a message.
+pub(crate) async fn message_type(
+    timeline: &Timeline,
+    item: &ItemRef,
+) -> Result<Option<MessageType>, Error> {
+    let id = item_id(item)?;
+    let items = timeline.items().await;
+    let event = items
+        .iter()
+        .rev()
+        .find_map(|item| item.as_event().filter(|event| event.identifier() == id));
+    let event = event.ok_or_else(|| Error::Timeline(sdk::Error::EventNotInTimeline(id)))?;
+    Ok(event
+        .content()
+        .as_message()
+        .map(|message| message.msgtype().clone()))
+}
+
 /// The SDK disables a room's send queue after any failed request, and only
 /// `Client::resume` enables it again, so every request the user queues or
 /// deletes enables it (the adapter also enables every queue when the sync
