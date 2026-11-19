@@ -6,6 +6,7 @@ use std::cmp::Reverse;
 use std::ops::Range;
 
 use pulldown_cmark::{Event, Options, Parser, Tag};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::fuzzy;
 use crate::ids::UserId;
@@ -31,14 +32,21 @@ pub struct RenderedBody {
 }
 
 /// Design, "Matrix adapter" (Sending). Every occurrence of a mention's text
-/// outside inline code and code blocks becomes a Markdown link to
-/// `https://matrix.to/#/<user ID>` with the text escaped. An occurrence
-/// starts at the start of the text or after whitespace, and ends at the end
-/// of the text or before a character that is not a letter or digit, so
-/// `@Bob` does not match inside `@Bobby`. Longer texts are matched first, so
-/// `@Alice` inside `@Alice Smith` does not match when both are mentions.
+/// outside inline code, code blocks, links and images becomes a Markdown link
+/// to `https://matrix.to/#/<user ID>` with the text escaped. An occurrence
+/// starts at the start of the text or after whitespace, and ends at a word
+/// boundary (UAX #29), so `@Bob` does not match inside `@Bobby` while
+/// `@Aliceさん` and `@田中さん` match `@Alice` and `@田中`. Longer texts are
+/// matched first, so `@Alice` inside `@Alice Smith` does not match when both
+/// are mentions.
 pub fn render_mentions(text: &str, mentions: &[MentionRef]) -> RenderedBody {
-    let code = code_ranges(text);
+    let literal = literal_ranges(text);
+    // Segment starts are ascending; the end of the text is a boundary too.
+    let word_bounds: Vec<usize> = text
+        .split_word_bound_indices()
+        .map(|(start, _)| start)
+        .chain([text.len()])
+        .collect();
     let mut longest_first: Vec<&MentionRef> = mentions
         .iter()
         .filter(|mention| !mention.text.is_empty())
@@ -48,10 +56,15 @@ pub fn render_mentions(text: &str, mentions: &[MentionRef]) -> RenderedBody {
     for mention in longest_first {
         for (start, found) in text.match_indices(mention.text.as_str()) {
             let range = start..start + found.len();
-            let taken = |other: &Range<usize>| overlap(other, &range);
-            if stands_alone(text, &range)
-                && !code.iter().any(taken)
-                && !links.iter().any(|(link, _)| taken(link))
+            // Code, a link or an image inside the mention text is part of
+            // the name and is escaped below; around or across it, the
+            // mention would end up inside it.
+            let in_literal = |other: &Range<usize>| {
+                overlap(other, &range) && !(range.start <= other.start && other.end <= range.end)
+            };
+            if stands_alone(text, &range, &word_bounds)
+                && !literal.iter().any(in_literal)
+                && !links.iter().any(|(link, _)| overlap(link, &range))
             {
                 links.push((range, &mention.user));
             }
@@ -66,9 +79,11 @@ pub fn render_mentions(text: &str, mentions: &[MentionRef]) -> RenderedBody {
         markdown.push_str(&text[copied..range.start]);
         markdown.push('[');
         escape_markdown(&text[range.clone()], &mut markdown);
-        markdown.push_str("](https://matrix.to/#/");
-        markdown.push_str(user.as_str());
-        markdown.push(')');
+        // The `<...>` form, so a `)` in a historical user ID does not end
+        // the destination.
+        markdown.push_str("](<https://matrix.to/#/");
+        escape_destination(user.as_str(), &mut markdown);
+        markdown.push_str(">)");
         copied = range.end;
         if !user_ids.contains(user) {
             user_ids.push(user.clone());
@@ -82,12 +97,15 @@ pub fn render_mentions(text: &str, mentions: &[MentionRef]) -> RenderedBody {
     }
 }
 
-/// The byte ranges of inline code (with its backticks) and code blocks.
-fn code_ranges(text: &str) -> Vec<Range<usize>> {
+/// The byte ranges a mention cannot be linked in: inline code (with its
+/// backticks) and code blocks, which show their text as typed, and links
+/// and images, whose text cannot hold another link.
+fn literal_ranges(text: &str) -> Vec<Range<usize>> {
     Parser::new_ext(text, Options::empty())
         .into_offset_iter()
         .filter_map(|(event, range)| match event {
-            Event::Code(_) | Event::Start(Tag::CodeBlock(_)) => Some(range),
+            Event::Code(_)
+            | Event::Start(Tag::CodeBlock(_) | Tag::Link { .. } | Tag::Image { .. }) => Some(range),
             _ => None,
         })
         .collect()
@@ -98,18 +116,28 @@ fn overlap(a: &Range<usize>, b: &Range<usize>) -> bool {
 }
 
 /// Whether `range` of `text` starts at the start or after whitespace, and
-/// ends at the end or before a character that is not a letter or digit.
-fn stands_alone(text: &str, range: &Range<usize>) -> bool {
+/// ends at one of `word_bounds`.
+fn stands_alone(text: &str, range: &Range<usize>, word_bounds: &[usize]) -> bool {
     let before = text[..range.start].chars().next_back();
-    let after = text[range.end..].chars().next();
-    before.is_none_or(char::is_whitespace) && after.is_none_or(|c| !c.is_alphanumeric())
+    before.is_none_or(char::is_whitespace) && word_bounds.binary_search(&range.end).is_ok()
 }
 
 /// Appends `text` with a backslash before every character that Markdown
-/// could read as syntax.
+/// could read as syntax, entity references (`&amp;`) included.
 fn escape_markdown(text: &str, out: &mut String) {
     for c in text.chars() {
-        if r"\`*_[]()#+-.!<>|~".contains(c) {
+        if r"\`*_[]()#+-.!<>|~&".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+}
+
+/// Appends `url` escaped for a `<...>` link destination, where `<`, `>`,
+/// backslash escapes and entity references are syntax.
+fn escape_destination(url: &str, out: &mut String) {
+    for c in url.chars() {
+        if r"\<>&".contains(c) {
             out.push('\\');
         }
         out.push(c);
@@ -132,18 +160,27 @@ impl Member {
 
 /// Ranks members against `query` (the text after `@`) with nucleo on the
 /// display name and the user ID's localpart: the server name is the same for
-/// most members, so it would match short queries for everyone. Members who
-/// sent one of the loaded messages come first, newest sender first
-/// (`recent_senders`, newest first); the rest follow by match score. An empty
-/// query lists the recent senders first, then everyone else by display name
-/// (the localpart without one), ignoring case.
+/// most members, so it would match short queries for everyone. A query with
+/// `:` is matched against the whole user ID instead of the localpart, so
+/// `@alice:exa` tells members with the same name on other servers apart.
+/// Members who sent one of the loaded messages come first, newest sender
+/// first (`recent_senders`, newest first); the rest follow by match score.
+/// An empty query lists the recent senders first, then everyone else by
+/// display name (the localpart without one), ignoring case.
 pub fn rank_members<'a>(
     query: &str,
     members: &'a [Member],
     recent_senders: &[UserId],
 ) -> Vec<&'a Member> {
+    let whole_id = query.contains(':');
     let mut ranked: Vec<&Member> = fuzzy::rank_by(query, members, |member| {
-        member.name().into_iter().chain([localpart(&member.user)])
+        // The whole ID contains the localpart.
+        let id = if whole_id {
+            member.user.as_str()
+        } else {
+            localpart(&member.user)
+        };
+        member.name().into_iter().chain([id])
     })
     .into_iter()
     .map(|index| &members[index])
@@ -213,6 +250,8 @@ pub fn mentions_for_edit(content: &RichText, body: &str) -> Vec<MentionRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pulldown_cmark::TagEnd;
+
     use crate::rich::{Block, Inline, MentionTarget, Style};
 
     fn user(id: &str) -> UserId {
@@ -225,7 +264,28 @@ mod tests {
         }
     }
     fn link(text: &str, id: &str) -> String {
-        format!("[{text}](https://matrix.to/#/{id})")
+        format!("[{text}](<https://matrix.to/#/{id}>)")
+    }
+    /// The links in `markdown` as a Markdown parser reads them: their text
+    /// and destination.
+    fn parsed_links(markdown: &str) -> Vec<(String, String)> {
+        let mut links = Vec::new();
+        let mut open: Option<(String, String)> = None;
+        for event in Parser::new(markdown) {
+            match event {
+                Event::Start(Tag::Link { dest_url, .. }) => {
+                    open = Some((String::new(), dest_url.into_string()));
+                }
+                Event::Text(text) => {
+                    if let Some((link_text, _)) = &mut open {
+                        link_text.push_str(&text);
+                    }
+                }
+                Event::End(TagEnd::Link) => links.extend(open.take()),
+                _ => {}
+            }
+        }
+        links
     }
     fn member(id: &str, name: Option<&str>) -> Member {
         Member {
@@ -261,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn mentions_inside_inline_code_and_code_blocks_are_not_linked() {
+    fn mentions_inside_code_links_and_images_are_not_linked() {
         let mentions = [mention("@Alice", ALICE)];
         let text = "run `@Alice` now\n\n```\n@Alice\n```\n";
         let rendered = render_mentions(text, &mentions);
@@ -272,21 +332,31 @@ mod tests {
             render_mentions(text, &mentions).markdown,
             format!("`x` {}\n\n    @Alice indented", link("@Alice", ALICE))
         );
+        let text = "[see @Alice](https://example.org) ![@Alice](cat.png) @Alice";
+        let rendered = render_mentions(text, &mentions);
+        assert_eq!(
+            rendered.markdown,
+            format!(
+                "[see @Alice](https://example.org) ![@Alice](cat.png) {}",
+                link("@Alice", ALICE)
+            )
+        );
+        assert_eq!(rendered.user_ids, vec![user(ALICE)]);
     }
 
     #[test]
-    fn markdown_in_a_display_name_is_escaped() {
-        let rendered = render_mentions("@A*b*_c hi", &[mention("@A*b*_c", ALICE)]);
-        assert_eq!(
-            rendered.markdown,
-            format!("{} hi", link(r"@A\*b\*\_c", ALICE))
-        );
-        let all = r"\`*_[]()#+-.!<>|~";
-        let rendered = render_mentions(&format!("@{all}"), &[mention(&format!("@{all}"), ALICE)]);
-        assert_eq!(
-            rendered.markdown,
-            link(r"@\\\`\*\_\[\]\(\)\#\+\-\.\!\<\>\|\~", ALICE)
-        );
+    fn a_link_reads_back_as_the_mention_text_and_the_user_id() {
+        let links = |text: &str, id: &str| {
+            let rendered = render_mentions(&format!("{text} hi"), &[mention(text, id)]);
+            parsed_links(&rendered.markdown)
+        };
+        let to = |id: &str| format!("https://matrix.to/#/{id}");
+        // Markdown syntax and an entity reference in a display name.
+        let name = r"@\`*_[]()#+-.!<>|~&amp;";
+        assert_eq!(links(name, ALICE), [(name.to_owned(), to(ALICE))]);
+        // Historical user IDs may contain `(`, `)`, `<`, `>`, `&` and `\`.
+        let odd = r"@a(b))<c>&amp;\d:example.org";
+        assert_eq!(links(odd, odd), [(odd.to_owned(), to(odd))]);
     }
 
     #[test]
@@ -329,9 +399,9 @@ mod tests {
     }
 
     #[test]
-    fn a_mention_text_must_stand_alone() {
+    fn a_mention_text_starts_after_whitespace_and_ends_at_a_word_boundary() {
         let mentions = [mention("@Bob", BOB)];
-        for text in ["@Bobby", "x@Bob", "@Bobさん"] {
+        for text in ["@Bobby", "x@Bob"] {
             let rendered = render_mentions(text, &mentions);
             assert_eq!(rendered.markdown, text);
             assert_eq!(rendered.user_ids, vec![]);
@@ -341,6 +411,12 @@ mod tests {
             rendered.markdown,
             format!("{}: hi (@Bob) {}.", link("@Bob", BOB), link("@Bob", BOB))
         );
+        // An honorific written straight after a name.
+        for name in ["@Alice", "@田中", "@タナカ"] {
+            let rendered = render_mentions(&format!("{name}さん"), &[mention(name, ALICE)]);
+            assert_eq!(rendered.markdown, format!("{}さん", link(name, ALICE)));
+            assert_eq!(rendered.user_ids, vec![user(ALICE)]);
+        }
     }
 
     #[test]
@@ -406,6 +482,10 @@ mod tests {
         // Every member has the server name, so it does not count.
         assert!(rank_members("example", &members, &[]).is_empty());
         assert!(rank_members("zzz", &members, &[]).is_empty());
+        // With `:`, the whole user ID tells members of the same name apart.
+        let other = "@alice:other.example";
+        let members = [member(ALICE, Some("Alice")), member(other, Some("Alice"))];
+        assert_eq!(ids(&rank_members("alice:oth", &members, &[])), [other]);
     }
 
     #[test]
