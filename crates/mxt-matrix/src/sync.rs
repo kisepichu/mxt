@@ -11,6 +11,7 @@ use matrix_sdk::{
         presence::PresenceState,
         uint,
     },
+    store::StateStoreDataKey,
 };
 use mxt_core::msg::SyncState;
 use tokio::{
@@ -26,8 +27,14 @@ use crate::{
     error::{is_unreachable, without_url},
 };
 
-/// How long the homeserver may hold a sync request open without news.
+/// How long the homeserver may hold a sync request open without news. The
+/// SDK adds it to the client's 30 s request timeout, so a request has 60 s.
 const LONG_POLL: Duration = Duration::from_secs(30);
+/// The long-poll timeout of a request without a stored sync token. Such an
+/// initial sync returns the full state, so the homeserver answers as soon as
+/// it has computed it; the value only gives the request its HTTP time budget:
+/// 150 s for a large account.
+const INITIAL_POLL: Duration = Duration::from_secs(120);
 /// Sync responses the room list may fall behind by before it re-reads every
 /// room.
 const RESPONSES_CAPACITY: usize = 16;
@@ -46,9 +53,9 @@ pub struct SyncLoop {
 impl SyncLoop {
     /// Subscribes the event cache (the SDK computes unread counts and latest
     /// events from it), then runs `Client::sync_once` in a loop with the
-    /// stored sync token, a 30 s long-poll timeout (see `Requests::timeout`),
-    /// presence offline, and a filter with lazy-loaded members and a
-    /// timeline limit of 10.
+    /// stored sync token, a long-poll timeout (see `Requests::timeout`),
+    /// presence offline, and a filter with lazy-loaded members, a timeline
+    /// limit of 10, and neither presence nor typing notifications.
     pub fn start(client: &Client) -> Result<SyncLoop, Error> {
         client
             .event_cache()
@@ -77,6 +84,16 @@ impl SyncLoop {
     }
 
     /// Stops the loop and waits until it has stopped.
+    ///
+    /// A response that is being processed is cut short: the SDK handles its
+    /// to-device events before it stores the state and the sync token, so
+    /// the next start receives that batch again (most likely during the large
+    /// first sync). That is accepted: the crypto store has saved either the
+    /// batch's room keys or nothing of it, so the repeat costs warnings about
+    /// Olm messages that do not decrypt twice, not keys. `sync_once` does not
+    /// separate the request from the processing, so waiting for the
+    /// processing would mean waiting for the request too: quitting could take
+    /// a whole long poll.
     pub async fn stop(mut self) {
         self.task.shutdown().await;
     }
@@ -88,7 +105,7 @@ async fn run(
     rooms: broadcast::Sender<SyncedRooms>,
 ) {
     let settings = settings();
-    let mut requests = Requests::new();
+    let mut requests = Requests::new(has_sync_token(&client).await);
     loop {
         match client
             .sync_once(settings.clone().timeout(requests.timeout()))
@@ -141,10 +158,27 @@ async fn run(
 fn settings() -> SyncSettings {
     let mut filter = FilterDefinition::with_lazy_loading();
     filter.room.timeline.limit = Some(uint!(10));
+    // mxt shows neither presence nor typing. In bridged rooms the puppets
+    // send both, and each would end the long poll and re-read the room. Read
+    // receipts stay: the unread counts need them.
+    filter.presence.not_types = vec!["*".to_owned()];
+    filter.room.ephemeral.not_types = vec!["m.typing".to_owned()];
     SyncSettings::new()
         .token(SyncToken::ReusePrevious)
         .set_presence(PresenceState::Offline)
         .filter(Filter::FilterDefinition(filter))
+}
+
+/// Whether an earlier run stored a sync token. A store error counts as none:
+/// the first request then only gets the larger time budget.
+async fn has_sync_token(client: &Client) -> bool {
+    matches!(
+        client
+            .state_store()
+            .get_kv_data(StateStoreDataKey::SyncToken)
+            .await,
+        Ok(Some(_))
+    )
 }
 
 fn set_state(state: &watch::Sender<SyncState>, next: SyncState) {
@@ -155,7 +189,7 @@ fn set_state(state: &watch::Sender<SyncState>, next: SyncState) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Failure {
     /// The request did not reach the homeserver, or its answer did not
-    /// arrive in time.
+    /// arrive.
     Unreachable,
     /// The homeserver no longer accepts the access token.
     UnknownToken,
@@ -184,43 +218,31 @@ enum AfterFailure {
 /// 60 s, reset by a response) and the long-poll timeout of each request.
 struct Requests {
     backoff: Backoff,
-    /// Whether a request has succeeded since the start, so a sync token is
-    /// stored.
-    responded: bool,
-    /// Whether the last request failed.
-    failing: bool,
+    /// Whether a sync token is stored, so requests continue from it.
+    token: bool,
 }
 
 impl Requests {
-    fn new() -> Requests {
+    fn new(token: bool) -> Requests {
         Requests {
             backoff: Backoff::new(Duration::from_secs(1), Duration::from_secs(60)),
-            responded: false,
-            failing: false,
+            token,
         }
     }
 
-    /// The long poll, except right after a failure once a token is stored:
-    /// then the homeserver answers at once, so the state shows without delay
-    /// that it is reachable again. The SDK adds the timeout to the request's
-    /// own 30 s, and an initial sync (without a token) needs that time on a
-    /// large account; the homeserver answers it at once anyway.
+    /// The long poll, also right after a failure: the homeserver answers as
+    /// soon as there is news, and a catch-up after an outage may need the
+    /// whole time budget. Until a token is stored, the initial sync's.
     fn timeout(&self) -> Duration {
-        if self.responded && self.failing {
-            Duration::ZERO
-        } else {
-            LONG_POLL
-        }
+        if self.token { LONG_POLL } else { INITIAL_POLL }
     }
 
     fn succeeded(&mut self) {
         self.backoff.reset();
-        self.responded = true;
-        self.failing = false;
+        self.token = true;
     }
 
     fn failed(&mut self, failure: Failure) -> AfterFailure {
-        self.failing = true;
         let state = match failure {
             Failure::UnknownToken => return AfterFailure::Stop,
             Failure::Unreachable => SyncState::Offline,
@@ -246,7 +268,7 @@ mod tests {
 
     #[test]
     fn failures_map_to_a_sync_state_and_back_off_until_a_response() {
-        let mut requests = Requests::new();
+        let mut requests = Requests::new(true);
         assert_eq!(
             requests.failed(Failure::Unreachable),
             retry(SyncState::Offline, 1)
@@ -268,19 +290,16 @@ mod tests {
     }
 
     #[test]
-    fn only_a_retry_after_a_response_skips_the_long_poll() {
-        let mut requests = Requests::new();
-        assert_eq!(requests.timeout(), LONG_POLL);
-        // No token may be stored yet: an initial sync keeps the time.
+    fn requests_keep_the_initial_sync_budget_until_a_token_is_stored() {
+        let mut requests = Requests::new(false);
+        assert_eq!(requests.timeout(), INITIAL_POLL);
         requests.failed(Failure::Unreachable);
-        assert_eq!(requests.timeout(), LONG_POLL);
+        assert_eq!(requests.timeout(), INITIAL_POLL);
         requests.succeeded();
         assert_eq!(requests.timeout(), LONG_POLL);
+        // A catch-up after a failure long-polls as well.
         requests.failed(Failure::Unreachable);
-        assert_eq!(requests.timeout(), Duration::ZERO);
-        requests.failed(Failure::Other);
-        assert_eq!(requests.timeout(), Duration::ZERO);
-        requests.succeeded();
         assert_eq!(requests.timeout(), LONG_POLL);
+        assert_eq!(Requests::new(true).timeout(), LONG_POLL);
     }
 }
