@@ -362,9 +362,10 @@ async fn a_refused_reaction_is_dropped_from_the_timeline_and_reported() {
     assert!(adapter.queued().await.is_empty());
 }
 
-#[tokio::test]
-async fn a_wrong_recovery_key_is_reported_without_any_of_the_key() {
-    let mut adapter = Adapter::start().await;
+/// The adapter, and secret storage with the key description of
+/// matrix-sdk's mock examples, which `EXAMPLE_RECOVERY_KEY` opens.
+async fn with_secret_storage() -> Adapter {
+    let adapter = Adapter::start().await;
     let me = ruma::UserId::parse(ME).unwrap();
     let server = &adapter.server;
     server
@@ -372,7 +373,6 @@ async fn a_wrong_recovery_key_is_reported_without_any_of_the_key() {
         .ok(&me, "abc")
         .mount()
         .await;
-    // The key description of matrix-sdk's mock examples.
     let properties = SecretStorageV1AesHmacSha2Properties::new(
         Some(Base64::parse("xv5b6/p3ExEw++wTyfSHEg==").unwrap()),
         Some(Base64::parse("ujBBbXahnTAMkmPUX2/0+VTfUh63pGyVRuBcDMgmJC8=").unwrap()),
@@ -386,7 +386,27 @@ async fn a_wrong_recovery_key_is_reported_without_any_of_the_key() {
         .ok(&me, &description)
         .mount()
         .await;
+    adapter
+}
 
+/// The recovery key of the doc example of matrix-sdk's
+/// `mock_get_secret_storage_key`.
+const EXAMPLE_RECOVERY_KEY: &str = "EsTj 3yST y93F SLpB jJsz eAXc 2XzA ygD3 w69H fGaN TKBj jXEd";
+
+const WRONG_KEY: &str = "Recovery failed: the recovery key is wrong";
+
+/// The status line's text of the failure that answers `key`.
+async fn recovery_failure(adapter: &mut Adapter, key: &str) -> String {
+    adapter.effect(MatrixEffect::Recover(key.to_owned().into()));
+    match adapter.core.report().await {
+        Msg::EffectFailed { error } => error,
+        other => panic!("not a failure: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_wrong_recovery_key_is_reported_without_any_of_the_key() {
+    let mut adapter = with_secret_storage().await;
     // The SDK's errors would show the first two bytes of the first key
     // (`[10, 50]`, not the prefix of a recovery key) and the `+` of the
     // second.
@@ -394,12 +414,15 @@ async fn a_wrong_recovery_key_is_reported_without_any_of_the_key() {
         "2222 2222 2222 2222 2222 2222 2222 2222 2222 2222 2222 2222",
         "made+up",
     ] {
-        adapter.effect(MatrixEffect::Recover(key.to_owned().into()));
-        match adapter.core.report().await {
-            Msg::EffectFailed { error } => {
-                assert_eq!(error, "Recovery failed: the recovery key is wrong");
-            }
-            other => panic!("not a failure: {other:?}"),
-        }
+        assert_eq!(recovery_failure(&mut adapter, key).await, WRONG_KEY);
     }
+}
+
+#[tokio::test]
+async fn a_failure_after_the_right_recovery_key_is_not_a_wrong_key() {
+    let mut adapter = with_secret_storage().await;
+    // The key opens the secret storage; importing the secrets fails next,
+    // since the mock homeserver has none.
+    let error = recovery_failure(&mut adapter, EXAMPLE_RECOVERY_KEY).await;
+    assert_ne!(error, WRONG_KEY);
 }

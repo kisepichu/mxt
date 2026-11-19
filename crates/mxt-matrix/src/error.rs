@@ -4,7 +4,10 @@ use std::{fmt, path::PathBuf, sync::Arc};
 
 use matrix_sdk::{
     ClientBuildError, HttpError, NotificationSettingsError, StoreError,
-    encryption::{recovery::RecoveryError, secret_storage::SecretStorageError},
+    encryption::{
+        recovery::RecoveryError,
+        secret_storage::{ImportError, SecretStorageError},
+    },
     event_cache::EventCacheError,
     room::{edit::EditError, reply::ReplyError},
     ruma::api::error::{Error as ServerError, ErrorKind},
@@ -75,11 +78,27 @@ impl Error {
     /// no file either.
     pub(crate) fn brief(&self) -> Brief<'_> {
         let response = match self {
-            Error::Sdk(error)
-            | Error::Recovery(
+            Error::Sdk(error) => sdk_response(error),
+            // Recovery applies no `without_url`; a failed request's URL names
+            // the user. Importing each secret fetches it from account data.
+            Error::Recovery(
                 RecoveryError::Sdk(error)
-                | RecoveryError::SecretStorage(SecretStorageError::Sdk(error)),
-            ) => sdk_response(error),
+                | RecoveryError::SecretStorage(
+                    SecretStorageError::Sdk(error)
+                    | SecretStorageError::ImportError {
+                        error: ImportError::Sdk(error),
+                        ..
+                    },
+                ),
+            ) => {
+                if is_unreachable(error) {
+                    return Brief {
+                        error: &"the request failed",
+                        response: None,
+                    };
+                }
+                sdk_response(error)
+            }
             // Only a shared pagination error is left (see `timeline_error`),
             // and it keeps the URL of a failed request.
             Error::Timeline(timeline::Error::EventCacheError(
@@ -364,9 +383,12 @@ mod tests {
 
     use matrix_sdk::{
         reqwest::StatusCode,
-        ruma::api::{
-            client::uiaa::UiaaResponse,
-            error::{ErrorBody, FromHttpResponseError, StandardErrorBody},
+        ruma::{
+            api::{
+                client::uiaa::UiaaResponse,
+                error::{ErrorBody, FromHttpResponseError, StandardErrorBody},
+            },
+            events::secret::request::SecretName,
         },
     };
 
@@ -540,5 +562,33 @@ mod tests {
             brief_sdk(&refused).to_string(),
             "the homeserver answered 403 M_FORBIDDEN"
         );
+    }
+
+    #[test]
+    fn brief_recovery_errors_have_no_url_and_no_server_message() {
+        let storage = |error: HttpError| SecretStorageError::Sdk(error.into());
+        let import = |error: HttpError| SecretStorageError::ImportError {
+            name: SecretName::CrossSigningMasterKey,
+            error: ImportError::Sdk(error.into()),
+        };
+        for error in [
+            RecoveryError::Sdk(failed_request().into()),
+            RecoveryError::SecretStorage(storage(failed_request())),
+            RecoveryError::SecretStorage(import(failed_request())),
+        ] {
+            let error = Error::from(error);
+            assert!(error.to_string().contains("!room"), "debug keeps the URL");
+            assert_eq!(error.brief().to_string(), "the request failed");
+        }
+        for refused in [
+            storage(server_error("M_FORBIDDEN")),
+            import(server_error("M_FORBIDDEN")),
+        ] {
+            let refused = Error::from(RecoveryError::SecretStorage(refused));
+            assert_eq!(
+                refused.brief().to_string(),
+                "the homeserver answered 403 M_FORBIDDEN"
+            );
+        }
     }
 }
