@@ -2684,8 +2684,6 @@ dependencies = [
 name = "mxt"
 version = "0.1.0"
 dependencies = [
- "crossterm",
- "futures-util",
  "mxt-core",
  "mxt-matrix",
  "mxt-tui",
@@ -2730,6 +2728,7 @@ dependencies = [
  "base64 0.23.1",
  "crossterm",
  "edtui",
+ "futures-util",
  "jiff",
  "mxt-core",
  "ratatui",

@@ -12,6 +12,7 @@ publish = false
 base64.workspace = true
 crossterm.workspace = true
 edtui.workspace = true
+futures-util.workspace = true
 jiff.workspace = true
 mxt-core.workspace = true
 ratatui.workspace = true
