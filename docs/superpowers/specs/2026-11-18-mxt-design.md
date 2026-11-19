@@ -1162,8 +1162,9 @@ Releases. How versions are chosen and a release is cut:
   the release. `workflow_dispatch` runs the same build and checks on any
   branch and keeps the archives as workflow artifacts without publishing, so
   the workflow can be tested without a tag. A run fails before building if
-  the tag is not `v` followed by the workspace version, or if `CHANGELOG.md`
-  has no section for the version; that section is the release notes.
+  the tag is not `v` followed by the workspace version, if a tag names a
+  commit that is not on `main`, or if `CHANGELOG.md` has no section for the
+  version; that section is the release notes.
   `gh release create` publishes the release: with assets it creates a draft,
   uploads them and then publishes it, so a release never appears without its
   archives, and it needs no third-party action.
@@ -1185,15 +1186,15 @@ Releases. How versions are chosen and a release is cut:
 - SQLite: a prebuilt binary can rely neither on the flake's SQLite nor on a
   system SQLite (Ubuntu 22.04's is older than 3.54.0), and libsqlite3-sys
   0.38's bundled copy is the affected one (RUSTSEC-2026-0459). The workflow
-  downloads the official SQLite amalgamation (3.54.1), checks it against the
-  SHA3-256 that sqlite.org publishes, builds a static library with the
-  compile options of libsqlite3-sys's bundled build (the SQLite that
-  matrix-sdk's default `bundled-sqlite` feature gives), and has
-  libsqlite3-sys link it with `SQLITE3_LIB_DIR`, `SQLITE3_INCLUDE_DIR`,
-  `SQLITE3_STATIC=1` and `SQLITE3_NO_PKG_CONFIG=1` (otherwise pkg-config
-  would find the runner's system SQLite first). It then checks that `ldd`
-  or `otool -L` lists no SQLite and that the binary holds the source ID of
-  that SQLite and no other, and prints its version.
+  downloads the official amalgamation of a fixed SQLite release, pinned in
+  the workflow, checks it against the SHA3-256 that sqlite.org publishes,
+  builds a static library with the compile options libsqlite3-sys uses for
+  its bundled copy (what matrix-sdk's opt-in `bundled-sqlite` feature would
+  build), and has libsqlite3-sys link it with `SQLITE3_LIB_DIR`,
+  `SQLITE3_INCLUDE_DIR`, `SQLITE3_STATIC=1` and `SQLITE3_NO_PKG_CONFIG=1`
+  (otherwise pkg-config would find the runner's system SQLite first). It
+  then checks that `ldd` or `otool -L` lists no SQLite and that the binary
+  holds the source ID of that SQLite and no other, and prints its version.
 
 ### Installing
 

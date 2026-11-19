@@ -54,8 +54,22 @@ Changes that users cannot see (refactoring, tests, CI) need no line.
 3. Set `version` in `[workspace.package]` of `Cargo.toml`, and run
    `cargo update --workspace`, which changes only the workspace crates'
    entries in `Cargo.lock` (CI builds with `--locked`).
-4. Open a pull request, and merge it into `main` when CI passes.
-5. Tag the merge commit on `main` and push the tag:
+4. Push the branch, run the release workflow on it, and wait for the run to
+   pass:
+
+   ```sh
+   gh workflow run release.yml --ref <branch>
+   ```
+
+   The run builds and checks the archives and the release notes as a tag
+   run does, but publishes nothing (see
+   [The release workflow](#the-release-workflow)). Do this before tagging,
+   because a tag is never moved (see below): a failure that shows only after
+   the tag is pushed, such as a misnamed `CHANGELOG.md` heading, a dependency
+   that needs a newer glibc or a dead SQLite URL, costs a version number.
+   Run it again if the branch changes.
+5. Open a pull request, and merge it into `main` when CI passes.
+6. Tag the merge commit on `main` and push the tag:
 
    ```sh
    git switch main && git pull
@@ -63,11 +77,11 @@ Changes that users cannot see (refactoring, tests, CI) need no line.
    git push origin v0.1.1
    ```
 
-6. The [release workflow](../.github/workflows/release.yml) builds and checks
+7. The [release workflow](../.github/workflows/release.yml) builds and checks
    the archives and publishes the GitHub release, with the version's
    `CHANGELOG.md` section as the release notes. It fails before building if
-   the tag is not `v` followed by the workspace version, or if
-   `CHANGELOG.md` has no section for the version.
+   the tagged commit is not on `main`, if the tag is not `v` followed by the
+   workspace version, or if `CHANGELOG.md` has no section for the version.
 
 A tag is never moved or deleted once it is pushed: mise, Nix users who pin
 `github:kisepichu/mxt/v0.1.1`, and anyone who recorded a checksum rely on it
@@ -84,10 +98,11 @@ by the next patch release.
 gh workflow run release.yml --ref <branch>
 ```
 
-A run by hand does everything a tag run does except publishing: it builds and
-checks the archives for the branch's workspace version and keeps them, and
-the extracted release notes, as workflow artifacts. Use it to test changes
-to the workflow.
+A run by hand does everything a tag run does except checking that the
+commit is on `main` and publishing: it builds and checks the archives for
+the branch's workspace version and keeps them, and the extracted release
+notes, as workflow artifacts. Use it before every release (step 4 above) and
+to test changes to the workflow.
 
 For each target it builds `mxt-v<version>-<target>.tar.gz`, which holds one
 directory with `mxt`, `LICENSE`, `README.md` and `CHANGELOG.md`, and
@@ -114,8 +129,10 @@ Two values in the workflow's `env` are maintained by hand:
 
 - `RUSTUP_TOOLCHAIN`, the Rust version of the release builds, follows the
   flake's rustc (`nix develop -c rustc --version`). Update it when
-  `nix flake update` changes rustc.
+  `nix flake update` changes rustc; CI fails while the two differ.
 - `SQLITE_URL` and `SQLITE_SHA3_256` name the SQLite release. To update
   SQLite, take both from the amalgamation's row on
-  <https://sqlite.org/download.html>, and change the version in `deny.toml`'s
-  comment.
+  <https://sqlite.org/download.html>, and change the release binaries'
+  SQLite version in `deny.toml`, in the comment above the RUSTSEC-2026-0459
+  entry and in its `reason`. Besides the URL, those are the only places that
+  name that version.
