@@ -403,7 +403,10 @@ fn message_view_opens_and_closes() {
         )))]
     );
     assert!(app.view_open());
-    assert_eq!(app.mode_label(Some(EditorMode::Normal)), "VIEW");
+    assert_eq!(app.mode_label(Some(EditorMode::Normal)), "VIEW NORMAL");
+    // The status line tells why `q` types text instead of closing the view.
+    assert_eq!(app.mode_label(Some(EditorMode::Insert)), "VIEW INSERT");
+    assert_eq!(app.mode_label(Some(EditorMode::Visual)), "VIEW VISUAL");
     // Unbound keys go to the view's editor; in insert mode, every key does.
     assert_eq!(
         keys_in(&mut app, "j", Some(EditorMode::Normal)),

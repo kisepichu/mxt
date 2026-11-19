@@ -276,8 +276,9 @@ impl App {
 
     /// "CONFIRM" while an action asks for confirmation, "COMMAND" while a
     /// command or search line is open, "PICKER" while a picker is open,
-    /// "VIEW" while the message view is open, "NORMAL", or for the
-    /// composer's editor "INSERT", "NORMAL", "VISUAL" or "SEARCH".
+    /// "VIEW" and the mode of its editor while the message view is open
+    /// ("VIEW INSERT": keys go to the editor, `q` included), "NORMAL", or
+    /// for the composer's editor "INSERT", "NORMAL", "VISUAL" or "SEARCH".
     pub fn mode_label(&self, editor: Option<EditorMode>) -> &'static str {
         if self.confirm.is_some() {
             return "CONFIRM";
@@ -289,7 +290,13 @@ impl App {
             return "PICKER";
         }
         if self.view.is_some() {
-            return "VIEW";
+            return match editor {
+                None => "VIEW",
+                Some(EditorMode::Normal) => "VIEW NORMAL",
+                Some(EditorMode::Insert) => "VIEW INSERT",
+                Some(EditorMode::Visual) => "VIEW VISUAL",
+                Some(EditorMode::Search) => "VIEW SEARCH",
+            };
         }
         match (self.focus, editor) {
             (Focus::Composer, Some(EditorMode::Insert)) => "INSERT",

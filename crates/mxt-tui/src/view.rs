@@ -75,7 +75,7 @@ pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
     let mut visible = Visible::default();
     let mut composer = panes.composer;
     let focused = app.focus() == Focus::Composer && composer.is_some();
-    let search = match panes.view {
+    let (search, view_mode) = match panes.view {
         Some(view) => {
             frame.render_widget(Clear, main);
             view.draw(
@@ -84,7 +84,7 @@ pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
                 Block::new().padding(Padding::horizontal(1)),
                 true,
             );
-            view.search()
+            (view.search(), Some(view.mode()))
         }
         None => {
             let right = if app.sidebar_visible() {
@@ -120,16 +120,18 @@ pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
             } else {
                 visible.timeline = draw_timeline(frame, right, app, panes.timeline);
             }
-            composer
+            let search = composer
                 .as_deref()
                 .filter(|_| focused)
-                .and_then(Composer::search)
+                .and_then(Composer::search);
+            (search, None)
         }
     };
     if let Some(picker) = app.picker() {
         panes.overlays.draw_picker(frame, main, picker);
     }
-    let editor = composer.filter(|_| focused).map(|composer| composer.mode());
+    // The message view's editor while it is open, else the focused composer's.
+    let editor = view_mode.or_else(|| composer.filter(|_| focused).map(|composer| composer.mode()));
     match (app.command_line(), search) {
         (Some(line), _) => draw_command_line(frame, bottom, line),
         (None, Some(pattern)) => draw_prompt_line(frame, bottom, "/", &pattern),
@@ -350,10 +352,11 @@ fn draft_label(app: &App) -> Option<String> {
     }
 }
 
-/// The mode (the composer's editor mode while it has focus), the pending
-/// count and keys, the open room, the confirmation question or the status
-/// message, and right-aligned the sync state. When they do not fit, the room
-/// name is cut first, so the question or the status message stays readable.
+/// The mode (with the mode of the message view's editor, or of the
+/// composer's while it has focus), the pending count and keys, the open
+/// room, the confirmation question or the status message, and right-aligned
+/// the sync state. When they do not fit, the room name is cut first, so the
+/// question or the status message stays readable.
 fn draw_status_line(frame: &mut Frame, area: Rect, app: &App, editor: Option<EditorMode>) {
     let mode = format!(" {} ", app.mode_label(editor));
     let mut pending = app
