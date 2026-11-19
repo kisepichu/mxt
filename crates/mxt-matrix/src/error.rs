@@ -8,15 +8,14 @@ use matrix_sdk::{
     event_cache::EventCacheError,
     ruma::api::error::{Error as ServerError, ErrorKind},
 };
-use matrix_sdk_ui::{encryption_sync_service, room_list_service, sync_service, timeline};
+use matrix_sdk_ui::timeline;
 
 /// Every variant that wraps another error displays its message (the session
 /// file errors after the path) and forwards its source, so printing the
 /// source chain shows each message once.
 #[derive(Debug)]
 pub enum Error {
-    /// Building the client: homeserver discovery, `/versions` (including a
-    /// homeserver without simplified sliding sync), or opening the stores.
+    /// Building the client: homeserver discovery or opening the stores.
     Build(ClientBuildError),
     /// Any other SDK call.
     Sdk(matrix_sdk::Error),
@@ -37,8 +36,6 @@ pub enum Error {
     PasswordLoginUnsupported { offered: Vec<String> },
     /// The homeserver no longer accepts the access token (`M_UNKNOWN_TOKEN`).
     UnknownToken,
-    /// Building the sync service, or its room list.
-    Sync(sync_service::Error),
     /// Building a room's timeline, or paginating it.
     Timeline(timeline::Error),
     /// An effect names a room this client does not know.
@@ -62,13 +59,12 @@ impl Error {
                 RecoveryError::Sdk(error)
                 | RecoveryError::SecretStorage(SecretStorageError::Sdk(error)),
             ) => sdk_response(error),
-            Error::Sync(error) => sync_response(error),
             // Only a shared pagination error is left (see `timeline_error`),
             // and it keeps the URL of a failed request.
             Error::Timeline(timeline::Error::EventCacheError(
                 EventCacheError::PaginationError(error),
             )) => {
-                if is_failed_request(error) {
+                if is_unreachable(error) {
                     return Brief {
                         error: &"the request failed",
                         response: None,
@@ -82,14 +78,6 @@ impl Error {
             error: self,
             response,
         }
-    }
-}
-
-/// The sync service's error for the status line and `warn` logs, see `Brief`.
-pub(crate) fn brief_sync(error: &sync_service::Error) -> Brief<'_> {
-    Brief {
-        error,
-        response: sync_response(error),
     }
 }
 
@@ -113,8 +101,11 @@ pub(crate) fn without_url(error: matrix_sdk::Error) -> matrix_sdk::Error {
     }
 }
 
-/// The errors `without_url` removes the URL from.
-fn is_failed_request(error: &matrix_sdk::Error) -> bool {
+/// Whether the request failed in the network layer, so no answer of the
+/// homeserver arrived: a connection, timeout, reset or truncated body. Every
+/// answer, an error response too, is an `HttpError::Api`; the SDK classifies
+/// the same way. These are the errors `without_url` removes the URL from.
+pub(crate) fn is_unreachable(error: &matrix_sdk::Error) -> bool {
     matches!(error, matrix_sdk::Error::Http(error) if matches!(**error, HttpError::Reqwest(_)))
 }
 
@@ -179,7 +170,6 @@ impl fmt::Display for Error {
             Error::UnknownToken => {
                 f.write_str("the homeserver no longer accepts this session (M_UNKNOWN_TOKEN)")
             }
-            Error::Sync(error) => error.fmt(f),
             Error::Timeline(error) => error.fmt(f),
             Error::UnknownRoom => f.write_str("the room is not known to this client"),
             Error::InvalidEventId => f.write_str("the event ID is not valid"),
@@ -195,7 +185,6 @@ impl std::error::Error for Error {
             Error::Recovery(error) => error.source(),
             Error::Io { error, .. } => error.source(),
             Error::Json { error, .. } => error.source(),
-            Error::Sync(error) => error.source(),
             Error::Timeline(error) => error.source(),
             Error::PasswordLoginUnsupported { .. }
             | Error::UnknownToken
@@ -230,18 +219,6 @@ impl From<HttpError> for Error {
 impl From<StoreError> for Error {
     fn from(error: StoreError) -> Self {
         matrix_sdk::Error::from(error).into()
-    }
-}
-
-impl From<sync_service::Error> for Error {
-    fn from(error: sync_service::Error) -> Self {
-        Error::Sync(error)
-    }
-}
-
-impl From<room_list_service::Error> for Error {
-    fn from(error: room_list_service::Error) -> Self {
-        Error::Sync(error.into())
     }
 }
 
@@ -289,18 +266,6 @@ fn http_response(error: &HttpError) -> Option<&ServerError> {
     match error {
         HttpError::Cached(error) => http_response(error),
         error => error.as_client_api_error(),
-    }
-}
-
-fn sync_response(error: &sync_service::Error) -> Option<&ServerError> {
-    match error {
-        sync_service::Error::RoomList(room_list_service::Error::SlidingSync(error))
-        | sync_service::Error::EncryptionSync(
-            encryption_sync_service::Error::SlidingSync(error)
-            | encryption_sync_service::Error::LockError(error)
-            | encryption_sync_service::Error::ClientError(error),
-        ) => sdk_response(error),
-        _ => None,
     }
 }
 
@@ -358,15 +323,6 @@ mod tests {
         assert_eq!(error.brief().to_string(), expected);
         let cached = Error::from(HttpError::Cached(Arc::new(server_error("M_FORBIDDEN"))));
         assert_eq!(cached.brief().to_string(), expected);
-        let sync = sync_service::Error::RoomList(room_list_service::Error::SlidingSync(
-            server_error("M_FORBIDDEN").into(),
-        ));
-        assert_eq!(brief_sync(&sync).to_string(), expected);
-        assert_eq!(
-            Error::from(sync).brief().to_string(),
-            expected,
-            "the same error as Error::Sync"
-        );
     }
 
     #[test]
@@ -375,8 +331,15 @@ mod tests {
             Error::UnknownRoom.brief().to_string(),
             Error::UnknownRoom.to_string()
         );
-        let error = sync_service::Error::Supervisor;
-        assert_eq!(brief_sync(&error).to_string(), error.to_string());
+    }
+
+    #[test]
+    fn reqwest_errors_are_unreachable_and_server_answers_are_not() {
+        // Any reqwest error, not only a connect or timeout error (here one
+        // from building the request): no answer of the homeserver arrived.
+        let request = matrix_sdk::reqwest::Proxy::all("http://[").unwrap_err();
+        assert!(is_unreachable(&HttpError::Reqwest(request).into()));
+        assert!(!is_unreachable(&server_error("M_UNKNOWN").into()));
     }
 
     #[test]

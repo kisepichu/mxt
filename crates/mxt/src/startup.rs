@@ -7,7 +7,6 @@
 use std::error::Error;
 use std::io;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use mxt_core::app::App;
@@ -15,7 +14,7 @@ use mxt_core::ids::UserId;
 use mxt_core::keymap::Keymap;
 use mxt_core::settings::Settings;
 use mxt_matrix::{
-    Client, Homeserver, Matrix, RecoveryStatus, SavedSession, SessionWatch, SyncService,
+    Client, Homeserver, Matrix, RecoveryStatus, SavedSession, SessionWatch, SyncLoop,
 };
 use mxt_tui::Tui;
 use tokio::sync::mpsc;
@@ -73,14 +72,14 @@ pub async fn run(config: Config, paths: &Paths) -> Outcome {
     }
 }
 
-/// The client with a restored or new session, and the sync service, which
-/// runs already after a first login. The session watch is created before
-/// any request with the access token.
+/// The client with a restored or new session, and the running sync loop,
+/// which a first login starts before it waits for the device keys. The
+/// session watch is created before any request with the access token.
 async fn connect(
     user_id: &UserId,
     configured: Option<&str>,
     paths: &Paths,
-) -> Result<(Client, Arc<SyncService>, SessionWatch), Outcome> {
+) -> Result<(Client, SyncLoop, SessionWatch), Outcome> {
     let session_file = paths.session_file();
     let saved = mxt_matrix::load_session(&session_file)
         .map_err(|error| failure("reading the session", &error))?;
@@ -116,11 +115,9 @@ async fn connect(
         }
         Err(outcome) => return Err(outcome),
     };
-    let sync = mxt_matrix::build_sync_service(&client)
-        .await
-        .map_err(|error| failure("starting the sync", &error))?;
+    let sync = SyncLoop::start(&client).map_err(|error| failure("starting the sync", &error))?;
     if first_login {
-        recover(&client, &sync).await?;
+        recover(&client).await?;
     }
     Ok((client, sync, session))
 }
@@ -178,11 +175,11 @@ async fn log_in(client: &Client, user_id: &UserId, paths: &Paths) -> Result<(), 
     Ok(())
 }
 
-/// Right after a first login: starts the sync, waits for the device keys to
-/// reach the server (recovery signs the device, which needs them), then asks
-/// for the recovery key. Only `M_UNKNOWN_TOKEN` stops the startup here.
-async fn recover(client: &Client, sync: &SyncService) -> Result<(), Outcome> {
-    sync.start().await;
+/// Right after a first login, with the sync running (it uploads the device
+/// keys): waits for the device keys to reach the server (recovery signs the
+/// device, which needs them), then asks for the recovery key. Only
+/// `M_UNKNOWN_TOKEN` stops the startup here.
+async fn recover(client: &Client) -> Result<(), Outcome> {
     println!("Waiting for this device's keys to reach the server...");
     match mxt_matrix::wait_for_device_keys(client, DEVICE_KEYS_TIMEOUT).await {
         Ok(true) => {}
@@ -235,7 +232,7 @@ async fn recover(client: &Client, sync: &SyncService) -> Result<(), Outcome> {
 /// the adapter stopped before this returns.
 async fn run_ui(
     client: Client,
-    sync: Arc<SyncService>,
+    sync: SyncLoop,
     session: &mut SessionWatch,
     keymap: Keymap,
     settings: Settings,
@@ -245,11 +242,7 @@ async fn run_ui(
     let mut app = App::new(keymap, settings, me);
     let (to_core, from_matrix) = mpsc::unbounded_channel();
     let (to_matrix, effects) = mpsc::unbounded_channel();
-    // Before the UI, so its failure is printed like the others.
-    let mut matrix = match Matrix::start(client, sync, receipts, to_core, effects).await {
-        Ok(matrix) => matrix,
-        Err(error) => return failure("starting the matrix adapter", &error),
-    };
+    let mut matrix = Matrix::start(client, sync, receipts, to_core, effects).await;
     mxt_tui::install_panic_hook();
     let mut tui = match Tui::new() {
         Ok(tui) => tui,
@@ -321,13 +314,12 @@ fn server_name(user_id: &UserId) -> &str {
         .map_or("", |(_, server)| server)
 }
 
-/// The saved session's homeserver, which needs no request; otherwise the
-/// configured one; otherwise discovery from the user ID's server name.
+/// The saved session's homeserver; otherwise the configured one; otherwise
+/// discovery from the user ID's server name.
 fn homeserver(saved: Option<&str>, configured: Option<&str>, user_id: &UserId) -> Homeserver {
-    match (saved, configured) {
-        (Some(saved), _) => Homeserver::Saved(saved.to_owned()),
-        (None, Some(url)) => Homeserver::Url(url.to_owned()),
-        (None, None) => Homeserver::Discover(server_name(user_id).to_owned()),
+    match saved.or(configured) {
+        Some(url) => Homeserver::Url(url.to_owned()),
+        None => Homeserver::Discover(server_name(user_id).to_owned()),
     }
 }
 
@@ -353,7 +345,7 @@ mod tests {
         let configured = Some("https://other.example.org");
         assert_eq!(
             homeserver(saved, configured, &alice),
-            Homeserver::Saved("https://matrix.example.org/".to_owned())
+            Homeserver::Url("https://matrix.example.org/".to_owned())
         );
         assert_eq!(
             homeserver(None, configured, &alice),

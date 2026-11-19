@@ -1,5 +1,6 @@
-//! The matrix-rust-sdk adapter of mxt: builds the SDK client, converts SDK
-//! data into `mxt-core` domain types and executes matrix effects.
+//! The matrix-rust-sdk adapter of mxt: builds the SDK client, runs the sync,
+//! converts SDK data into `mxt-core` domain types and executes matrix
+//! effects.
 
 // The future of matrix-sdk-ui's `Room::timeline()` is deeper than the default
 // limit allows; matrix-sdk and matrix-sdk-ui raise their own limit to the same
@@ -15,12 +16,13 @@ mod html;
 mod recovery;
 mod rooms;
 mod session;
+mod sync;
 mod timeline;
 
-pub use adapter::{Matrix, build_sync_service};
+pub use adapter::Matrix;
 pub use client::{Homeserver, StoreDirs, build_client};
 pub use error::Error;
 pub use matrix_sdk::Client;
-pub use matrix_sdk_ui::sync_service::SyncService;
 pub use recovery::{RecoveryStatus, recover, recovery_status, wait_for_device_keys};
 pub use session::{SavedSession, SessionWatch, load_session, login, restore, save_session};
+pub use sync::SyncLoop;
