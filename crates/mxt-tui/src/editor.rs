@@ -4,8 +4,9 @@
 //!
 //! In normal and visual mode mxt handles some keys in place of edtui
 //! (design, "edtui differences from vim"): `f`, `F`, `t` and `T` with their
-//! character, `;` and `,` repeating them, `r` with its character (normal
-//! mode only), and `h`, `l`, `<Left>` and `<Right>` by grapheme cluster.
+//! character, `;` and `,` repeating them, `r` with its character (in visual
+//! mode, which has no `r` yet, the character is dropped), and `h`, `l`,
+//! `<Left>` and `<Right>` by grapheme cluster.
 
 use std::cmp::Ordering;
 
@@ -27,18 +28,30 @@ use crate::view::grapheme_width;
 /// The columns edtui draws a tab with (its default).
 const TAB_WIDTH: usize = 2;
 
-/// What edtui runs for the keys of [`Command`]. edtui runs a key's action
-/// only when the key starts a command, not when it continues one (`d`
-/// then `f`), so the switch to search mode tells [`Editor::feed`] which it
-/// was. `feed` switches back at once; from normal or visual mode the switch
-/// changes nothing else.
+/// What edtui runs for the keys of [`Command`]. The switch to search mode
+/// tells [`Editor::feed`] that the key started a command rather than
+/// continued one (`d` then `f`); `feed` switches back at once. This relies
+/// on two things edtui 0.11.8 does, to check again when edtui changes:
+/// - edtui runs a key's action only when the key completes a sequence, so
+///   a key that continues one never runs `MARK`
+///   (`operators_keep_edtui_df_and_dt_and_drop_d_capital_f`);
+/// - from normal or visual mode, the switch to search mode changes nothing
+///   but the mode: the selection, the search pattern and `.` stay
+///   (`finds_extend_a_visual_selection`).
 const MARK: SwitchMode = SwitchMode(edtui::EditorMode::Search);
 
 pub(crate) struct Editor {
     pub(crate) state: EditorState,
     keys: EditorEventHandler,
     /// A key waiting for the next one, which gets it without the keymap.
+    /// It counts only in normal and visual mode, where it was typed.
     pending: Option<Pending>,
+    /// Whether edtui's last key was `d` or `c` in normal mode. edtui's
+    /// `df`, `dt`, `cf` and `ct` then wait for their character after `f`
+    /// or `t`; edtui 0.11.8 has no other key that takes a character
+    /// (`operators_keep_edtui_df_and_dt_and_drop_d_capital_f`,
+    /// `the_character_after_a_find_edtui_drops_is_dropped`).
+    after_operator: bool,
     /// The last `f`, `F`, `t` or `T` with its character, for `;` and `,`.
     last_find: Option<Find>,
 }
@@ -48,30 +61,11 @@ impl Editor {
     pub(crate) fn new(text: &str, register: SharedRegister) -> Editor {
         let mut state = EditorState::new(Lines::from(text));
         state.set_clipboard(register);
-        let mut keys = EditorEventHandler::vim_mode();
-        // edtui's `<C-e>` in normal mode asks for the external editor, which
-        // only the keymap's `composer.external_editor` opens.
-        keys.key_handler
-            .remove(&KeyEventRegister::n(vec![KeyInput::ctrl('e')]));
-        // Over edtui's `f`, `t`, `h`, `l`, `<Left>` and `<Right>`, so each
-        // key has one implementation.
-        let candidates = "fFtT;,hlr".chars().map(Key::char).chain(
-            [KeyCode::Left, KeyCode::Right].map(|code| Key::new(code, Modifiers::default())),
-        );
-        for key in candidates {
-            for mode in [edtui::EditorMode::Normal, edtui::EditorMode::Visual] {
-                if Command::of(key, mode).is_some()
-                    && let Some(input) = key_input(key, mode)
-                {
-                    keys.key_handler
-                        .insert(KeyEventRegister::new(vec![input], mode), MARK);
-                }
-            }
-        }
         Editor {
             state,
-            keys,
+            keys: key_handler(),
             pending: None,
+            after_operator: false,
             last_find: None,
         }
     }
@@ -89,18 +83,52 @@ impl Editor {
     /// key waits for its character, which then goes to the editor without
     /// the keymap (`f:`, `r<Esc>`).
     pub(crate) fn key_mode(&self) -> EditorMode {
-        if self.pending.is_some() {
+        if self.waiting().is_some() {
             EditorMode::AwaitingChar
         } else {
             self.mode()
         }
     }
 
+    fn waiting(&self) -> Option<Pending> {
+        self.pending.filter(|_| {
+            matches!(
+                self.state.mode,
+                edtui::EditorMode::Normal | edtui::EditorMode::Visual
+            )
+        })
+    }
+
+    /// Cancels a key waiting for the next one, mxt's (`f`, `r`) or edtui's
+    /// (`d`, `df`), for a change of the editor's mode or text without a key
+    /// (`FocusComposer`, `LoadComposer`): the key must not take one typed
+    /// later.
+    pub(crate) fn cancel_pending(&mut self) {
+        self.pending = None;
+        self.after_operator = false;
+        // edtui cannot cancel its keys from outside; a new handler has
+        // nothing waiting.
+        self.keys = key_handler();
+    }
+
     /// A key the core passed on. Keys edtui has no code for are left out.
     pub(crate) fn feed(&mut self, key: Key) {
-        let edtui_char = match self.pending.take() {
+        let waiting = self.waiting();
+        self.pending = None;
+        let edtui_char = match waiting {
             None => false,
-            Some(Pending::Edtui) => true,
+            Some(Pending::Edtui { till }) => {
+                // edtui takes the character of any character key, and
+                // cancels on the other keys, `<Tab>` among them.
+                if let KeyCode::Char(target) = key.code() {
+                    self.last_find = Some(Find {
+                        target,
+                        backward: false,
+                        till,
+                    });
+                }
+                true
+            }
             Some(Pending::Drop) => return,
             Some(Pending::Find { backward, till }) => {
                 if let Some(target) = char_arg(key) {
@@ -123,8 +151,16 @@ impl Editor {
         };
         let mode = self.state.mode;
         let Some(input) = key_input(key, mode) else {
+            if edtui_char {
+                // edtui does not get the key, so it would keep waiting.
+                self.cancel_pending();
+            }
             return;
         };
+        let operator = mode == edtui::EditorMode::Normal
+            && key.mods() == Modifiers::default()
+            && matches!(key.code(), KeyCode::Char('d' | 'c'));
+        let after_operator = std::mem::replace(&mut self.after_operator, operator && !edtui_char);
         self.keys.on_key_event(input, &mut self.state);
         let Some(command) = Command::of(key, mode) else {
             return;
@@ -134,17 +170,18 @@ impl Editor {
             self.state.mode = mode;
             self.run(command);
         } else if !edtui_char {
-            // The key continued another one (`d` then `f`). edtui's `df`,
-            // `dt`, `cf` and `ct` now wait for their character, which goes
-            // to edtui (so does the one after `yf`, which edtui does not
-            // have). edtui has no `dF` or `cT`, so their character is
-            // dropped rather than run as a command. With `edtui_char` the
-            // key was such a character, and nothing waits.
+            // The key continued another one. After `d` or `c`, edtui's
+            // `df`, `dt`, `cf` and `ct` now wait for their character, which
+            // goes to edtui. edtui has no other find after a key (`dF`,
+            // `yf`, `gt`, visual `if`) and dropped both keys; their
+            // character is dropped too rather than run as a command. With
+            // `edtui_char` the key was such a character, and nothing waits.
             self.pending = match command {
                 Command::Find {
-                    backward: false, ..
-                } => Some(Pending::Edtui),
-                Command::Find { backward: true, .. } => Some(Pending::Drop),
+                    backward: false,
+                    till,
+                } if after_operator => Some(Pending::Edtui { till }),
+                Command::Find { .. } => Some(Pending::Drop),
                 _ => None,
             };
         }
@@ -154,6 +191,12 @@ impl Editor {
         match command {
             Command::Find { backward, till } => {
                 self.pending = Some(Pending::Find { backward, till });
+            }
+            // Visual `r` (vim replaces every selected character) is not
+            // implemented; its character is dropped rather than run as a
+            // command.
+            Command::Replace if self.state.mode == edtui::EditorMode::Visual => {
+                self.pending = Some(Pending::Drop);
             }
             Command::Replace => self.pending = Some(Pending::Replace),
             Command::Repeat { reverse } => {
@@ -264,19 +307,16 @@ enum Command {
     Repeat { reverse: bool },
     /// `h` and `<Left>`, `l` and `<Right>` (`forward`).
     Step { forward: bool },
-    /// `r`, waiting for the character.
+    /// `r`, waiting for the character (in visual mode, to drop it).
     Replace,
 }
 
 impl Command {
-    /// `key`'s command in normal or visual mode; `r` only in normal mode.
+    /// `key`'s command in normal or visual mode.
     fn of(key: Key, mode: edtui::EditorMode) -> Option<Command> {
-        let visual = match mode {
-            edtui::EditorMode::Normal => false,
-            edtui::EditorMode::Visual => true,
-            edtui::EditorMode::Insert | edtui::EditorMode::Search => return None,
-        };
-        if key.mods() != Modifiers::default() {
+        let normal_or_visual =
+            matches!(mode, edtui::EditorMode::Normal | edtui::EditorMode::Visual);
+        if !normal_or_visual || key.mods() != Modifiers::default() {
             return None;
         }
         let command = match key.code() {
@@ -300,7 +340,7 @@ impl Command {
             KeyCode::Char(',') => Command::Repeat { reverse: true },
             KeyCode::Char('h') | KeyCode::Left => Command::Step { forward: false },
             KeyCode::Char('l') | KeyCode::Right => Command::Step { forward: true },
-            KeyCode::Char('r') if !visual => Command::Replace,
+            KeyCode::Char('r') => Command::Replace,
             _ => return None,
         };
         Some(command)
@@ -312,13 +352,39 @@ impl Command {
 enum Pending {
     /// `f`, `F`, `t` or `T`.
     Find { backward: bool, till: bool },
-    /// `r`.
+    /// `r` in normal mode.
     Replace,
-    /// edtui's `df`, `dt`, `cf` or `ct`: the key goes to edtui.
-    Edtui,
-    /// `dF`, `cT` and the like, which edtui does not have: the key is
-    /// dropped.
+    /// edtui's `df`, `dt` (`till`), `cf` or `ct`: the key goes to edtui.
+    Edtui { till: bool },
+    /// `dF`, `yf`, `gt`, visual `r` and the like, which edtui does not
+    /// have: the key is dropped.
     Drop,
+}
+
+/// edtui's vim keys with mxt's keys over them.
+fn key_handler() -> EditorEventHandler {
+    let mut keys = EditorEventHandler::vim_mode();
+    // edtui's `<C-e>` in normal mode asks for the external editor, which
+    // only the keymap's `composer.external_editor` opens.
+    keys.key_handler
+        .remove(&KeyEventRegister::n(vec![KeyInput::ctrl('e')]));
+    // Over edtui's `f`, `t`, `h`, `l`, `<Left>` and `<Right>`, so each key
+    // has one implementation.
+    let candidates = "fFtT;,hlr"
+        .chars()
+        .map(Key::char)
+        .chain([KeyCode::Left, KeyCode::Right].map(|code| Key::new(code, Modifiers::default())));
+    for key in candidates {
+        for mode in [edtui::EditorMode::Normal, edtui::EditorMode::Visual] {
+            if Command::of(key, mode).is_some()
+                && let Some(input) = key_input(key, mode)
+            {
+                keys.key_handler
+                    .insert(KeyEventRegister::new(vec![input], mode), MARK);
+            }
+        }
+    }
+    keys
 }
 
 /// An `f`, `F`, `t` or `T` with its character.
@@ -630,6 +696,56 @@ pub(crate) mod tests {
         let mut editor = holding("x\nab");
         feed(&mut editor, "ddfb");
         assert_eq!((text(&editor).as_str(), editor.state.cursor.col), ("ab", 1));
+
+        // `;` after edtui's `df.` repeats `f.`.
+        let mut editor = holding("a.b.c.d");
+        feed(&mut editor, "df.;");
+        assert_eq!(
+            (text(&editor).as_str(), editor.state.cursor.col),
+            ("b.c.d", 1)
+        );
+        // A key edtui does not get cancels its `df`, so the next key runs.
+        let mut editor = holding("axb");
+        feed(&mut editor, "df<F1>");
+        assert_eq!(editor.key_mode(), EditorMode::Normal);
+        feed(&mut editor, "x");
+        assert_eq!(text(&editor), "xb");
+    }
+
+    #[test]
+    fn the_character_after_a_find_edtui_drops_is_dropped() {
+        // edtui has no `yf`, `yt`, `gf` or visual `r`. Their character is
+        // not run as a command: `.` repeating the `x`, `x`, `u`.
+        for (typed, expected) in [
+            ("xyf.", "bcd"),
+            ("yfx", "abcd"),
+            ("xytu", "bcd"),
+            ("gfx", "abcd"),
+            ("lvlrx", "abcd"),
+        ] {
+            let mut editor = holding("abcd");
+            feed(&mut editor, typed);
+            assert_eq!(text(&editor), expected, "{typed}");
+            assert_ne!(editor.key_mode(), EditorMode::AwaitingChar, "{typed}");
+        }
+        // The key after it runs.
+        let mut editor = holding("abcd");
+        feed(&mut editor, "yf.x");
+        assert_eq!(text(&editor), "bcd");
+    }
+
+    #[test]
+    fn a_waiting_key_counts_only_in_normal_and_visual_mode() {
+        // The mode changes without a key while `f` or `r` waits: in insert
+        // mode the next key is typed.
+        for waiting in ["f", "r"] {
+            let mut editor = holding("abc");
+            feed(&mut editor, waiting);
+            editor.state.execute(SwitchMode(Mode::Insert));
+            assert_eq!(editor.key_mode(), EditorMode::Insert, "{waiting}");
+            feed(&mut editor, "z");
+            assert_eq!(text(&editor), "zabc", "{waiting}");
+        }
     }
 
     #[test]
