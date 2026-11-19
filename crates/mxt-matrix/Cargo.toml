@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 futures-util.workspace = true
+image.workspace = true
 matrix-sdk.workspace = true
 matrix-sdk-ui.workspace = true
 mime_guess.workspace = true

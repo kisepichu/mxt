@@ -4,10 +4,11 @@
 
 use std::{
     fs::{self, OpenOptions},
-    io::{self, Write as _},
+    io::{self, Cursor, Write as _},
     path::{Path, PathBuf},
 };
 
+use image::ImageReader;
 use matrix_sdk::{
     Client, Room,
     attachment::{
@@ -51,6 +52,12 @@ const NAME_MAX: usize = 255;
 /// its dot: in a longer one, the last dot is part of the name (of a
 /// sentence used as the name, for example).
 const MAX_EXTENSION: usize = 16;
+
+/// The most of an upload that is read for an image's dimensions. The
+/// decoders stop after the header, but the JPEG decoder copies all it is
+/// given first, and a JPEG's frame header comes after its metadata segments
+/// (Exif, ICC profile, XMP), which stay far below this.
+const HEADER_LIMIT: usize = 1024 * 1024;
 
 /// `MatrixEffect::Download`: the item's file, decrypted in encrypted rooms,
 /// saved in `dir` under the event's file name made safe (see
@@ -154,7 +161,7 @@ pub(crate) async fn upload(room: &Room, path: PathBuf) -> Result<(), Error> {
         name.to_string_lossy().into_owned()
     });
     let mime = mime_guess::from_path(&path).first_or_octet_stream();
-    let config = AttachmentConfig::new().info(attachment_info(&mime, bytes.len()));
+    let config = AttachmentConfig::new().info(attachment_info(&mime, &bytes));
     debug!("uploading {}", path.display());
     enable_sending(room);
     room.send_queue()
@@ -209,15 +216,20 @@ fn fits_preview(size: u64) -> bool {
     size <= PREVIEW_LIMIT
 }
 
-/// The upload's size, in the info of the message type the SDK picks from
-/// `mime`: it drops info of another kind.
-fn attachment_info(mime: &Mime, len: usize) -> AttachmentInfo {
-    let size = UInt::new(len as u64);
+/// The upload's size, and an image's dimensions, in the info of the message
+/// type the SDK picks from `mime`: it drops info of another kind.
+fn attachment_info(mime: &Mime, bytes: &[u8]) -> AttachmentInfo {
+    let size = UInt::new(bytes.len() as u64);
     match mime.type_() {
-        mime::IMAGE => AttachmentInfo::Image(BaseImageInfo {
-            size,
-            ..BaseImageInfo::default()
-        }),
+        mime::IMAGE => {
+            let (width, height) = image_dimensions(bytes).unzip();
+            AttachmentInfo::Image(BaseImageInfo {
+                width,
+                height,
+                size,
+                ..BaseImageInfo::default()
+            })
+        }
         mime::VIDEO => AttachmentInfo::Video(BaseVideoInfo {
             size,
             ..BaseVideoInfo::default()
@@ -228,6 +240,20 @@ fn attachment_info(mime: &Mime, len: usize) -> AttachmentInfo {
         }),
         _ => AttachmentInfo::File(BaseFileInfo { size }),
     }
+}
+
+/// The width and height in the header of the image `bytes`, in the formats
+/// the message view decodes, guessed from the bytes rather than the name;
+/// `None` when they cannot be read (another format, a damaged file), and
+/// the image is sent without them. Nothing past the header is decoded.
+fn image_dimensions(bytes: &[u8]) -> Option<(UInt, UInt)> {
+    let header = &bytes[..bytes.len().min(HEADER_LIMIT)];
+    let (width, height) = ImageReader::new(Cursor::new(header))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
+    Some((width.into(), height.into()))
 }
 
 /// A leading `~/` stands for `home`, as in the configuration; other paths
@@ -493,11 +519,61 @@ mod tests {
     #[test]
     fn uploads_keep_their_size_in_the_message_type_the_sdk_picks() {
         let size = Some(uint!(5));
-        let info = |mime: &str| attachment_info(&mime.parse().unwrap(), 5);
+        let info = |mime: &str| attachment_info(&mime.parse().unwrap(), b"bytes");
         assert_eq!(ImageInfo::from(info("image/png")).size, size);
         assert_eq!(VideoInfo::from(info("video/mp4")).size, size);
         assert_eq!(AudioInfo::from(info("audio/ogg")).size, size);
         assert_eq!(FileInfo::from(info("application/pdf")).size, size);
+    }
+
+    /// The signature and the header chunk of a 640x480 PNG, then the start
+    /// of its image data, which the decoder reads up to.
+    const PNG_HEADER: &[u8] = &[
+        0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, // signature
+        0, 0, 0, 13, b'I', b'H', b'D', b'R', // IHDR
+        0, 0, 0x02, 0x80, 0, 0, 0x01, 0xE0, 8, 2, 0, 0, 0, // 640x480, 8-bit RGB
+        0xBA, 0xB3, 0x4B, 0xB3, // CRC
+        0, 0, 0, 0, b'I', b'D', b'A', b'T', // IDAT
+    ];
+
+    /// The start of a 1920x1080 grayscale JPEG: the frame header, then the
+    /// scan header, which the decoder reads up to.
+    const JPEG_HEADER: &[u8] = &[
+        0xFF, 0xD8, // SOI
+        0xFF, 0xC0, 0, 11, 8, // SOF0, 8-bit samples
+        0x04, 0x38, 0x07, 0x80, // 1080 lines, 1920 columns
+        1, 1, 0x11, 0, // one component
+        0xFF, 0xDA, 0, 8, 1, 1, 0, 0, 0x3F, 0, // SOS
+    ];
+
+    fn image_info(mime: &str, bytes: &[u8]) -> ImageInfo {
+        ImageInfo::from(attachment_info(&mime.parse().unwrap(), bytes))
+    }
+
+    #[test]
+    fn uploaded_images_carry_the_dimensions_in_their_header() {
+        let png = image_info("image/png", PNG_HEADER);
+        assert_eq!(
+            (png.width, png.height),
+            (Some(uint!(640)), Some(uint!(480)))
+        );
+        let jpeg = image_info("image/jpeg", JPEG_HEADER);
+        assert_eq!(
+            (jpeg.width, jpeg.height),
+            (Some(uint!(1920)), Some(uint!(1080)))
+        );
+        // The format comes from the bytes, not from the file name.
+        let misnamed = image_info("image/jpeg", PNG_HEADER);
+        assert_eq!(misnamed.width, Some(uint!(640)));
+    }
+
+    #[test]
+    fn an_image_whose_header_cannot_be_read_is_sent_without_dimensions() {
+        for bytes in [&b"<svg></svg>"[..], &PNG_HEADER[..20]] {
+            let info = image_info("image/png", bytes);
+            assert_eq!((info.width, info.height), (None, None));
+            assert_eq!(info.size, UInt::new(bytes.len() as u64));
+        }
     }
 
     #[test]

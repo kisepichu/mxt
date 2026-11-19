@@ -2853,6 +2853,7 @@ name = "mxt-matrix"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "image",
  "matrix-sdk",
  "matrix-sdk-ui",
  "mime_guess",
