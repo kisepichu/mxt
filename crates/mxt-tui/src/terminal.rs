@@ -46,8 +46,8 @@ pub struct Tui {
     /// The room list range last reported with `Msg::Viewport`.
     room_list_viewport: Option<(usize, usize)>,
     timeline: TimelinePane,
-    /// The timeline range last reported with `Msg::Viewport`.
-    timeline_viewport: Option<(usize, usize)>,
+    /// The room and the timeline range last reported with `Msg::Viewport`.
+    timeline_viewport: Option<(RoomId, (usize, usize))>,
     /// The message view's scratch editor while it is open.
     view: Option<Editor>,
     composers: Composers,
@@ -98,10 +98,12 @@ impl Tui {
 
     /// Sends the last copy to the terminal clipboard if it has not reached
     /// it yet, draws the frame, and returns `Msg::Viewport` for panes whose
-    /// visible range changed since the last draw. Fails once the terminal
-    /// has been restored, which while the UI runs only the panic hook does,
-    /// so a panic in any task ends the event loop instead of drawing onto
-    /// the main screen.
+    /// visible range changed since the last draw. The timeline's range is
+    /// also reported when the open room changed, even if its indices are
+    /// the same, because the core forgets the viewport when another room
+    /// opens. Fails once the terminal has been restored, which while the UI
+    /// runs only the panic hook does, so a panic in any task ends the event
+    /// loop instead of drawing onto the main screen.
     pub fn draw(&mut self, app: &App) -> io::Result<Vec<Msg>> {
         if !ACTIVE.load(Ordering::SeqCst) {
             return Err(io::Error::other("the terminal was restored after a panic"));
@@ -134,24 +136,31 @@ impl Tui {
         })?;
 
         let mut msgs = Vec::new();
-        for (pane, range, reported) in [
-            (
-                Pane::RoomList,
-                visible.room_list,
-                &mut self.room_list_viewport,
-            ),
-            (
-                Pane::Timeline,
-                visible.timeline,
-                &mut self.timeline_viewport,
-            ),
-        ] {
-            if let Some((first, last)) = range
-                && *reported != range
-            {
-                *reported = range;
-                msgs.push(Msg::Viewport { pane, first, last });
-            }
+        if let Some((first, last)) = visible.room_list
+            && self.room_list_viewport != visible.room_list
+        {
+            self.room_list_viewport = visible.room_list;
+            msgs.push(Msg::Viewport {
+                pane: Pane::RoomList,
+                first,
+                last,
+            });
+        }
+        if let (Some(range), Some(room)) = (visible.timeline, app.open_room())
+            && self
+                .timeline_viewport
+                .as_ref()
+                .is_none_or(|(reported, reported_range)| {
+                    reported != room || *reported_range != range
+                })
+        {
+            self.timeline_viewport = Some((room.clone(), range));
+            let (first, last) = range;
+            msgs.push(Msg::Viewport {
+                pane: Pane::Timeline,
+                first,
+                last,
+            });
         }
         Ok(msgs)
     }

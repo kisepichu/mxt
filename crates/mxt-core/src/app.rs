@@ -117,6 +117,7 @@ pub struct App {
     terminal_focused: bool,
     status: Option<StatusMessage>,
     room_list_viewport: Option<Viewport>,
+    /// The open room's, from a render of that room; `None` until then.
     timeline_viewport: Option<Viewport>,
     command_line: Option<OpenLine>,
     /// The pattern `search.next` and `search.prev` repeat.
