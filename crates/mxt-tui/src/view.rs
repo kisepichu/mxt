@@ -1,6 +1,8 @@
 //! Layout and drawing, from the core state (design, "Layout", "Room names",
 //! "Unread badges"). Colors come only from the 16-color palette.
 
+use std::ops::RangeInclusive;
+
 use mxt_core::app::{App, CommandLine, Focus, LineKind, StatusKind};
 use mxt_core::effect::ViewContent;
 use mxt_core::msg::{EditorMode, SyncState};
@@ -21,9 +23,8 @@ use crate::image_view::Images;
 use crate::overlay::Overlays;
 use crate::timeline_view::{TimelinePane, file_size};
 
-/// The room list width, its border included.
-const ROOM_LIST_WIDTH: u16 = 30;
-/// Terminals narrower than this give the room list a third of their width.
+/// Terminals narrower than this give the room list a third of their width,
+/// whatever `ui.room_list.width` says.
 const NARROW_WIDTH: u16 = 90;
 /// The timeline header and the composer line up with the entries, which
 /// leave two columns for the cursor bar and one on the right.
@@ -48,10 +49,50 @@ const SEPARATOR: &str = " / ";
 /// a room list row leaves out the mode label first, and a bridged name leaves
 /// out its network part, already shortened to `…`.
 const MIN_NAME_WIDTH: usize = 6;
+/// Before the network part on a row of its own.
+const NETWORK_INDENT: &str = "  ";
+
+/// `ui.room_list.width` and `ui.room_list.network` (design, "Room list").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoomListLayout {
+    /// The room list's columns, its border included. Terminals narrower
+    /// than 90 columns give it a third of their width instead, and it never
+    /// takes more than half of the width.
+    pub width: u16,
+    pub network: NetworkPlacement,
+}
+
+impl RoomListLayout {
+    /// The widths `ui.room_list.width` accepts.
+    pub const WIDTHS: RangeInclusive<u16> = 12..=80;
+}
+
+/// 30 columns, and the network part inline.
+impl Default for RoomListLayout {
+    fn default() -> RoomListLayout {
+        RoomListLayout {
+            width: 30,
+            network: NetworkPlacement::Inline,
+        }
+    }
+}
+
+/// Where the room list shows a room's network part.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NetworkPlacement {
+    /// `network / room` on one row, the network part shortened first.
+    #[default]
+    Inline,
+    /// The room part on one row, and the network part on a second row,
+    /// dim, indented and cut at its end. A room without a network part
+    /// keeps one row.
+    Below,
+}
 
 /// The panes' state between frames.
 pub(crate) struct Panes<'a> {
     pub(crate) room_list: &'a mut ListState,
+    pub(crate) room_list_layout: RoomListLayout,
     pub(crate) timeline: &'a mut TimelinePane,
     /// The message view while it is open.
     pub(crate) view: Option<&'a mut View>,
@@ -150,15 +191,17 @@ pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
         }
         None => {
             let right = if app.sidebar_visible() {
+                let layout = panes.room_list_layout;
                 let width = if main.width < NARROW_WIDTH {
                     main.width / 3
                 } else {
-                    ROOM_LIST_WIDTH
+                    layout.width.min(main.width / 2)
                 };
                 let [list, right] =
                     Layout::horizontal([Constraint::Length(width), Constraint::Fill(1)])
                         .areas(main);
-                visible.room_list = draw_room_list(frame, list, app, panes.room_list);
+                visible.room_list =
+                    draw_room_list(frame, list, app, panes.room_list, layout.network);
                 right
             } else {
                 main
@@ -202,12 +245,15 @@ pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
     visible
 }
 
-/// The list scrolls so the cursor stays visible.
+/// The list scrolls so the cursor stays visible. The range it returns is in
+/// rooms: ratatui draws the rooms whose rows fit whole, from the offset it
+/// leaves in `state`, and a room can take two rows.
 fn draw_room_list(
     frame: &mut Frame,
     area: Rect,
     app: &App,
     state: &mut ListState,
+    network: NetworkPlacement,
 ) -> Option<(usize, usize)> {
     let block = Block::new()
         .borders(Borders::RIGHT)
@@ -215,33 +261,77 @@ fn draw_room_list(
     let inner = block.inner(area);
     let width = usize::from(inner.width);
     let open = app.open_room();
-    let rows: Vec<ListItem> = app
-        .rooms()
-        .rooms()
+    let rooms = app.rooms().rooms();
+    let items: Vec<ListItem> = rooms
         .iter()
-        .map(|room| ListItem::new(room_row(room, open == Some(&room.id), width)))
+        .map(|room| room_item(room, open == Some(&room.id), width, network))
         .collect();
-    let len = rows.len();
     let cursor = match app.focus() {
         Focus::RoomList => Modifier::REVERSED,
         Focus::Timeline | Focus::Composer => Modifier::UNDERLINED,
     };
-    let list = List::new(rows).block(block).highlight_style(cursor);
+    let list = List::new(items).block(block).highlight_style(cursor);
     state.select(app.room_cursor());
     frame.render_stateful_widget(list, area, state);
 
     let height = usize::from(inner.height);
-    (len > 0 && height > 0).then(|| {
-        let first = state.offset().min(len - 1);
-        (first, (first + height).min(len) - 1)
-    })
+    let first = state.offset();
+    let shown = rooms
+        .iter()
+        .skip(first)
+        .scan(0, |rows, room| {
+            *rows += room_height(room, network);
+            (*rows <= height).then_some(())
+        })
+        .count();
+    (shown > 0).then(|| (first, first + shown - 1))
+}
+
+/// A room's rows: the row of `room_row`, then with
+/// `NetworkPlacement::Below` the network part's row.
+fn room_item(
+    room: &RoomSummary,
+    is_open: bool,
+    width: usize,
+    network: NetworkPlacement,
+) -> ListItem<'_> {
+    let row = room_row(room, is_open, width, network);
+    match network_below(room, network) {
+        Some(part) => ListItem::new(vec![row, network_row(part, width)]),
+        None => ListItem::new(row),
+    }
+}
+
+/// The rows `room_item` gives the room.
+fn room_height(room: &RoomSummary, network: NetworkPlacement) -> usize {
+    1 + usize::from(network_below(room, network).is_some())
+}
+
+/// The network part that goes on a row of its own.
+fn network_below(room: &RoomSummary, network: NetworkPlacement) -> Option<&str> {
+    match network {
+        NetworkPlacement::Inline => None,
+        NetworkPlacement::Below => room.name.network.as_deref(),
+    }
+}
+
+/// The network part, dim, after `NETWORK_INDENT`, cut at its end.
+fn network_row(network: &str, width: usize) -> Line<'_> {
+    Line::from(fit(&[(NETWORK_INDENT, PLAIN), (network, DIM)], width).0)
 }
 
 /// The displayed name, cut to fit, and right-aligned the badge and the
-/// notification mode label. The label is left out before the name would get
-/// fewer than `MIN_NAME_WIDTH` columns: the badge is the signal to act on. The
+/// notification mode label. With `NetworkPlacement::Below` the name is the
+/// room part alone. The label is left out before the name would get fewer
+/// than `MIN_NAME_WIDTH` columns: the badge is the signal to act on. The
 /// right part never takes more than the row.
-fn room_row(room: &RoomSummary, is_open: bool, width: usize) -> Line<'_> {
+fn room_row(
+    room: &RoomSummary,
+    is_open: bool,
+    width: usize,
+    network: NetworkPlacement,
+) -> Line<'_> {
+    let inline = network == NetworkPlacement::Inline;
     let mut right = Vec::with_capacity(3);
     let mut right_width =
         Badge::from_counts(&room.unread).map_or(0, |badge| push_badge(&mut right, badge, width));
@@ -250,7 +340,12 @@ fn room_row(room: &RoomSummary, is_open: bool, width: usize) -> Line<'_> {
         let with_label = right_width + space + text_width(label);
         // One column stays between the name and the right part.
         let name_room = width.checked_sub(with_label + 1);
-        let wanted = name_width(&room.name).min(MIN_NAME_WIDTH);
+        let name_columns = if inline {
+            name_width(&room.name)
+        } else {
+            text_width(&room.name.room)
+        };
+        let wanted = name_columns.min(MIN_NAME_WIDTH);
         if name_room.is_some_and(|columns| columns >= wanted) {
             if space > 0 {
                 right.push(Span::raw(" "));
@@ -263,7 +358,11 @@ fn room_row(room: &RoomSummary, is_open: bool, width: usize) -> Line<'_> {
 
     let room_style = if is_open { BOLD } else { PLAIN };
     let name_room = width.saturating_sub(right_width + gap);
-    let (mut spans, used) = fit_name(&room.name, room_style, name_room);
+    let (mut spans, used) = if inline {
+        fit_name(&room.name, room_style, name_room)
+    } else {
+        fit(&[(room.name.room.as_str(), room_style)], name_room)
+    };
     spans.push(Span::raw(
         " ".repeat(width.saturating_sub(used + right_width)),
     ));
@@ -588,16 +687,21 @@ pub(crate) mod tests {
     use mxt_core::timeline::{MessageContent, TimelineDiff, TimelineItem};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Cell;
+
+    fn no_rooms() -> App {
+        let leader = KeySeq::parse("<Space>", &KeySeq::default()).unwrap();
+        App::new(
+            Keymap::new(&leader, []),
+            Settings::default(),
+            UserId::new("@me:example.org"),
+        )
+    }
 
     /// The app with the rooms `!a` and `!b`, `!a` first, and the room list
     /// focused.
     pub(crate) fn app() -> App {
-        let leader = KeySeq::parse("<Space>", &KeySeq::default()).unwrap();
-        let mut app = App::new(
-            Keymap::new(&leader, []),
-            Settings::default(),
-            UserId::new("@me:example.org"),
-        );
+        let mut app = no_rooms();
         for (id, at) in [("!a:example.org", 20), ("!b:example.org", 10)] {
             app.update(Msg::RoomUpserted(RoomSummary {
                 id: RoomId::new(id),
@@ -606,6 +710,21 @@ pub(crate) mod tests {
                 unread: UnreadCounts::default(),
                 mode: NotificationMode::Default,
                 latest_activity: Some(Timestamp::from_millis(at)),
+            }));
+        }
+        app
+    }
+
+    /// The app with `rooms` listed in this order, as `!0:example.org` and
+    /// on, and the room list focused.
+    fn app_with(rooms: Vec<RoomSummary>) -> App {
+        let mut app = no_rooms();
+        for (n, room) in (0..).zip(rooms) {
+            app.update(Msg::RoomUpserted(RoomSummary {
+                id: RoomId::new(format!("!{n}:example.org")),
+                // The newest first.
+                latest_activity: Some(Timestamp::from_millis(1000 - n)),
+                ..room
             }));
         }
         app
@@ -649,15 +768,22 @@ pub(crate) mod tests {
     pub(crate) struct Screen {
         terminal: Terminal<TestBackend>,
         room_list: ListState,
+        room_list_layout: RoomListLayout,
         timeline: TimelinePane,
         overlays: Overlays,
     }
 
     impl Screen {
         pub(crate) fn new() -> Screen {
+            Screen::sized(80, RoomListLayout::default())
+        }
+
+        /// A terminal `width` columns wide and 12 rows high.
+        fn sized(width: u16, room_list_layout: RoomListLayout) -> Screen {
             Screen {
-                terminal: Terminal::new(TestBackend::new(80, 12)).unwrap(),
+                terminal: Terminal::new(TestBackend::new(width, 12)).unwrap(),
                 room_list: ListState::default(),
+                room_list_layout,
                 timeline: TimelinePane::new(),
                 overlays: Overlays::default(),
             }
@@ -670,6 +796,7 @@ pub(crate) mod tests {
                 .draw(|frame| {
                     let panes = Panes {
                         room_list: &mut self.room_list,
+                        room_list_layout: self.room_list_layout,
                         timeline: &mut self.timeline,
                         view,
                         images: None,
@@ -688,6 +815,29 @@ pub(crate) mod tests {
             (buffer.area.left()..buffer.area.right())
                 .map(|x| buffer[(x, y)].symbol())
                 .collect()
+        }
+
+        fn cell(&self, x: u16, y: u16) -> &Cell {
+            &self.terminal.backend().buffer()[(x, y)]
+        }
+
+        /// The first `rows` rows of a 30-column room list, without trailing
+        /// spaces.
+        fn list_rows(&self, rows: u16) -> Vec<String> {
+            (0..rows)
+                .map(|y| {
+                    let row: String = (0..LIST_COLUMNS)
+                        .map(|x| self.cell(x, y).symbol())
+                        .collect();
+                    row.trim_end().to_owned()
+                })
+                .collect()
+        }
+
+        /// The column of the room list's border.
+        fn border(&self) -> Option<u16> {
+            let width = self.terminal.backend().buffer().area.width;
+            (0..width).find(|&x| self.cell(x, 0).symbol() == "│")
         }
     }
 
@@ -764,7 +914,7 @@ pub(crate) mod tests {
     }
 
     fn row_text(room: &RoomSummary, width: usize) -> String {
-        let line = room_row(room, false, width);
+        let line = room_row(room, false, width, NetworkPlacement::Inline);
         let drawn = text(&line.spans);
         assert_eq!(text_width(&drawn), width, "{drawn:?}");
         drawn
@@ -844,5 +994,144 @@ pub(crate) mod tests {
         assert_eq!(row_text(&room, 4), "@99+");
         assert_eq!(row_text(&room, 3), "@9…");
         assert_eq!(row_text(&room, 0), "");
+    }
+
+    /// The columns of a 30-column room list's rows: the border and the
+    /// padding take two.
+    const LIST_COLUMNS: u16 = 28;
+
+    fn layout(width: u16, network: NetworkPlacement) -> RoomListLayout {
+        RoomListLayout { width, network }
+    }
+
+    /// Listed in this order: a Discord DM, a muted Discord room with
+    /// mentions, a room without a network, and a room on a network with a
+    /// long name.
+    fn bridged() -> App {
+        let none = UnreadCounts::default;
+        app_with(vec![
+            RoomSummary {
+                kind: RoomKind::Direct,
+                ..summary(
+                    name(Some("Discord"), "Alice"),
+                    none(),
+                    NotificationMode::Default,
+                )
+            },
+            summary(
+                name(Some("Discord"), "general"),
+                mentions(3),
+                NotificationMode::Mute,
+            ),
+            summary(name(None, "ops"), none(), NotificationMode::Default),
+            summary(
+                name(Some("Zulip workspace with a long name"), "x"),
+                none(),
+                NotificationMode::Default,
+            ),
+        ])
+    }
+
+    #[test]
+    fn the_room_list_takes_the_set_width_up_to_half() {
+        let app = app();
+        // The terminal's width, the setting, and the list's width.
+        for (terminal, setting, list) in [
+            (100, 40, 40),
+            (100, 12, 12),
+            (100, 80, 50),
+            (90, 60, 45),
+            // Narrower than 90 columns: a third, whatever the setting.
+            (89, 12, 29),
+            (80, 80, 26),
+        ] {
+            let mut screen = Screen::sized(terminal, layout(setting, NetworkPlacement::Inline));
+            screen.draw(&app, None);
+            assert_eq!(screen.border(), Some(list - 1), "{terminal} {setting}");
+        }
+    }
+
+    #[test]
+    fn the_network_part_goes_inline_or_on_the_row_below() {
+        let app = bridged();
+        let mut screen = Screen::sized(100, layout(30, NetworkPlacement::Inline));
+        screen.draw(&app, None);
+        assert_eq!(
+            screen.list_rows(5),
+            [
+                "Discord / Alice",
+                "Discord / general   @3 Muted",
+                "ops",
+                "Zulip workspace with a … / x",
+                "",
+            ]
+        );
+
+        let mut screen = Screen::sized(100, layout(30, NetworkPlacement::Below));
+        screen.draw(&app, None);
+        assert_eq!(
+            screen.list_rows(8),
+            [
+                "Alice",
+                "  Discord",
+                "general             @3 Muted",
+                "  Discord",
+                "ops",
+                "x",
+                "  Zulip workspace with a lo…",
+                "",
+            ]
+        );
+    }
+
+    #[test]
+    fn below_the_open_room_part_is_bold_and_the_network_part_dim() {
+        let mut app = bridged();
+        press(&mut app, "j<CR>");
+        let mut screen = Screen::sized(100, layout(30, NetworkPlacement::Below));
+        screen.draw(&app, None);
+        assert!(screen.cell(0, 2).modifier.contains(Modifier::BOLD));
+        let network = screen.cell(2, 3).modifier;
+        assert!(network.contains(Modifier::DIM) && !network.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn the_cursor_covers_both_rows_of_a_room() {
+        let mut app = bridged();
+        press(&mut app, "j");
+        let mut screen = Screen::sized(100, layout(30, NetworkPlacement::Below));
+        screen.draw(&app, None);
+        // `general`'s rows, and not the rooms' around them.
+        for (y, cursor) in [(1, false), (2, true), (3, true), (4, false)] {
+            for x in 0..LIST_COLUMNS {
+                let reversed = screen.cell(x, y).modifier.contains(Modifier::REVERSED);
+                assert_eq!(reversed, cursor, "{x} {y}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_room_list_range_counts_rooms_not_rows() {
+        // Two rows, then one, and so on: 12 rows for 8 rooms, in a list of
+        // 11 rows.
+        let rooms = (0..8)
+            .map(|n| {
+                let network = (n % 2 == 0).then_some("Discord");
+                let room = format!("room {n}");
+                summary(
+                    name(network, &room),
+                    UnreadCounts::default(),
+                    NotificationMode::Default,
+                )
+            })
+            .collect();
+        let mut app = app_with(rooms);
+        let mut screen = Screen::sized(100, layout(30, NetworkPlacement::Below));
+        assert_eq!(screen.draw(&app, None).room_list, Some((0, 6)));
+        press(&mut app, "G");
+        assert_eq!(screen.draw(&app, None).room_list, Some((1, 7)));
+
+        let mut screen = Screen::sized(100, layout(30, NetworkPlacement::Inline));
+        assert_eq!(screen.draw(&app, None).room_list, Some((0, 7)));
     }
 }

@@ -4,6 +4,7 @@ use mxt_core::keymap::InputContext;
 use mxt_core::keys::KeySeq;
 use mxt_core::rooms::RoomSort;
 use mxt_core::settings::{ImagePreview, ReceiptKind};
+use mxt_tui::NetworkPlacement;
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Path, PathBuf};
@@ -13,8 +14,18 @@ fn ok(text: &str) -> Config {
         .unwrap_or_else(|e| panic!("{e}"))
 }
 fn err(text: &str) -> (usize, String) {
+    let (line, _, message) = err_at(text);
+    (line, message)
+}
+/// The line, the column and the message.
+fn err_at(text: &str) -> (usize, usize, String) {
     match parse(text, Path::new("config.toml"), Path::new("/home/alice")) {
-        Err(ConfigError::Invalid { line, message, .. }) => (line, message),
+        Err(ConfigError::Invalid {
+            line,
+            column,
+            message,
+            ..
+        }) => (line, column, message),
         Err(other) => panic!("unexpected error: {other}"),
         Ok(_) => panic!("accepted: {text}"),
     }
@@ -42,6 +53,13 @@ fn minimal_file_uses_defaults() {
     assert_eq!(c.settings.image_preview, ImagePreview::Auto);
     assert_eq!(c.settings.read_receipts, ReceiptKind::Public);
     assert_eq!(c.time_format, TimeFormat::default());
+    assert_eq!(
+        c.room_list_layout,
+        RoomListLayout {
+            width: 30,
+            network: NetworkPlacement::Inline,
+        }
+    );
     assert_eq!(c.download_dir, PathBuf::from("/home/alice/Downloads"));
     assert!(!c.opener.is_empty());
     assert_eq!(
@@ -60,7 +78,7 @@ user_id = "@alice:example.org"
 [ui]
 leader = "<Space>"
 timeoutlen = 1000
-room_list = { visible = true, sort = "recent" }
+room_list = { visible = true, sort = "recent", width = 30, network = "inline" }
 time_format = "%H:%M"
 image_preview = "auto"
 read_receipts = "public"
@@ -106,13 +124,20 @@ opener = ["xdg-open"]
 #[test]
 fn settings_are_read() {
     let c = ok(&format!(
-        "{MINIMAL}[ui]\ntimeoutlen = 300\nread_receipts = \"private\"\nroom_list = {{ visible = false, sort = \"name\" }}\nimage_preview = \"off\"\n[files]\ndownload_dir = \"/tmp/dl\"\nopener = [\"wslview\"]\n"
+        "{MINIMAL}[ui]\ntimeoutlen = 300\nread_receipts = \"private\"\nroom_list = {{ visible = false, sort = \"name\", width = 40, network = \"below\" }}\nimage_preview = \"off\"\n[files]\ndownload_dir = \"/tmp/dl\"\nopener = [\"wslview\"]\n"
     ));
     assert_eq!(c.settings.timeoutlen_ms, 300);
     assert_eq!(c.settings.read_receipts, ReceiptKind::Private);
     assert_eq!(c.settings.room_sort, RoomSort::Name);
     assert!(!c.settings.room_list_visible);
     assert_eq!(c.settings.image_preview, ImagePreview::Off);
+    assert_eq!(
+        c.room_list_layout,
+        RoomListLayout {
+            width: 40,
+            network: NetworkPlacement::Below,
+        }
+    );
     assert_eq!(c.download_dir, PathBuf::from("/tmp/dl"));
     assert_eq!(c.opener, vec!["wslview".to_string()]);
 }
@@ -139,6 +164,28 @@ fn an_invalid_time_format_names_its_line() {
     let (line, msg) = err(&format!("{MINIMAL}[ui]\ntime_format = \"\"\n"));
     assert_eq!(line, 4);
     assert!(msg.starts_with("ui.time_format: "), "{msg}");
+}
+
+#[test]
+fn the_room_list_width_is_from_12_to_80() {
+    for width in [12, 80] {
+        let c = ok(&format!(
+            "{MINIMAL}[ui]\nroom_list = {{ width = {width} }}\n"
+        ));
+        assert_eq!(c.room_list_layout.width, width);
+    }
+    for width in ["11", "81", "0", "-30", "70000"] {
+        let text = format!("{MINIMAL}[ui]\nroom_list = {{ width = {width} }}\n");
+        assert_eq!(
+            err_at(&text),
+            (
+                4,
+                23,
+                "ui.room_list.width: must be from 12 to 80".to_owned()
+            ),
+            "{width}"
+        );
+    }
 }
 
 #[test]
@@ -271,6 +318,15 @@ fn messages_name_the_setting() {
     assert_eq!(line, 4);
     assert!(
         msg.contains("ui.room_list.sort") && msg.contains("recent"),
+        "{msg}"
+    );
+
+    let (line, column, msg) = err_at(&format!(
+        "{MINIMAL}[ui]\nroom_list = {{ network = \"beside\" }}\n"
+    ));
+    assert_eq!((line, column), (4, 25));
+    assert!(
+        msg.contains("ui.room_list.network") && msg.contains("below"),
         "{msg}"
     );
 

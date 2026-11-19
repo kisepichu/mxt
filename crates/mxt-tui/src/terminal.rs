@@ -30,7 +30,7 @@ use crate::opener::Opener;
 use crate::overlay::Overlays;
 use crate::timeline_view::{TimeFormat, TimelinePane};
 use crate::timers::Timers;
-use crate::view::{self, Panes, View};
+use crate::view::{self, Panes, RoomListLayout, View};
 
 type Backend = CrosstermBackend<Stdout>;
 
@@ -46,6 +46,8 @@ pub struct Tui {
     events: Option<EventStream>,
     /// The room list's cursor and scroll offset between frames.
     room_list: ListState,
+    /// `ui.room_list.width` and `ui.room_list.network`.
+    room_list_layout: RoomListLayout,
     /// The room list range last reported with `Msg::Viewport`.
     room_list_viewport: Option<(usize, usize)>,
     timeline: TimelinePane,
@@ -96,6 +98,7 @@ impl Tui {
                     terminal,
                     events: None,
                     room_list: ListState::default(),
+                    room_list_layout: RoomListLayout::default(),
                     room_list_viewport: None,
                     timeline: TimelinePane::new(),
                     view: None,
@@ -121,6 +124,12 @@ impl Tui {
         self.timeline.set_time_format(format);
     }
 
+    /// Sets `ui.room_list.width` and `ui.room_list.network`. Until then the
+    /// list is 30 columns wide and shows network parts inline.
+    pub fn set_room_list_layout(&mut self, layout: RoomListLayout) {
+        self.room_list_layout = layout;
+    }
+
     /// Sends the last copy to the terminal clipboard if it has not reached
     /// it yet, draws the frame, and returns `Msg::Viewport` for the room
     /// list when its visible range changed since the last draw, and for the
@@ -142,6 +151,7 @@ impl Tui {
         let Tui {
             terminal,
             room_list,
+            room_list_layout,
             timeline,
             view,
             images,
@@ -154,6 +164,7 @@ impl Tui {
         terminal.draw(|frame| {
             let panes = Panes {
                 room_list,
+                room_list_layout: *room_list_layout,
                 timeline,
                 view: view.as_mut(),
                 images: images.as_mut(),
