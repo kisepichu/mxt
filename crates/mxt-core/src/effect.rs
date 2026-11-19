@@ -1,7 +1,7 @@
 //! Effects: what `App::update` asks the adapters to do, as plain data.
 
 use crate::action::FocusMode;
-use crate::ids::{EventId, RoomId, TxnId};
+use crate::ids::{EventId, RoomId, SendId, TxnId};
 use crate::keys::Key;
 use crate::mention::RenderedBody;
 use crate::resolver::TimerId;
@@ -51,10 +51,12 @@ pub enum MatrixEffect {
         room: RoomId,
         event: EventId,
     },
-    /// Send through the room's timeline; the local echo shows the send
-    /// state, and a failure to queue it arrives as `Msg::EffectFailed`.
+    /// Send through the room's timeline; answered with `Msg::SendQueued`
+    /// once the room's send queue has it, or `Msg::SendFailed` when it
+    /// cannot be queued. The local echo shows the send state after that.
     Send {
         room: RoomId,
+        id: SendId,
         message: Outgoing,
     },
     /// The room's joined members; answered with `Msg::MembersLoaded`.

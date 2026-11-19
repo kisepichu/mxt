@@ -1,6 +1,6 @@
 //! Messages: what the adapters report to `App::update`.
 
-use crate::ids::RoomId;
+use crate::ids::{RoomId, SendId};
 use crate::keys::Key;
 use crate::mention::Member;
 use crate::resolver::TimerId;
@@ -70,6 +70,16 @@ pub enum Msg {
     },
     TerminalFocus(bool),
     EffectFailed {
+        error: String,
+    },
+    /// The room's send queue has the message of `MatrixEffect::Send`.
+    SendQueued {
+        id: SendId,
+    },
+    /// The message of `MatrixEffect::Send` could not be queued; `error` is
+    /// for the status line.
+    SendFailed {
+        id: SendId,
         error: String,
     },
     /// The composer's text, answering `UiEffect::RequestSubmit`.

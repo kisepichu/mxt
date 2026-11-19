@@ -3,7 +3,7 @@ use super::*;
 use crate::action::FocusMode;
 use crate::effect::{Outgoing, OutgoingKind};
 use crate::emoji;
-use crate::ids::{TxnId, UserId};
+use crate::ids::{SendId, TxnId, UserId};
 use crate::mention::{Member, MentionRef, RenderedBody, render_mentions};
 use crate::rich::{Block, Inline, MentionTarget, RichText, Style};
 use crate::rooms::{Pick, RoomFilter, RoomTarget};
@@ -52,9 +52,11 @@ fn load_members(room: &str) -> Effect {
 fn clear(room: &str) -> Effect {
     ui(UiEffect::ClearComposer(id(room)))
 }
-fn send(body: RenderedBody, kind: OutgoingKind) -> Effect {
+/// The send of `body` from `!c`, the app's `n`-th from 0.
+fn send(n: u64, body: RenderedBody, kind: OutgoingKind) -> Effect {
     matrix(MatrixEffect::Send {
         room: id(C),
+        id: SendId(n),
         message: Outgoing { body, kind },
     })
 }
@@ -321,6 +323,7 @@ fn message_edit_loads_the_plain_body_of_an_own_text_message_with_its_mentions() 
         submit(&mut app, "@Alice *hi* again"),
         vec![
             send(
+                0,
                 render_mentions("@Alice *hi* again", &mentions),
                 OutgoingKind::Edit { target: remote(1) }
             ),
@@ -338,7 +341,7 @@ fn submit_sends_by_the_draft_and_clears_the_composer() {
     assert_eq!(submit(&mut app, " \n "), vec![]);
     assert_eq!(
         submit(&mut app, "hello"),
-        vec![send(plain("hello"), OutgoingKind::New), clear(C)]
+        vec![send(0, plain("hello"), OutgoingKind::New), clear(C)]
     );
 
     normal(&mut app, "<Esc>");
@@ -346,9 +349,104 @@ fn submit_sends_by_the_draft_and_clears_the_composer() {
     assert_eq!(
         submit(&mut app, "re"),
         vec![
-            send(plain("re"), OutgoingKind::Reply { to: event(1) }),
+            send(1, plain("re"), OutgoingKind::Reply { to: event(1) }),
             clear(C),
         ]
+    );
+    assert_eq!(app.draft(&id(C)), Some(&Draft::New));
+}
+
+/// The matrix adapter could not queue the app's `n`-th send.
+fn failed(app: &mut App, n: u64) -> Vec<Effect> {
+    app.update(Msg::SendFailed {
+        id: SendId(n),
+        error: "Sending the message failed: boom".into(),
+    })
+}
+
+#[test]
+fn a_send_that_cannot_be_queued_puts_its_draft_back() {
+    let mut app = opened();
+    reset(&mut app, vec![msg(1)]);
+    keys(&mut app, "r");
+    members(&mut app, vec![member(ALICE, "Alice")]);
+    query(&mut app, Some("al"));
+    insert(&mut app, "<CR>");
+    submit(&mut app, "@Alice hi");
+    assert_eq!(app.draft(&id(C)), Some(&Draft::New));
+
+    assert_eq!(
+        failed(&mut app, 0),
+        vec![ui(UiEffect::LoadComposer {
+            room: id(C),
+            text: "@Alice hi".into(),
+        })]
+    );
+    assert_eq!(status(&app), Some("Sending the message failed: boom"));
+    assert_eq!(app.draft(&id(C)), Some(&Draft::Reply { to: event(1) }));
+    // Sent again as a reply, with its mention.
+    let mentions = [MentionRef {
+        user: UserId::new(ALICE),
+        text: "@Alice".into(),
+    }];
+    assert_eq!(
+        submit(&mut app, "@Alice hi"),
+        vec![
+            send(
+                1,
+                render_mentions("@Alice hi", &mentions),
+                OutgoingKind::Reply { to: event(1) }
+            ),
+            clear(C),
+        ]
+    );
+
+    // A queued send has nothing left to put back.
+    app.update(Msg::SendQueued { id: SendId(1) });
+    assert_eq!(failed(&mut app, 1), vec![]);
+    assert_eq!(app.draft(&id(C)), Some(&Draft::New));
+}
+
+#[test]
+fn a_failed_send_does_not_replace_what_the_user_started_since() {
+    let mut app = opened();
+    reset(&mut app, vec![msg(1), msg(2)]);
+    keys(&mut app, "i");
+    submit(&mut app, "first");
+    // The next message is being typed.
+    edited(&mut app, C, false);
+    assert_eq!(failed(&mut app, 0), vec![]);
+    assert_eq!(status(&app), Some("Sending the message failed: boom"));
+    assert_eq!(app.draft(&id(C)), Some(&Draft::New));
+
+    // A reply started in the empty composer stays a reply to its message.
+    edited(&mut app, C, true);
+    submit(&mut app, "second");
+    normal(&mut app, "<Esc>");
+    keys(&mut app, "r");
+    assert_eq!(failed(&mut app, 1), vec![]);
+    assert_eq!(app.draft(&id(C)), Some(&Draft::Reply { to: event(2) }));
+}
+
+#[test]
+fn a_failed_send_is_not_put_back_after_switching_rooms() {
+    let mut app = opened();
+    keys(&mut app, "i");
+    submit(&mut app, "hello");
+    normal(&mut app, "<Esc>");
+    keys(&mut app, "<C-w>hj<CR>");
+    assert_eq!(app.open_room(), Some(&id(B)));
+    assert_eq!(failed(&mut app, 0), vec![]);
+    assert_eq!(status(&app), Some("Sending the message failed: boom"));
+    assert_eq!(app.draft(&id(B)), None);
+
+    // Nor when its room opens again.
+    let back = keys(&mut app, "<C-w>hk<CR>");
+    assert_eq!(app.open_room(), Some(&id(C)));
+    assert!(
+        !back
+            .iter()
+            .any(|effect| matches!(effect, Effect::Ui(UiEffect::LoadComposer { .. })))
     );
     assert_eq!(app.draft(&id(C)), Some(&Draft::New));
 }
@@ -419,7 +517,11 @@ fn the_mention_menu_ranks_members_and_records_accepted_mentions() {
     assert_eq!(
         submit(&mut app, "@Alfred hi"),
         vec![
-            send(render_mentions("@Alfred hi", &mentions), OutgoingKind::New),
+            send(
+                0,
+                render_mentions("@Alfred hi", &mentions),
+                OutgoingKind::New
+            ),
             clear(C),
         ]
     );
