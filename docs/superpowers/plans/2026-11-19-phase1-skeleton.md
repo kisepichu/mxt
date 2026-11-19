@@ -1251,10 +1251,11 @@ pub struct Resolver { /* private: pending keys, count, current timer, next timer
 impl Resolver {
     pub fn new() -> Resolver;
     pub fn feed(&mut self, map: &EffectiveMap, counts: bool, timeoutlen_ms: u64, key: Key) -> Vec<Resolved>;
-    /// Stale or unknown ids return `None`. As implemented (following the
-    /// design): the pending keys run only if they are a binding themselves,
-    /// otherwise they are released; nothing is fed again.
-    pub fn timeout(&mut self, map: &EffectiveMap, id: TimerId) -> Option<Resolved>;
+    /// Stale or unknown ids return nothing. As implemented by Task 14
+    /// (nvim's rule): the longest binding that is a prefix of the pending
+    /// keys runs, or only the first key is released; the keys after it come
+    /// back as `Resolved::Refeed` for the app to feed again.
+    pub fn timeout(&mut self, map: &EffectiveMap, id: TimerId) -> Vec<Resolved>;
     /// Drops pending keys and the count (when the input context changes).
     pub fn reset(&mut self);
     /// Pending keys, for the status line.
@@ -1323,18 +1324,16 @@ with the leader in `Keymap::new`; a default that fails to parse is a bug
    - It is a binding and nothing longer starts with it: return
      `Run { binding, count }` and clear the pending keys, the count and the
      timer.
-   - Neither: let `prev` be the pending keys without `key`.
-     - If some prefix of `prev` is a binding, take the longest one: return
-       `Run` for it (with the count), then feed the rest of `prev` followed by
-       `key` again, one by one, as fresh input (count cleared).
-     - Otherwise return `Release(prev)` if `prev` is not empty, clear the
-       count, and feed `key` again as fresh input. A single key that matches
-       nothing with nothing pending is `Release(vec![key])`.
+   - Neither (as implemented by Task 14, nvim's rule): the longest prefix of
+     the pending keys that is a binding runs with the count; without one,
+     only the first pending key is released. The keys after it are returned
+     as `Resolved::Refeed(keys)`, and the app feeds them one by one in the
+     input context current at that moment (so a binding that changed the
+     context sends them to the new context), without a count. A single key
+     that matches nothing with nothing pending is `Release(vec![key])`.
 
-`timeout(id)`: if `id` is the current timer, take the longest prefix of the
-pending keys that is a binding; `Run` it and feed the rest again as fresh
-input; if there is none, `Release` all pending keys. Clear the count and the
-timer either way.
+`timeout(id)`: if `id` is the current timer, the same rule over the pending
+keys; stale ids return nothing.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3223,8 +3222,10 @@ on a key that makes the sequence match nothing), replaced by:
   behavior.
 
 **Code** (`crates/mxt-core/src/resolver.rs`, `crates/mxt-core/src/app.rs`):
-- `Resolver::timeout(&mut self, map: &EffectiveMap, timeoutlen_ms: u64, id: TimerId) -> Vec<Resolved>`
-  again: resolving the rest can start a new timer.
+- `Resolver::timeout(&mut self, map: &EffectiveMap, id: TimerId) -> Vec<Resolved>`,
+  and `Resolved::Refeed(Vec<Key>)` for the keys after the binding that ran
+  (or after the released first key); the app feeds them again, so they reach
+  the input context the binding left (as implemented in #38).
 - A count applies to the binding that runs; the keys resolved afresh carry no
   count.
 - `App` keeps the rule that keys resolved after a `Run` that changed the
