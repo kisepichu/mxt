@@ -45,7 +45,8 @@ use crate::{
 const PAGE: u16 = 20;
 
 /// The open room's timeline, and its tasks: the one that forwards its diffs,
-/// the one that fetches reply details, and a back pagination in flight.
+/// the one that fetches reply details, the one that loads the room's
+/// members, and a back pagination in flight.
 pub(crate) struct Subscription {
     room: RoomId,
     timeline: Arc<Timeline>,
@@ -56,7 +57,10 @@ impl Subscription {
     /// Builds `sdk_room`'s timeline, sends its items as one `Msg::Timeline`
     /// with a `Reset`, then every batch of its diffs as one `Msg::Timeline`.
     /// The SDK's diffs are forwarded as they are: a remote echo replaces its
-    /// local echo with `Remove` and `Insert` or `PushBack`.
+    /// local echo with `Remove` and `Insert` or `PushBack`. Members are
+    /// lazy-loaded, so the SDK may lack the profiles of senders, the user's
+    /// own included; the room's members are loaded in the background, and
+    /// the senders' names arrive as `Set` diffs.
     pub(crate) async fn start(
         sdk_room: &Room,
         room: RoomId,
@@ -80,6 +84,8 @@ impl Subscription {
         let mut tasks = JoinSet::new();
         tasks.spawn(forward(room.clone(), me, diffs, replies, to_core));
         tasks.spawn(fetch_reply_details(timeline.clone(), fetches));
+        let members = timeline.clone();
+        tasks.spawn(async move { members.fetch_members().await });
         Ok(Subscription {
             room,
             timeline,
