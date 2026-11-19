@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use crate::action::{Action, Binding};
 use crate::effect::{Effect, MatrixEffect, UiEffect};
-use crate::ids::{RoomId, UserId};
+use crate::ids::{RoomId, SendId, UserId};
 use crate::keymap::{InputContext, KeySink, Keymap};
 use crate::keys::Key;
 use crate::msg::{EditorMode, Msg, Pane, SyncState};
@@ -27,7 +27,7 @@ pub use command_line::{CommandLine, LineKind};
 pub use picker::{Picker, PickerItem, PickerKey, PickerKind};
 
 use command_line::OpenLine;
-use composer::{Composer, MentionMenu};
+use composer::{Composer, MentionMenu, PendingSend};
 use picker::OpenPicker;
 use search::Direction;
 use timeline::Timeline;
@@ -124,6 +124,10 @@ pub struct App {
     last_search: Option<String>,
     /// Per room, created when first used.
     composers: HashMap<RoomId, Composer>,
+    /// The submitted drafts whose sends are not answered yet.
+    pending_sends: HashMap<SendId, PendingSend>,
+    /// The number of the next send's `SendId`.
+    next_send: u64,
     mention_menu: Option<MentionMenu>,
     picker: Option<OpenPicker>,
     /// `CONFIRM` mode: the next key answers.
@@ -158,6 +162,8 @@ impl App {
             command_line: None,
             last_search: None,
             composers: HashMap::new(),
+            pending_sends: HashMap::new(),
+            next_send: 0,
             mention_menu: None,
             picker: None,
             confirm: None,
@@ -195,6 +201,8 @@ impl App {
                 self.check_receipt(&mut effects);
             }
             Msg::EffectFailed { error } => self.set_status(StatusKind::Error, error),
+            Msg::SendQueued { id } => self.send_queued(id),
+            Msg::SendFailed { id, error } => self.send_failed(id, error, &mut effects),
             Msg::Submit { room, body } => self.submit(room, body, &mut effects),
             Msg::ComposerEdited { room, empty } => self.composer_edited(room, empty),
             Msg::MentionQuery { room, query } => self.mention_query(room, query),

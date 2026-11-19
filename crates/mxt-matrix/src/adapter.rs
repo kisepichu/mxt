@@ -13,7 +13,7 @@ use matrix_sdk::{
 use matrix_sdk_ui::Timeline;
 use mxt_core::{
     effect::{MatrixEffect, Outgoing},
-    ids::{EventId, RoomId, UserId},
+    ids::{EventId, RoomId, SendId, UserId},
     mention::Member,
     msg::{Msg, SyncState},
     settings::ReceiptKind,
@@ -47,7 +47,8 @@ impl Matrix {
     /// `Msg::SyncState`, and edits, reactions and redactions that fail for
     /// good into `Msg::EffectFailed` (see `send_queue`). The effects sent to
     /// `effects` run in the background; failures arrive as
-    /// `Msg::EffectFailed`. Downloads are saved in `download_dir`
+    /// `Msg::EffectFailed`, and sends are answered with `Msg::SendQueued` or
+    /// `Msg::SendFailed`. Downloads are saved in `download_dir`
     /// (`files.download_dir`).
     pub async fn start(
         client: Client,
@@ -191,12 +192,12 @@ async fn run_effects(
                         }
                     }
                 }
-                Some(MatrixEffect::Send { room, message }) => {
+                Some(MatrixEffect::Send { room, id, message }) => {
                     match open_timeline(&timeline, &room) {
                         Ok(open) => {
-                            let _ = sends.send((open, message));
+                            let _ = sends.send((open, id, message));
                         }
-                        Err(error) => report(&to_core, "Sending the message failed", &error),
+                        Err(error) => report_send(&to_core, id, &error),
                     }
                 }
                 Some(MatrixEffect::ToggleReaction { room, item, key }) => {
@@ -286,18 +287,22 @@ where
     }
 }
 
-/// Queues the messages one at a time, in the order they were sent. A reply
-/// or an edit of a sent message fetches its target event first when the
-/// event cache lacks it, which can take up to three attempts of the client's
+/// Queues the messages one at a time, in the order they were sent, and
+/// answers each with `Msg::SendQueued` or `Msg::SendFailed`. A reply or an
+/// edit of a sent message fetches its target event first when the event
+/// cache lacks it, which can take up to three attempts of the client's
 /// request timeout, and a later message must not overtake it; meanwhile the
 /// other effects (switching rooms, pagination, receipts) do not wait.
 async fn send_messages(
-    mut messages: UnboundedReceiver<(Arc<Timeline>, Outgoing)>,
+    mut messages: UnboundedReceiver<(Arc<Timeline>, SendId, Outgoing)>,
     to_core: UnboundedSender<Msg>,
 ) {
-    while let Some((timeline, message)) = messages.recv().await {
-        if let Err(error) = send_message(&timeline, message).await {
-            report(&to_core, "Sending the message failed", &error);
+    while let Some((timeline, id, message)) = messages.recv().await {
+        match send_message(&timeline, message).await {
+            Ok(()) => {
+                let _ = to_core.send(Msg::SendQueued { id });
+            }
+            Err(error) => report_send(&to_core, id, &error),
         }
     }
 }
@@ -488,6 +493,13 @@ fn report(to_core: &UnboundedSender<Msg>, what: &str, error: &Error) {
     report_brief(to_core, what, &error.brief(), error);
 }
 
+/// `report` for a message that could not be queued, as `Msg::SendFailed`,
+/// so the core can put its draft back.
+fn report_send(to_core: &UnboundedSender<Msg>, id: SendId, error: &Error) {
+    let error = logged("Sending the message failed", &error.brief(), error);
+    let _ = to_core.send(Msg::SendFailed { id, error });
+}
+
 /// `report`, for an error that is not an `Error`: `brief` names no room and
 /// holds no event contents.
 pub(crate) fn report_brief(
@@ -496,9 +508,14 @@ pub(crate) fn report_brief(
     brief: &dyn Display,
     full: &dyn Display,
 ) {
+    let error = logged(what, brief, full);
+    let _ = to_core.send(Msg::EffectFailed { error });
+}
+
+/// Logs a failure, `brief` to `warn` and `full` to `debug`, and returns the
+/// status line's text.
+fn logged(what: &str, brief: &dyn Display, full: &dyn Display) -> String {
     warn!("{what}: {brief}");
     debug!("{what}: {full}");
-    let _ = to_core.send(Msg::EffectFailed {
-        error: format!("{what}: {brief}"),
-    });
+    format!("{what}: {brief}")
 }

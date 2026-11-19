@@ -294,6 +294,7 @@ fn gx_without_a_link_or_an_attachment_has_nothing_to_open() {
     let mention = Inline::Mention {
         text: "@Alice".into(),
         target: MentionTarget::User(UserId::new("@alice:example.org")),
+        spoiler: false,
     };
     // No open room, then no item under the cursor.
     let mut app = app();

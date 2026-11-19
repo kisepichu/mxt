@@ -34,13 +34,16 @@ pub enum Inline {
         url: String,
         style: Style,
     },
+    /// `spoiler` when any of the mention's text is in a spoiler.
     Mention {
         text: String,
         target: MentionTarget,
+        spoiler: bool,
     },
     /// A custom emoticon, shown by its alt text.
     Emoticon {
         alt: String,
+        spoiler: bool,
     },
     LineBreak,
 }
@@ -103,7 +106,7 @@ impl RichText {
         let mut mentions = Vec::new();
         for_each_paragraph(&self.blocks, &mut |inlines| {
             mentions.extend(inlines.iter().filter_map(|inline| match inline {
-                Inline::Mention { text, target } => Some((text.as_str(), target)),
+                Inline::Mention { text, target, .. } => Some((text.as_str(), target)),
                 _ => None,
             }));
         });
@@ -222,7 +225,7 @@ impl Plain {
                         Inline::Text { text, .. }
                         | Inline::Link { text, .. }
                         | Inline::Mention { text, .. }
-                        | Inline::Emoticon { alt: text } => self.text(text),
+                        | Inline::Emoticon { alt: text, .. } => self.text(text),
                         Inline::LineBreak => self.text("\n"),
                     }
                 }
@@ -322,6 +325,7 @@ mod tests {
         Inline::Mention {
             text: text.into(),
             target,
+            spoiler: false,
         }
     }
 
@@ -356,6 +360,7 @@ mod tests {
             text(" "),
             Inline::Emoticon {
                 alt: ":wave:".into(),
+                spoiler: false,
             },
             Inline::LineBreak,
             text("bye"),

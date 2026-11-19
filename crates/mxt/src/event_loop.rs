@@ -10,6 +10,7 @@ use mxt_core::app::App;
 use mxt_core::effect::{Effect, MatrixEffect};
 use mxt_core::msg::Msg;
 use mxt_tui::Tui;
+use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 /// Runs until `UiEffect::Quit`. `from_matrix` delivers adapter messages;
@@ -77,9 +78,13 @@ fn update(
             match effect {
                 Effect::Ui(effect) => queue.extend(tui.execute(effect, Instant::now())),
                 Effect::Matrix(effect) => {
-                    if to_matrix.send(effect).is_err() {
-                        queue.push_back(Msg::EffectFailed {
-                            error: "The matrix adapter has stopped".to_owned(),
+                    if let Err(SendError(effect)) = to_matrix.send(effect) {
+                        let error = "The matrix adapter has stopped".to_owned();
+                        // Every send is answered, so the core lets go of its
+                        // draft.
+                        queue.push_back(match effect {
+                            MatrixEffect::Send { id, .. } => Msg::SendFailed { id, error },
+                            _ => Msg::EffectFailed { error },
                         });
                     }
                 }

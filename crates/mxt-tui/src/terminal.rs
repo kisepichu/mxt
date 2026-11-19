@@ -343,8 +343,13 @@ impl Tui {
     ///   stream after the editor shares crossterm's event queue, so no event
     ///   is lost.
     /// - edtui leaves raw mode and the alternate screen around the editor
-    ///   and clears the terminal after it, so the next draw repaints
-    ///   everything. The editor gets the cursor shown and no focus reports.
+    ///   and then clears the terminal, ignoring a failure. Its clear asks for
+    ///   the cursor position, and the first query after the stream is
+    ///   dropped fails at once (the drop leaves a wake-up pending, which the
+    ///   query's poll reports as its timeout), so the clear is skipped and
+    ///   ratatui keeps the frame from before. [`repaint`] clears the screen
+    ///   and forgets that frame, so the next draw writes every cell. The
+    ///   editor gets the cursor shown and no focus reports.
     /// - A panic in another task while the editor runs restores the
     ///   terminal under it, and edtui enters raw mode and the alternate
     ///   screen again afterwards, so they are left again. The next draw
@@ -361,7 +366,7 @@ impl Tui {
             let edited =
                 composer.edit_externally(msgs, |state| system_editor::open(state, terminal));
             let restored = if ACTIVE.load(Ordering::SeqCst) {
-                execute!(io::stdout(), EnableFocusChange, Hide)
+                execute!(io::stdout(), EnableFocusChange, Hide).and_then(|()| repaint(terminal))
             } else {
                 crossterm::terminal::disable_raw_mode()
                     .and_then(|()| execute!(io::stdout(), LeaveAlternateScreen))
@@ -432,6 +437,15 @@ fn restore_terminal() -> io::Result<()> {
     raw.and(screen)
 }
 
+/// Clears the screen and forgets the last frame, so the next draw writes
+/// every cell. `Terminal::clear` would ask for the cursor position; a
+/// resize of the full-screen viewport to the terminal's size does the same
+/// without asking, and also catches a resize while the screen was away.
+fn repaint<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error> {
+    let size = terminal.size()?;
+    terminal.resize(size.into())
+}
+
 /// `Msg::Viewport` for the timeline range a frame drew (`drawn`) when the
 /// core has another one. The core forgets the range when another room
 /// opens, so the opened room's range is reported even when its indices are
@@ -452,6 +466,7 @@ mod tests {
     use crate::view::tests::{Screen, app, press, reset};
     use mxt_core::effect::{Effect, MatrixEffect};
     use mxt_core::ids::EventId;
+    use ratatui::backend::Backend as _;
 
     /// Draws a frame and gives the core the timeline report it makes.
     fn frame(app: &mut App, screen: &mut Screen) -> Vec<Effect> {
@@ -499,5 +514,21 @@ mod tests {
             [receipt("!b:example.org", 13)]
         );
         assert_eq!(app.timeline_viewport(), Some((0, 2)));
+    }
+
+    #[test]
+    fn the_frame_after_the_external_editor_writes_the_whole_screen() {
+        let mut app = app();
+        press(&mut app, "<CR>");
+        app.update(reset("!a:example.org", 1..4));
+        let mut screen = Screen::new();
+        screen.draw(&app, None);
+        let frame = screen.terminal.backend().buffer().clone();
+
+        // Back from the editor, the alternate screen is blank.
+        screen.terminal.backend_mut().clear().unwrap();
+        repaint(&mut screen.terminal).unwrap();
+        screen.draw(&app, None);
+        assert_eq!(screen.terminal.backend().buffer(), &frame);
     }
 }

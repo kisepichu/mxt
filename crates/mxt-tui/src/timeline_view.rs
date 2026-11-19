@@ -706,8 +706,8 @@ fn paragraph_lines(inlines: &[Inline]) -> Vec<Vec<Piece<'_>>> {
                 inline_style(*style).add_modifier(Modifier::UNDERLINED),
                 style.spoiler,
             ),
-            Inline::Mention { text, .. } => (text, BOLD, false),
-            Inline::Emoticon { alt } => (alt, PLAIN, false),
+            Inline::Mention { text, spoiler, .. } => (text, BOLD, *spoiler),
+            Inline::Emoticon { alt, spoiler } => (alt, PLAIN, *spoiler),
             Inline::LineBreak => {
                 lines.push(Vec::new());
                 continue;
@@ -1042,6 +1042,50 @@ mod tests {
         assert_eq!(wrapped(&[], 10), [""]);
         // Every row takes at least one cluster.
         assert_eq!(wrapped(&["abc"], 0), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn spoilers_hide_text_links_mentions_and_emoticons() {
+        let spoiler = rich::Style {
+            spoiler: true,
+            ..rich::Style::default()
+        };
+        let alice = rich::MentionTarget::User(UserId::new("@alice:example.org"));
+        let inlines = [
+            Inline::Text {
+                text: "plot".into(),
+                style: spoiler,
+            },
+            Inline::Link {
+                text: "link".into(),
+                url: "https://example.org".into(),
+                style: spoiler,
+            },
+            Inline::Mention {
+                text: "@Alice".into(),
+                target: alice.clone(),
+                spoiler: true,
+            },
+            Inline::Emoticon {
+                alt: ":cat:".into(),
+                spoiler: true,
+            },
+            Inline::Mention {
+                text: "@Alice".into(),
+                target: alice,
+                spoiler: false,
+            },
+            Inline::Emoticon {
+                alt: ":cat:".into(),
+                spoiler: false,
+            },
+        ];
+        let lines = paragraph_lines(&inlines);
+        let parts: Vec<&str> = lines[0].iter().map(|(part, _)| part.as_ref()).collect();
+        assert_eq!(
+            parts,
+            ["████", "████", "██████", "█████", "@Alice", ":cat:"]
+        );
     }
 
     #[test]
