@@ -1048,9 +1048,14 @@ separate device) and the edtui check program. Counts are from that account.
    `b` treat every non-ASCII character as its own word), `F`/`T`/`;`/`,`, and
    a linewise `p` on the last line (pastes above). `r` is unbound rather than
    redo.
-6. **Mentions on the remote network:** open; needs a bridged channel and a
-   second person. Sending, mentions and mention completion work in mxt
-   (checked in a test room), so this is a check by the account owner.
+6. **Mentions on the remote network:** answered for the Discord bridge. A
+   mention sent from mxt in a bridged guild channel (a `matrix.to` link and
+   `m.mentions`) arrived on Discord as a real mention of that user, with a
+   notification, not as plain `@name` text. The other way, a Discord mention
+   of the account showed the channel with an `@1` badge in mxt. The
+   mentioned Discord user has to be a joined member of the Matrix room for
+   the mention menu to offer them; the bridge adds Discord users when they
+   first speak in the channel.
 7. **Key backup with `AfterDecryptionFailure`:** answered. Recovery imported
    the cross-signing keys and enabled the backup for the new device. In mxt's
    timeline, a bridged DM paged back months before the device existed, and a
@@ -1079,7 +1084,10 @@ asking for the recovery key ("Startup").
   or is accepted for the first release.
 - **Mentions on the remote network.** mxt relies on bridges turning
   `matrix.to` user links and `m.mentions` into remote mentions. Phase 0
-  checks this for the target bridges.
+  confirmed it for the Discord bridge in both directions; other bridges are
+  not yet verified. Mention completion only offers joined members, so a
+  remote user who has not spoken in a bridged channel cannot be mentioned
+  from mxt yet.
 - **Member lists of large rooms.** Mention completion needs the room's member
   list. Bridged rooms with thousands of members load slowly the first time.
   The SDK forgets that a room's members are loaded after every `limited` sync,
