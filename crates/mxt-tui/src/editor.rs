@@ -11,7 +11,9 @@
 use std::cmp::Ordering;
 
 use crossterm::event::{KeyCode as C, KeyModifiers as M};
-use edtui::actions::{AppendCharToSearch, MoveBackward, MoveForward, ReplaceChar, SwitchMode};
+use edtui::actions::{
+    AppendCharToSearch, InsertChar, MoveBackward, MoveForward, ReplaceChar, SwitchMode,
+};
 use edtui::events::{KeyEventRegister, KeyInput};
 use edtui::{EditorEventHandler, EditorState, EditorTheme, EditorView, Index2, Lines, RowIndex};
 use mxt_core::keys::{Key, KeyCode, Modifiers};
@@ -189,7 +191,8 @@ impl Editor {
 
     /// A paste (design, "Input routing"): `text`, with `\n` line breaks,
     /// goes in as text, never as keys. Insert mode inserts it at the
-    /// cursor. Normal mode puts it after the cursor like `p` with a
+    /// cursor, and `.` repeats it with the rest of the insert, as with typed
+    /// text. Normal mode puts it after the cursor like `p` with a
     /// characterwise register, and visual mode in place of the selection,
     /// both as `a`, the text and `<Esc>` would: one undo step, back in
     /// normal mode with the cursor on the last pasted character. Neither
@@ -345,30 +348,29 @@ impl Editor {
 }
 
 /// Inserts `text` at the cursor, a `\n` starting a new line, with the
-/// cursor after it, as typing it in insert mode would.
+/// cursor after it, as typing it in insert mode would: with edtui's
+/// `InsertChar`, which records the text for `.` in an insert session. The
+/// text after the cursor is set aside meanwhile, so each character goes at
+/// the end of the text instead of moving the rest along, which a paste of
+/// up to 256 KiB would do once per character.
 fn insert_text(state: &mut EditorState, text: &str) {
-    let mut row = state.cursor.row;
-    // An empty text may have no line.
-    if row == state.lines.len() {
-        state.lines.push(Vec::new());
-    }
-    let Some(line) = state.lines.get_mut(RowIndex::new(row)) else {
+    if text.is_empty() {
+        // `merge` would join the cursor's line to the line above.
         return;
-    };
-    let tail = line.split_off(state.cursor.col.min(line.len()));
-    let mut pieces = text.split('\n');
-    line.extend(pieces.next().unwrap_or_default().chars());
-    let mut col = line.len();
-    for piece in pieces {
-        row += 1;
-        let line: Vec<char> = piece.chars().collect();
-        col = line.len();
-        state.lines.insert(RowIndex::new(row), line);
     }
-    if let Some(line) = state.lines.get_mut(RowIndex::new(row)) {
-        line.extend(tail);
-    }
+    let row = state.cursor.row;
+    let col = state
+        .lines
+        .len_col(row)
+        .map_or(0, |len| state.cursor.col.min(len));
     state.cursor = Index2::new(row, col);
+    // With `col` 0 the cursor's whole line goes, and the first character
+    // starts a new one.
+    let mut rest = state.lines.split_off(state.cursor);
+    for c in text.chars() {
+        state.execute(InsertChar(c));
+    }
+    state.lines.merge(&mut rest);
 }
 
 /// The keys mxt handles in place of edtui.
@@ -917,6 +919,52 @@ pub(crate) mod tests {
         assert!(editor.state.selection.is_none());
         feed(&mut editor, "u");
         assert_eq!(text(&editor), "hello world");
+    }
+
+    #[test]
+    fn a_paste_in_linewise_visual_mode_replaces_the_lines() {
+        // As in neovim, the text goes before the line after them.
+        let mut editor = holding("a\nb\nc");
+        feed(&mut editor, "jV");
+        editor.paste("X\nY");
+        assert_eq!(text(&editor), "a\nX\nYc");
+        assert_eq!(editor.mode(), EditorMode::Normal);
+        assert_eq!(editor.state.cursor, Index2::new(2, 0));
+        feed(&mut editor, "u");
+        assert_eq!(text(&editor), "a\nb\nc");
+        // On the last line there is no line after.
+        let mut editor = holding("a\nb");
+        feed(&mut editor, "jV");
+        editor.paste("X");
+        assert_eq!(text(&editor), "a\nX");
+    }
+
+    #[test]
+    fn a_paste_in_insert_mode_keeps_the_text_around_it() {
+        let mut editor = holding("one\ntwo\nthree");
+        feed(&mut editor, "jli");
+        editor.paste("A\nB");
+        assert_eq!(text(&editor), "one\ntA\nBwo\nthree");
+        assert_eq!(editor.state.cursor, Index2::new(2, 1));
+        // At the start of a line, and an empty paste, which joins nothing.
+        let mut editor = holding("one\ntwo");
+        feed(&mut editor, "ji");
+        editor.paste("");
+        editor.paste("A\n");
+        assert_eq!(text(&editor), "one\nA\ntwo");
+        assert_eq!(editor.state.cursor, Index2::new(2, 0));
+    }
+
+    #[test]
+    fn dot_repeats_an_insert_with_a_paste_in_it() {
+        // As neovim's paste does, line breaks included.
+        for (pasted, repeated) in [("XY", "aXYaXYbb"), ("X\nY", "aX\nYaX\nYbb")] {
+            let mut editor = holding("");
+            feed(&mut editor, "ia");
+            editor.paste(pasted);
+            feed(&mut editor, "b<Esc>.");
+            assert_eq!(text(&editor), repeated);
+        }
     }
 
     #[test]
