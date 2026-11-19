@@ -7,7 +7,8 @@ use std::io::{self, Cursor, Write as _};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use image::{DynamicImage, ImageReader, ImageResult, Limits};
+use image::metadata::Orientation;
+use image::{DynamicImage, ImageDecoder as _, ImageReader, ImageResult, Limits};
 use mxt_core::timeline::ItemRef;
 use ratatui::Frame;
 use ratatui::layout::{Rect, Size};
@@ -110,13 +111,24 @@ impl Images {
 }
 
 /// `bytes` in the format they start with, decoded within
-/// [`MAX_DECODE_ALLOC`].
+/// [`MAX_DECODE_ALLOC`] and turned by their Exif orientation (phone cameras
+/// store portrait photos as landscape ones with orientation 6 or 8). An
+/// orientation that cannot be read leaves the image as stored. A turn by 90
+/// degrees copies the decoded image once, outside the limit.
 fn decode(bytes: &[u8]) -> ImageResult<DynamicImage> {
     let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
     let mut limits = Limits::default();
     limits.max_alloc = Some(MAX_DECODE_ALLOC);
-    reader.limits(limits);
-    reader.decode()
+    reader.limits(limits.clone());
+    let mut decoder = reader.into_decoder()?;
+    // What `ImageReader::decode` does, which gives no access to the
+    // decoder: the image's own buffer counts against the limit too.
+    limits.reserve(decoder.total_bytes())?;
+    decoder.set_limits(limits)?;
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let mut image = DynamicImage::from_decoder(decoder)?;
+    image.apply_orientation(orientation);
+    Ok(image)
 }
 
 /// A workaround for ratatui-image's query thread, which reads stdin without
@@ -246,5 +258,28 @@ mod tests {
         chunk(&mut huge, b"IEND", &[]);
         let error = decode(&huge).unwrap_err();
         assert!(matches!(error, ImageError::Limits(_)), "{error:?}");
+    }
+
+    #[test]
+    fn a_photo_is_decoded_turned_by_its_exif_orientation() {
+        let mut stored = Vec::new();
+        DynamicImage::new_rgb8(3, 2)
+            .write_to(&mut Cursor::new(&mut stored), ImageFormat::Jpeg)
+            .unwrap();
+        let image = decode(&stored).unwrap();
+        assert_eq!((image.width(), image.height()), (3, 2));
+
+        // As phone cameras store a portrait photo: landscape, with an Exif
+        // segment that turns it by 90 degrees (orientation 6).
+        let exif: &[u8] = &[
+            0xFF, 0xE1, 0, 34, b'E', b'x', b'i', b'f', 0, 0, // APP1, Exif
+            b'M', b'M', 0, 42, 0, 0, 0, 8, // big-endian TIFF header, IFD at 8
+            0, 1, // one entry
+            0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, // orientation, one short: 6
+            0, 0, 0, 0, // no next IFD
+        ];
+        let turned = [&stored[..2], exif, &stored[2..]].concat();
+        let image = decode(&turned).unwrap();
+        assert_eq!((image.width(), image.height()), (2, 3));
     }
 }
