@@ -1,0 +1,257 @@
+name: Release
+
+# A `v*` tag on `main` builds the release archives, checks them and publishes
+# them as the tag's GitHub release (docs/releasing.md). A manual run
+# (`gh workflow run release.yml --ref <branch>`) builds and checks the same
+# archives for the workspace version and keeps them as workflow artifacts,
+# without publishing anything.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A release run is never cancelled halfway.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # The flake's rustc, so the binaries are built with the compiler CI tests
+  # with. Follow the flake when `nix flake update` changes it.
+  RUSTUP_TOOLCHAIN: "1.99.1"
+  # The SQLite the binaries link statically (RUSTSEC-2026-0459, see
+  # deny.toml): the official amalgamation, checked against the SHA3-256 that
+  # https://sqlite.org/download.html publishes for it.
+  SQLITE_URL: https://sqlite.org/2026/sqlite-amalgamation-3540100.zip
+  SQLITE_SHA3_256: 92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689df28e30
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Version and release notes
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          # The whole history with `origin/main`, for the check below.
+          fetch-depth: 0
+      - name: Check that a tag is on main
+        # A release is cut from `main` (docs/releasing.md). A run on a branch
+        # has no tag to check.
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+              echo "::error::The tag $GITHUB_REF_NAME names $GITHUB_SHA, which is not on main; tag a commit of main"
+              exit 1
+            fi
+            echo "$GITHUB_SHA is on main"
+          fi
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: Read the workspace version and check the tag
+        id: version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "mxt") | .version')
+          echo "Workspace version: $version"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::The tag $GITHUB_REF_NAME does not match the workspace version $version (the tag must be v$version)"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Extract the release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        # The lines after "## [<version>]" up to the next "## " heading or the
+        # link definitions at the end, without leading or trailing blank lines.
+        run: |
+          awk -v heading="## [$VERSION]" '
+            /^## / { if (found) exit; found = index($0, heading) == 1; next }
+            found && /^\[[^]]+\]: / { exit }
+            found && $0 == "" { blank++; next }
+            found {
+              if (printed) for (i = 0; i < blank; i++) print ""
+              blank = 0; printed = 1; print
+            }
+          ' CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "::error::CHANGELOG.md has no section for $VERSION"
+            exit 1
+          fi
+          cat release-notes.md
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # glibc 2.35, so the binary runs on Ubuntu 22.04 and on any system
+          # with a newer glibc: the oldest runner GitHub offers whose glibc is
+          # 2.35 or older.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          # Apple Silicon.
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # rustc's minimum for Apple Silicon. Without it, the C code (SQLite,
+      # aws-lc) would be built for the runner's macOS version.
+      - name: Target macOS 11
+        if: runner.os == 'macOS'
+        run: echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target "$TARGET"
+      - name: Build SQLite
+        run: |
+          dir="$RUNNER_TEMP/sqlite"
+          mkdir -p "$dir/lib" "$dir/include"
+          curl -fsSL --retry 3 -o "$dir/sqlite.zip" "$SQLITE_URL"
+          actual=$(python3 -c 'import hashlib, sys; print(hashlib.sha3_256(open(sys.argv[1], "rb").read()).hexdigest())' "$dir/sqlite.zip")
+          if [ "$actual" != "$SQLITE_SHA3_256" ]; then
+            echo "::error::The SHA3-256 of $SQLITE_URL is $actual, not $SQLITE_SHA3_256"
+            exit 1
+          fi
+          unzip -q "$dir/sqlite.zip" -d "$dir"
+          src="$dir/$(basename "$SQLITE_URL" .zip)"
+          # The compile options libsqlite3-sys uses for its bundled copy (what
+          # matrix-sdk's opt-in `bundled-sqlite` feature would build).
+          cc -c -O2 -fPIC \
+            -DSQLITE_CORE \
+            -DSQLITE_DEFAULT_FOREIGN_KEYS=1 \
+            -DSQLITE_ENABLE_API_ARMOR \
+            -DSQLITE_ENABLE_COLUMN_METADATA \
+            -DSQLITE_ENABLE_DBSTAT_VTAB \
+            -DSQLITE_ENABLE_FTS3 \
+            -DSQLITE_ENABLE_FTS3_PARENTHESIS \
+            -DSQLITE_ENABLE_FTS5 \
+            -DSQLITE_ENABLE_JSON1 \
+            -DSQLITE_ENABLE_LOAD_EXTENSION=1 \
+            -DSQLITE_ENABLE_MEMORY_MANAGEMENT \
+            -DSQLITE_ENABLE_RTREE \
+            -DSQLITE_ENABLE_STAT4 \
+            -DSQLITE_SOUNDEX \
+            -DSQLITE_THREADSAFE=1 \
+            -DSQLITE_USE_URI \
+            -DHAVE_USLEEP=1 \
+            -DHAVE_ISNAN \
+            -DHAVE_LOCALTIME_R \
+            "$src/sqlite3.c" -o "$dir/sqlite3.o"
+          ar rcs "$dir/lib/libsqlite3.a" "$dir/sqlite3.o"
+          cp "$src/sqlite3.h" "$src/sqlite3ext.h" "$dir/include/"
+          # libsqlite3-sys links the library in SQLITE3_LIB_DIR, statically.
+          # SQLITE3_NO_PKG_CONFIG keeps it from asking pkg-config first, which
+          # would find the runner's system SQLite.
+          {
+            echo "SQLITE3_LIB_DIR=$dir/lib"
+            echo "SQLITE3_INCLUDE_DIR=$dir/include"
+            echo "SQLITE3_STATIC=1"
+            echo "SQLITE3_NO_PKG_CONFIG=1"
+          } >> "$GITHUB_ENV"
+      - run: cargo build --release --locked --package mxt --target "$TARGET"
+      - name: Check the binary
+        run: |
+          bin="target/$TARGET/release/mxt"
+          file "$bin"
+          reported=$("$bin" --version)
+          echo "$reported"
+          if [ "$reported" != "mxt $VERSION" ]; then
+            echo "::error::mxt --version prints \"$reported\", not \"mxt $VERSION\""
+            exit 1
+          fi
+
+          if [ "$RUNNER_OS" = Linux ]; then
+            libraries=$(ldd "$bin")
+          else
+            libraries=$(otool -L "$bin")
+            otool -l "$bin" | grep -A 4 LC_BUILD_VERSION
+          fi
+          echo "$libraries"
+          if grep -qi sqlite <<<"$libraries"; then
+            echo "::error::mxt links SQLite dynamically"
+            exit 1
+          fi
+
+          # sqlite3_sourceid() returns SQLITE_SOURCE_ID, so the binary holds
+          # the source ID of every SQLite linked into it.
+          header="$SQLITE3_INCLUDE_DIR/sqlite3.h"
+          sqlite_version=$(sed -n 's/^#define SQLITE_VERSION  *"\(.*\)"$/\1/p' "$header")
+          source_id=$(sed -n 's/^#define SQLITE_SOURCE_ID  *"\(.*\)"$/\1/p' "$header")
+          linked=$(strings -a "$bin" | { grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9a-f]{64}$' || true; } | sort -u)
+          echo "SQLite source IDs in mxt: $linked"
+          if [ "$linked" != "$source_id" ]; then
+            echo "::error::mxt does not link exactly SQLite $sqlite_version ($source_id)"
+            exit 1
+          fi
+          echo "mxt links SQLite $sqlite_version statically ($source_id)"
+      - name: Check the glibc version
+        if: runner.os == 'Linux'
+        run: |
+          glibc=$(objdump -T "target/$TARGET/release/mxt" | { grep -o 'GLIBC_[0-9][0-9.]*' || true; } | sort -u -V | tail -n 1)
+          echo "Highest required glibc symbol version: $glibc"
+          if [ -z "$glibc" ] || [ "$(printf '%s\n' "${glibc#GLIBC_}" 2.35 | sort -V | tail -n 1)" != 2.35 ]; then
+            echo "::error::mxt requires ${glibc:-no glibc symbol version}, not GLIBC_2.35 or older"
+            exit 1
+          fi
+      - name: Package
+        run: |
+          name="mxt-v$VERSION-$TARGET"
+          mkdir "$name"
+          cp "target/$TARGET/release/mxt" LICENSE README.md CHANGELOG.md "$name/"
+          # Without macOS's extended attributes and AppleDouble files.
+          COPYFILE_DISABLE=1 tar --no-xattrs -czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          tar -tzvf "$name.tar.gz"
+          cat "$name.tar.gz.sha256"
+          echo "ARCHIVE=$name" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.ARCHIVE }}
+          path: |
+            ${{ env.ARCHIVE }}.tar.gz
+            ${{ env.ARCHIVE }}.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    # Tag pushes only: a manual run keeps the archives as artifacts.
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      # With assets, gh creates the release as a draft, uploads them and only
+      # then publishes it, so the release never appears without its archives.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "mxt $VERSION" --notes-file dist/release-notes.md \
+            dist/*.tar.gz dist/*.tar.gz.sha256

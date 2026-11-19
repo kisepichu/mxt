@@ -27,6 +27,21 @@ jobs:
       - uses: cachix/install-nix-action@v31
       - name: Enter the development shell
         run: nix develop -c true
+      # release.yml builds the release binaries with rustup's Rust at the
+      # flake's rustc version (docs/releasing.md), so the two must not drift.
+      - name: Check release.yml's Rust version
+        run: |
+          pinned=$(sed -n 's/^  RUSTUP_TOOLCHAIN: "\(.*\)"$/\1/p' .github/workflows/release.yml)
+          flake=$(nix develop -c rustc --version | cut -d ' ' -f 2)
+          if [ -z "$pinned" ]; then
+            echo "::error::No RUSTUP_TOOLCHAIN: \"<version>\" line in .github/workflows/release.yml"
+            exit 1
+          fi
+          if [ "$pinned" != "$flake" ]; then
+            echo "::error::RUSTUP_TOOLCHAIN in .github/workflows/release.yml is $pinned, but the flake's rustc is $flake; set it to \"$flake\""
+            exit 1
+          fi
+          echo "RUSTUP_TOOLCHAIN and the flake's rustc are both $flake"
       # The cache key must follow the flake's toolchain, not the runner's.
       - uses: Swatinem/rust-cache@v2
         with:
