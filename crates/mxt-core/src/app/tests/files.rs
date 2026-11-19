@@ -254,6 +254,42 @@ fn gx_on_several_links_picks_one_of_their_urls() {
 }
 
 #[test]
+fn gx_offers_only_http_and_https_links() {
+    let docs = "https://example.org/docs";
+    let mut app = opened();
+    reset(
+        &mut app,
+        vec![
+            rich(
+                1,
+                vec![Block::Paragraph(vec![
+                    link("mail", "mailto:alice@example.org"),
+                    text(", "),
+                    link("the room", "matrix:r/room:example.org"),
+                    text(", "),
+                    link("files", "ftp://example.org/pub"),
+                ])],
+            ),
+            rich(
+                2,
+                vec![Block::Paragraph(vec![
+                    link("mail", "mailto:alice@example.org"),
+                    text(" or read "),
+                    link("the docs", docs),
+                ])],
+            ),
+        ],
+    );
+    // The only web link is opened without a picker.
+    assert_eq!(gx(&mut app), vec![open_url(docs)]);
+    assert!(app.picker().is_none());
+    keys(&mut app, "k");
+    assert_eq!(gx(&mut app), vec![]);
+    assert!(app.picker().is_none());
+    assert_eq!(status(&app), Some("Nothing to open"));
+}
+
+#[test]
 fn gx_without_a_link_or_an_attachment_has_nothing_to_open() {
     let mention = Inline::Mention {
         text: "@Alice".into(),
