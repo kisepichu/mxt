@@ -141,7 +141,7 @@ flowchart BT
 | Crate | Responsibility | May depend on |
 |---|---|---|
 | `mxt-core` | Domain types, keymap and its resolver, action registry, pickers, mention rendering, `App` state and `update` | `std` and small pure crates without I/O (`nucleo-matcher`, `emojis`, `pulldown-cmark`, `unicode-segmentation`). Not the SDK, `ruma`, an async runtime, a terminal library, `serde` or `toml`. |
-| `mxt-matrix` | Builds the SDK client, converts SDK data into domain types, executes matrix effects, forwards SDK streams as `Msg`s, reads bridge state, renders HTML bodies into domain rich text, reads and writes the session file | `mxt-core`, `matrix-sdk`, `matrix-sdk-ui`, tokio, `futures-util`, `tracing`, `serde`/`serde_json` (the session file holds the SDK's serde session type), `mime_guess` (the MIME type of an upload); HTML parsing through `matrix_sdk::ruma::html`, plus a feature-only `ruma` dependency of the SDK's ruma version that enables `html-matrix` (the SDK enables only `html`) and `markdown` (`FormattedBody::markdown`) |
+| `mxt-matrix` | Builds the SDK client, converts SDK data into domain types, executes matrix effects, forwards SDK streams as `Msg`s, reads bridge state, renders HTML bodies into domain rich text, reads and writes the session file | `mxt-core`, `matrix-sdk`, `matrix-sdk-ui`, tokio, `futures-util`, `tracing`, `serde`/`serde_json` (the session file holds the SDK's serde session type), `mime_guess` (the MIME type of an upload), `image` (the dimensions of uploaded images); HTML parsing through `matrix_sdk::ruma::html`, plus a feature-only `ruma` dependency of the SDK's ruma version that enables `html-matrix` (the SDK enables only `html`) and `markdown` (`FormattedBody::markdown`); as dev-dependencies, `matrix-sdk` with its `testing` feature, `matrix-sdk-test` and `mxt-core` with its `testing` feature (the tests against `MatrixMockServer`) |
 | `mxt-tui` | Layout and widgets, input routing, the composers and the message view (edtui), image decoding and previews, OSC 52 clipboard, local time formatting, executing UI effects | `mxt-core`, ratatui, crossterm, edtui, ratatui-image, image, jiff, `base64` (OSC 52), `futures-util` (the terminal event stream), `unicode-segmentation` |
 | `mxt` | Command line, startup flow, configuration file loading (TOML DTOs), paths, the data directory lock, logging, wiring the adapters and the event loop | all of the above, `serde`, `toml`, `tracing`, `tracing-appender` and `tracing-subscriber` (the log files), `rpassword` (the password and recovery key prompts); `matrix-sdk` as a dev-dependency |
 
@@ -1041,17 +1041,20 @@ platforms.
     IDs are returned
   - rebuilding `MentionRef`s when editing a message
   - mention candidate ranking and the rule for duplicate display names
-- `mxt-matrix`: tests for converting SDK values into domain types and for HTML
-  rendering, with constructed inputs. The send queue paths are tested
-  against matrix-sdk's `MatrixMockServer` (the `testing` feature and
-  `matrix-sdk-test`, as dev-dependencies only): `run_effects` and the send
-  queue's failure handling run as `Matrix::start` runs them, and the tests
-  check that a refused edit of a sent message is answered with `SendFailed`
-  and leaves nothing in the send queue, that an accepted edit is answered
-  with `SendQueued`, that a refused upload is reported, stays in the send
-  queue and shows as a failed local echo, and that a refused reaction is
-  reported and then dropped from the timeline and the send queue. The rest
-  is covered by phase 0 and by running mxt against a homeserver.
+- `mxt-matrix`: tests with constructed inputs for converting SDK values into
+  domain types, HTML rendering, download file names, the dimensions of
+  uploaded images and the session file. The send queue paths are tested
+  against matrix-sdk's `MatrixMockServer`, a mock homeserver on 127.0.0.1
+  (matrix-sdk's `testing` feature, `matrix-sdk-test`, and `mxt-core`'s
+  `testing` feature for `SendId::new`, all as dev-dependencies only):
+  `run_effects` and the send queue's failure handling run as `Matrix::start`
+  runs them, without the sync loop and the room list, and the tests check
+  that a refused edit of a sent message is answered with `SendFailed` and
+  leaves nothing in the send queue, that an accepted edit is answered with
+  `SendQueued`, that a refused upload is reported, stays in the send queue
+  and shows as a failed local echo, and that a refused reaction is reported
+  and then dropped from the timeline and the send queue. The rest is covered
+  by phase 0 and by running mxt against a homeserver.
 - `mxt-tui`: unit tests, for example of key conversion, the editor keys
   `mxt-tui` handles itself, wrapping and the cursor by grapheme cluster, the
   composers' reports to the core, and the layout; some assert rendered rows
@@ -1064,10 +1067,12 @@ platforms.
     restored between runs: `cargo fmt --check`,
     `cargo clippy --all-targets -- -D warnings`, `cargo test`, and
     `cargo deny check licenses advisories sources`.
-  - The package build (`nix build`, which also runs the tests) runs when
-    `flake.nix`, `flake.lock`, `Cargo.lock` or a `Cargo.toml` changes, every
-    week, and on demand. This keeps the full Nix build of matrix-rust-sdk out
-    of every push.
+  - The package build (`nix build`) runs when `flake.nix`, `flake.lock`,
+    `Cargo.lock` or a `Cargo.toml` changes, every week, and on demand. This
+    keeps the full Nix build of matrix-rust-sdk out of every push. It also
+    runs the tests, except `mxt-matrix`'s (`cargoTestFlags`): their
+    dev-dependency features would build the SDK stack a second time, and
+    `cargo test` above runs them.
 - A prek pre-commit configuration runs `cargo fmt --check` and clippy.
 
 ## Build and distribution
@@ -1114,11 +1119,15 @@ lighter.
 
 - Nix: `nix profile install github:kisepichu/mxt`, or use the flake as an
   input of a NixOS or home-manager configuration.
-- Without Nix: `cargo install --git https://github.com/kisepichu/mxt`, for
-  example through mise's cargo backend. matrix-sdk is built with `sqlite`
-  and without `bundled-sqlite`, so such a build links the system SQLite,
-  found with `pkg-config`, which must be SQLite 3.54.0 or newer
-  (RUSTSEC-2026-0459, see `deny.toml`).
+- Without Nix: `cargo install --locked --git https://github.com/kisepichu/mxt mxt`,
+  for example through mise's cargo backend. `--locked` builds with the
+  committed `Cargo.lock`, which pins matrix-sdk's stack and
+  `libsqlite3-sys`. matrix-sdk is built with `sqlite` and without
+  `bundled-sqlite`, so such a build links the system SQLite, which must be
+  SQLite 3.54.0 or newer (RUSTSEC-2026-0459, see `deny.toml`). The build
+  looks for it with `pkg-config`; when pkg-config does not find it, the
+  build still links any `libsqlite3` the linker finds, without checking its
+  version.
 
 The [README](../../../README.md) describes both and the first start;
 [Configuration](../../configuration.md), [Keys](../../keys.md) and

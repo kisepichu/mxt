@@ -74,7 +74,9 @@ Requirements:
 - SQLite 3.54.0 or newer, with its development files. mxt links the system
   SQLite instead of bundling one, and older versions have a known
   vulnerability (RUSTSEC-2026-0459). `pkg-config --modversion sqlite3` shows
-  the version that the build will find.
+  the version that the build will find. If pkg-config does not find
+  sqlite3, the build still links any `libsqlite3` the linker finds, without
+  checking its version.
 - `pkg-config`, which the build uses to find SQLite.
 - A C compiler: some dependencies build C code.
 
@@ -138,8 +140,9 @@ PKG_CONFIG_PATH="$(brew --prefix sqlite)/lib/pkgconfig" \
    so and continues; set up recovery in another client.
 
    An empty input skips recovery, and a failed recovery prints the reason
-   and continues. mxt then says that `:recover` asks again later, but in this
-   version `:recover` only answers "account.recover is not available yet".
+   and continues. After an empty input, mxt says that `:recover` asks again
+   later, but in this version `:recover` only answers "account.recover is
+   not available yet".
    To enter the key later, log in again as a new device: quit mxt, delete
    `session.json` in the data directory (see [Files](#files)) and start mxt.
    The old device stays in your account's device list; remove it from

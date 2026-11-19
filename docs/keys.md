@@ -30,11 +30,12 @@ Counts above 99 show as `99+`. Muted rooms also show `Muted`, and rooms set
 to notify only for mentions and keywords show `Mentions only`.
 
 In the timeline, each message has a header with its time, the sender, and
-`(edited)`, `sending…` or `failed` when they apply. A reply starts with a
-row `> name: text` of the message it replies to, and reactions follow the
-message as `👍 2` (yours in bold). Images show as `[image: name 800x600]`,
-files as `[file: name 1.2 MiB]`, and also `[sticker: …]`, `(deleted)`,
-`(unable to decrypt)` (the key may still arrive) and `(unsupported: …)`.
+`(edited)`, `sending…` or `failed` when they apply. A reply's header is
+followed by a row `> name: text` of the message it replies to, and
+reactions follow the message as `👍 2` (yours in bold). Images show as
+`[image: name 800x600]`, files as `[file: name 1.2 MiB]`, and also
+`[sticker: …]`, `(deleted)`, `(unable to decrypt)` (the key may still
+arrive) and `(unsupported: …)`.
 A message taller than the pane ends with `[+N lines]`; `<CR>` shows it in
 full. Date dividers and a `new messages` line, where you stopped reading,
 come between messages.

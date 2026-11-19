@@ -13,7 +13,8 @@ prints when the file does not exist:
 user_id = "@alice:example.org"
 ```
 
-A file that sets everything, with the defaults where there are any:
+Every setting with its default where there is one, plus example keymap
+bindings (they change the default keymap; see [Keymap](#keymap)):
 
 ```toml
 [account]
@@ -133,9 +134,9 @@ table, and every other default stays.
 
 | Table | Used when | If the key is not bound there |
 |---|---|---|
-| `normal` | (fallback only) | the key is ignored |
-| `room_list` | the room list has focus | look in `normal` |
-| `timeline` | the timeline has focus | look in `normal` |
+| `normal` | (fallback only) | depends on the table that falls back to it |
+| `room_list` | the room list has focus | look in `normal`, then ignore the key |
+| `timeline` | the timeline has focus | look in `normal`, then ignore the key |
 | `composer.normal`, `composer.visual` | the composer has focus and its editor is in normal or visual mode | look in `normal`, then pass the key to the editor |
 | `composer.insert` | the composer's editor is in insert mode | pass the key to the editor |
 | `composer.completion` | the mention menu is open in insert mode | look in `composer.insert`, then pass the key to the editor |
