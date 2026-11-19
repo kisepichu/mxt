@@ -1,17 +1,11 @@
-//! The `Matrix` handle: runs the sync service and the tasks that report to
-//! the core, and executes matrix effects.
-
-use std::{sync::Arc, time::Duration};
+//! The `Matrix` handle: runs the tasks that report to the core while the
+//! sync loop runs, and executes matrix effects.
 
 use matrix_sdk::{
     Client, Room,
     latest_events::LatestEventValue,
     room::Receipts,
-    ruma::{self, OwnedEventId, OwnedRoomId},
-};
-use matrix_sdk_ui::{
-    RoomListService, room_list_service,
-    sync_service::{self, SyncService},
+    ruma::{self, OwnedEventId},
 };
 use mxt_core::{
     effect::MatrixEffect,
@@ -20,96 +14,88 @@ use mxt_core::{
     settings::ReceiptKind,
 };
 use tokio::{
-    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+    sync::{
+        mpsc::{UnboundedReceiver, UnboundedSender},
+        watch,
+    },
     task::{JoinError, JoinSet},
-    time::{Instant, sleep_until},
 };
 use tracing::{debug, warn};
 
-use crate::{
-    Error,
-    backoff::Backoff,
-    bridges,
-    error::{brief_sync, without_url},
-    rooms,
-    timeline::Subscription,
-};
-
-/// Builds the sync service (matrix-sdk-ui `SyncService` with offline mode),
-/// so startup can start it before the UI (the first login waits for the
-/// device keys while it runs).
-pub async fn build_sync_service(client: &Client) -> Result<Arc<SyncService>, Error> {
-    let sync = SyncService::builder(client.clone())
-        .with_offline_mode()
-        .build()
-        .await?;
-    Ok(Arc::new(sync))
-}
+use crate::{Error, SyncLoop, error::without_url, rooms, timeline::Subscription};
 
 /// The running matrix adapter.
 pub struct Matrix {
     tasks: JoinSet<()>,
-    sync: Arc<SyncService>,
+    sync: SyncLoop,
 }
 
 impl Matrix {
-    /// Starts the sync service if it is not running, and the tasks that turn
-    /// the room list, room info updates, notification settings changes and
-    /// bridge state into `Msg::RoomUpserted` / `Msg::RoomRemoved`, and the
-    /// sync service state into `Msg::SyncState`. The effects sent to
-    /// `effects` run in the background; failures arrive as
-    /// `Msg::EffectFailed`.
+    /// Starts the tasks that turn the joined rooms, the sync responses, room
+    /// info updates and notification settings changes into
+    /// `Msg::RoomUpserted` / `Msg::RoomRemoved`, and the sync loop's state
+    /// into `Msg::SyncState`. The effects sent to `effects` run in the
+    /// background; failures arrive as `Msg::EffectFailed`.
     pub async fn start(
         client: Client,
-        sync: Arc<SyncService>,
+        sync: SyncLoop,
         receipts: ReceiptKind,
         to_core: UnboundedSender<Msg>,
         effects: UnboundedReceiver<MatrixEffect>,
-    ) -> Result<Matrix, Error> {
-        let room_list = sync.room_list_service();
-        let all_rooms = room_list.all_rooms().await?;
+    ) -> Matrix {
         let settings = client.notification_settings().await;
-        let (to_bridges, listed) = mpsc::unbounded_channel();
-        let (bridge_states, from_bridges) = mpsc::unbounded_channel();
-        let rooms = rooms::Rooms::new(client.clone(), settings, to_core.clone(), to_bridges);
+        let rooms = rooms::Rooms::new(client.clone(), settings, to_core.clone());
         let mut tasks = JoinSet::new();
-        tasks.spawn(watch_sync(sync.clone(), to_core.clone()));
-        tasks.spawn(rooms::run(all_rooms, rooms, from_bridges));
-        tasks.spawn(bridges::run(
-            client.clone(),
-            room_list.clone(),
-            listed,
-            bridge_states,
-        ));
-        tasks.spawn(run_effects(client, room_list, receipts, to_core, effects));
-        if !matches!(
-            sync.state().get(),
-            sync_service::State::Running | sync_service::State::Offline
-        ) {
-            sync.start().await;
-        }
-        Ok(Matrix { tasks, sync })
+        tasks.spawn(watch_sync(sync.state(), to_core.clone()));
+        tasks.spawn(rooms::run(rooms, sync.rooms()));
+        tasks.spawn(run_effects(client, receipts, to_core, effects));
+        Matrix { tasks, sync }
     }
 
-    /// Waits until one of the tasks panics and returns its error; pending
-    /// while they run and once they have all ended otherwise. The panic hook
-    /// has restored the terminal by then, so the caller ends the program.
-    /// Cancel safe.
+    /// Waits until one of the tasks or the sync loop panics and returns its
+    /// error; pending while they run and once they have all ended otherwise.
+    /// The panic hook has restored the terminal by then, so the caller ends
+    /// the program. Cancel safe.
     pub async fn panicked(&mut self) -> JoinError {
-        while let Some(finished) = self.tasks.join_next().await {
-            if let Err(error) = finished
-                && error.is_panic()
-            {
-                return error;
-            }
+        tokio::select! {
+            error = first_panic(&mut self.tasks) => error,
+            error = self.sync.panicked() => error,
         }
-        std::future::pending().await
     }
 
-    /// Stops the tasks and the sync service.
+    /// Stops the tasks and the sync loop.
     pub async fn stop(mut self) {
         self.tasks.shutdown().await;
         self.sync.stop().await;
+    }
+}
+
+/// The error of the first task in `tasks` that panics; pending while they
+/// run and once they have all ended otherwise. Cancel safe.
+pub(crate) async fn first_panic(tasks: &mut JoinSet<()>) -> JoinError {
+    while let Some(finished) = tasks.join_next().await {
+        if let Err(error) = finished
+            && error.is_panic()
+        {
+            return error;
+        }
+    }
+    std::future::pending().await
+}
+
+/// Reports the sync loop's state when it changes; ends with the loop.
+async fn watch_sync(mut state: watch::Receiver<SyncState>, to_core: UnboundedSender<Msg>) {
+    // The core starts with `Starting`.
+    let mut reported = SyncState::Starting;
+    loop {
+        let current = *state.borrow_and_update();
+        if current != reported {
+            reported = current;
+            let _ = to_core.send(Msg::SyncState(current));
+        }
+        if state.changed().await.is_err() {
+            return;
+        }
     }
 }
 
@@ -117,7 +103,6 @@ impl Matrix {
 /// pagination run concurrently.
 async fn run_effects(
     client: Client,
-    room_list: Arc<RoomListService>,
     receipts: ReceiptKind,
     to_core: UnboundedSender<Msg>,
     mut queue: UnboundedReceiver<MatrixEffect>,
@@ -132,12 +117,9 @@ async fn run_effects(
                     if let Some(previous) = timeline.take() {
                         previous.stop().await;
                     }
-                    timeline = subscribe(&client, &room_list, room, &to_core).await;
+                    timeline = subscribe(&client, room, &to_core).await;
                 }
                 Some(MatrixEffect::UnsubscribeTimeline(room)) => {
-                    if let Some(room) = sdk_room_id(&room) {
-                        room_list.remove_room_subscriptions(&[&room]);
-                    }
                     if let Some(open) = timeline.take_if(|open| *open.room() == room) {
                         open.stop().await;
                     }
@@ -188,21 +170,14 @@ async fn run_effects(
     }
 }
 
-/// The room list subscription (the room's events and state in the sync),
-/// and the room's timeline.
+/// The room's timeline; classic sync delivers every room's events already.
 async fn subscribe(
     client: &Client,
-    room_list: &RoomListService,
     room: RoomId,
     to_core: &UnboundedSender<Msg>,
 ) -> Option<Subscription> {
     let started = match sdk_room(client, &room) {
-        Ok(sdk_room) => {
-            room_list
-                .set_room_subscriptions(&[sdk_room.room_id()])
-                .await;
-            Subscription::start(&sdk_room, room, to_core.clone()).await
-        }
+        Ok(sdk_room) => Subscription::start(&sdk_room, room, to_core.clone()).await,
         Err(error) => Err(error),
     };
     started
@@ -267,12 +242,9 @@ fn read_up_to(event: OwnedEventId, kind: ReceiptKind) -> Receipts {
     }
 }
 
-fn sdk_room_id(room: &RoomId) -> Option<OwnedRoomId> {
-    ruma::RoomId::parse(room.as_str()).ok()
-}
-
 fn sdk_room(client: &Client, room: &RoomId) -> Result<Room, Error> {
-    sdk_room_id(room)
+    ruma::RoomId::parse(room.as_str())
+        .ok()
         .and_then(|room| client.get_room(&room))
         .ok_or(Error::UnknownRoom)
 }
@@ -286,263 +258,4 @@ fn report(to_core: &UnboundedSender<Msg>, what: &str, error: &Error) {
     let _ = to_core.send(Msg::EffectFailed {
         error: format!("{what}: {brief}"),
     });
-}
-
-/// Reports the sync state, and restarts the sync service with backoff after
-/// it stopped with an error, or after it went offline again before the room
-/// list responded (see `Restarts`).
-async fn watch_sync(sync: Arc<SyncService>, to_core: UnboundedSender<Msg>) {
-    let mut service = sync.state();
-    let room_list = sync.room_list_service();
-    let mut room_list_state = room_list.state();
-    let mut restarts = Restarts::new();
-    let mut restart_at = None;
-    let mut reported = SyncState::Starting;
-    // The state at the start counts as a change.
-    let mut service_changed = true;
-    loop {
-        let service_state = service.next_now();
-        let list_state = room_list_state.next_now();
-        let state = sync_state(&service_state, &list_state, reported);
-        if state != reported {
-            reported = state;
-            let _ = to_core.send(Msg::SyncState(state));
-        }
-        if state == SyncState::Synced {
-            restarts.responded();
-        }
-        if std::mem::take(&mut service_changed) {
-            match restarts.service_changed(&service_state) {
-                Restart::None => restart_at = None,
-                Restart::Keep => {}
-                Restart::After(delay) => {
-                    match &service_state {
-                        sync_service::State::Error(error) => {
-                            warn!(
-                                "the sync service stopped ({}); restarting it in {} s",
-                                brief_sync(error),
-                                delay.as_secs()
-                            );
-                            debug!("the sync service stopped: {error}");
-                        }
-                        _ => warn!(
-                            "the sync service terminated; restarting it in {} s",
-                            delay.as_secs()
-                        ),
-                    }
-                    restart_at = Some(Instant::now() + delay);
-                }
-                Restart::StopThenAfter(delay) => {
-                    warn!(
-                        "the sync service went offline before the room list responded; \
-                         restarting it in {} s",
-                        delay.as_secs()
-                    );
-                    sync.stop().await;
-                    restart_at = Some(Instant::now() + delay);
-                }
-            }
-        }
-        tokio::select! {
-            changed = service.next() => match changed {
-                Some(_) => service_changed = true,
-                None => return,
-            },
-            changed = room_list_state.next() => if changed.is_none() { return },
-            () = sleep_until(restart_at.unwrap_or_else(Instant::now)), if restart_at.is_some() => {
-                restart_at = None;
-                sync.start().await;
-            }
-        }
-    }
-}
-
-/// `Synced` only once the room list has had a response since the sync
-/// service (re)started: the service reports `Running` as soon as it starts.
-fn sync_state(
-    service: &sync_service::State,
-    room_list: &room_list_service::State,
-    previous: SyncState,
-) -> SyncState {
-    let responded = matches!(
-        room_list,
-        room_list_service::State::SettingUp
-            | room_list_service::State::Recovering
-            | room_list_service::State::Running
-    );
-    match service {
-        sync_service::State::Running if responded => SyncState::Synced,
-        sync_service::State::Running => match previous {
-            SyncState::Starting => SyncState::Starting,
-            SyncState::Synced | SyncState::Offline | SyncState::Retrying => SyncState::Retrying,
-        },
-        sync_service::State::Offline => SyncState::Offline,
-        sync_service::State::Error(_) | sync_service::State::Terminated => SyncState::Retrying,
-        // Before the first start, after `Matrix::stop`, or while
-        // `watch_sync` waits to restart the service.
-        sync_service::State::Idle => previous,
-    }
-}
-
-/// When `watch_sync` restarts the sync service: after `Error` or
-/// `Terminated`, and after `Offline` when the room list has not responded
-/// since the service last stopped or went offline.
-///
-/// With offline mode, the SDK leaves `Offline` on its own once `/versions`
-/// answers, and starts the syncs again at once. That recovers from an
-/// unreachable homeserver. But a sync that fails while the homeserver answers
-/// (an error response, or a response the SDK cannot read) would fail and
-/// start again in a tight loop, so mxt stops the service and backs off.
-struct Restarts {
-    /// 1 s, doubling, at most 60 s; reset by a room list response.
-    backoff: Backoff,
-    /// Whether the room list has responded since the service last stopped or
-    /// went offline.
-    responded: bool,
-}
-
-/// What `watch_sync` does after the sync service's state changed.
-#[derive(Debug, PartialEq, Eq)]
-enum Restart {
-    /// No restart: the service runs, or the SDK resumes it from offline mode.
-    None,
-    /// A scheduled restart stays: the service is idle because `watch_sync`
-    /// stopped it (or it has not been started yet).
-    Keep,
-    /// Start the service after the delay.
-    After(Duration),
-    /// Stop the service (it leaves offline mode), then start it after the
-    /// delay.
-    StopThenAfter(Duration),
-}
-
-impl Restarts {
-    fn new() -> Restarts {
-        Restarts {
-            backoff: Backoff::new(Duration::from_secs(1), Duration::from_secs(60)),
-            responded: false,
-        }
-    }
-
-    /// The room list has responded: the reported state is `Synced`.
-    fn responded(&mut self) {
-        self.backoff.reset();
-        self.responded = true;
-    }
-
-    fn service_changed(&mut self, state: &sync_service::State) -> Restart {
-        match state {
-            sync_service::State::Running => Restart::None,
-            sync_service::State::Idle => Restart::Keep,
-            sync_service::State::Offline => {
-                if std::mem::take(&mut self.responded) {
-                    Restart::None
-                } else {
-                    Restart::StopThenAfter(self.backoff.next_delay())
-                }
-            }
-            sync_service::State::Error(_) | sync_service::State::Terminated => {
-                self.responded = false;
-                Restart::After(self.backoff.next_delay())
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn error() -> sync_service::State {
-        sync_service::State::Error(Arc::new(sync_service::Error::Supervisor))
-    }
-
-    #[test]
-    fn synced_needs_a_room_list_response_after_the_start() {
-        use room_list_service::State as List;
-        use sync_service::State as Service;
-        let starting = SyncState::Starting;
-        assert_eq!(
-            sync_state(&Service::Idle, &List::Init, starting),
-            SyncState::Starting
-        );
-        assert_eq!(
-            sync_state(&Service::Running, &List::Init, starting),
-            SyncState::Starting
-        );
-        assert_eq!(
-            sync_state(&Service::Running, &List::SettingUp, starting),
-            SyncState::Synced
-        );
-        assert_eq!(
-            sync_state(&Service::Offline, &List::Running, SyncState::Synced),
-            SyncState::Offline
-        );
-        // Back from offline mode, before the next response.
-        let failed = List::Error {
-            from: Box::new(List::Running),
-        };
-        assert_eq!(
-            sync_state(&Service::Running, &failed, SyncState::Offline),
-            SyncState::Retrying
-        );
-        assert_eq!(
-            sync_state(&error(), &failed, SyncState::Synced),
-            SyncState::Retrying
-        );
-        assert_eq!(
-            sync_state(&Service::Running, &List::Recovering, SyncState::Retrying),
-            SyncState::Synced
-        );
-    }
-
-    #[test]
-    fn offline_mode_resumes_only_after_a_room_list_response() {
-        use sync_service::State as Service;
-        let mut restarts = Restarts::new();
-        let second = Duration::from_secs(1);
-        // No response since the start.
-        assert_eq!(restarts.service_changed(&Service::Running), Restart::None);
-        assert_eq!(
-            restarts.service_changed(&Service::Offline),
-            Restart::StopThenAfter(second)
-        );
-        assert_eq!(restarts.service_changed(&Service::Idle), Restart::Keep);
-        assert_eq!(restarts.service_changed(&Service::Running), Restart::None);
-        restarts.responded();
-        // The SDK waits for `/versions` and resumes.
-        assert_eq!(restarts.service_changed(&Service::Offline), Restart::None);
-        assert_eq!(restarts.service_changed(&Service::Running), Restart::None);
-        // That restart got no response: back off, doubling.
-        assert_eq!(
-            restarts.service_changed(&Service::Offline),
-            Restart::StopThenAfter(second)
-        );
-        assert_eq!(restarts.service_changed(&Service::Running), Restart::None);
-        assert_eq!(
-            restarts.service_changed(&Service::Offline),
-            Restart::StopThenAfter(2 * second)
-        );
-    }
-
-    #[test]
-    fn errors_restart_with_a_backoff_that_a_response_resets() {
-        use sync_service::State as Service;
-        let mut restarts = Restarts::new();
-        let second = Duration::from_secs(1);
-        restarts.responded();
-        assert_eq!(restarts.service_changed(&error()), Restart::After(second));
-        assert_eq!(restarts.service_changed(&Service::Running), Restart::None);
-        assert_eq!(
-            restarts.service_changed(&Service::Terminated),
-            Restart::After(2 * second)
-        );
-        // The error ended the response from before it.
-        assert_eq!(
-            restarts.service_changed(&Service::Offline),
-            Restart::StopThenAfter(4 * second)
-        );
-        restarts.responded();
-        assert_eq!(restarts.service_changed(&error()), Restart::After(second));
-    }
 }

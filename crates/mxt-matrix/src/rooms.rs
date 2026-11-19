@@ -1,27 +1,13 @@
-//! The room list: the SDK's room stream, the facts mxt reads per room, and
-//! the summaries the core receives.
+//! The room list: the joined rooms, the facts mxt reads per room, and the
+//! summaries the core receives.
 
-use std::{
-    collections::{HashMap, HashSet},
-    pin::pin,
-};
+use std::collections::{HashMap, HashSet};
 
-use futures_util::StreamExt as _;
 use matrix_sdk::{
     Client, Room, RoomDisplayName, RoomState,
     deserialized_responses::SyncOrStrippedState,
     notification_settings::{NotificationSettings, RoomNotificationMode},
     ruma::{self, OwnedRoomId, events::space::parent::SpaceParentEventContent},
-};
-use matrix_sdk_ui::{
-    eyeball_im::{Vector, VectorDiff},
-    room_list_service::{
-        RoomList, RoomListItem,
-        filters::{
-            BoxedFilterFn, new_filter_all, new_filter_deduplicate_versions, new_filter_joined,
-            new_filter_not, new_filter_space,
-        },
-    },
 };
 use mxt_core::{
     ids::{RoomId, Timestamp},
@@ -31,12 +17,15 @@ use mxt_core::{
     },
 };
 use tokio::sync::{
-    broadcast::error::RecvError,
-    mpsc::{UnboundedReceiver, UnboundedSender},
+    broadcast::{
+        self,
+        error::{RecvError, TryRecvError},
+    },
+    mpsc::UnboundedSender,
 };
 use tracing::{debug, info, warn};
 
-use crate::{Error, bridges::BridgeStates};
+use crate::{Error, bridges::bridge_info, sync::SyncedRooms};
 
 /// What mxt reads from the SDK about one room.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,64 +75,77 @@ pub(crate) fn summary(facts: &RoomFacts) -> RoomSummary {
     }
 }
 
-/// Turns the SDK's room list into `Msg::RoomUpserted` and `Msg::RoomRemoved`:
-/// the room stream's diffs, notification settings changes, changes of parent
-/// spaces, and bridge state from `bridges`.
-pub(crate) async fn run(
-    room_list: RoomList,
-    mut rooms: Rooms,
-    mut bridges: UnboundedReceiver<BridgeStates>,
-) {
-    // One page that holds every room: the SDK's paging only limits what a
-    // screen shows.
-    let (stream, controller) = room_list.entries_with_dynamic_adapters(usize::MAX);
-    controller.set_filter(listed_rooms_filter());
-    let mut stream = pin!(stream);
+/// Turns the joined rooms into `Msg::RoomUpserted` and `Msg::RoomRemoved`:
+/// every room at the start, then the rooms of each sync response
+/// (`responses`), room info updates (read receipts and unread counts change
+/// through them), notification settings changes, and changes of parent
+/// spaces.
+pub(crate) async fn run(mut rooms: Rooms, mut responses: broadcast::Receiver<SyncedRooms>) {
     let mut settings_changes = rooms.settings.subscribe_to_changes();
     let mut room_updates = rooms.client.room_info_notable_update_receiver();
-    let mut bridges_open = true;
+    // After subscribing, so that no change is missed.
+    rooms.reload().await;
     loop {
         tokio::select! {
-            batch = stream.next() => match batch {
-                Some(batch) => rooms.apply(batch).await,
-                None => break,
+            response = responses.recv() => match response {
+                Ok(updated) => rooms.check(updated.iter().cloned()).await,
+                Err(RecvError::Lagged(missed)) => {
+                    info!("missed the rooms of {missed} sync responses; re-reading every room");
+                    rooms.reload().await;
+                }
+                Err(RecvError::Closed) => break,
             },
             change = settings_changes.recv() => match change {
                 Ok(()) | Err(RecvError::Lagged(_)) => rooms.refresh_modes().await,
                 Err(RecvError::Closed) => break,
             },
-            // Listed rooms reach the stream as `Set` diffs; here only their
-            // parent spaces matter.
-            update = room_updates.recv() => match update {
-                Ok(update) => rooms.refresh_children(&update.room_id).await,
-                // The stream's own receiver of these updates is drained in
-                // this task too, so it has most likely lagged as well, and it
-                // drops what it missed: listed rooms would keep stale facts
-                // and the SDK's filter stale room states. Setting the filter
-                // again rebuilds the list from fresh rooms and yields a
-                // `Reset`, which re-reads every listed room.
+            updates = next_updates(&mut room_updates, |update| update.room_id) => match updates {
+                Ok(updated) => rooms.updated(updated).await,
                 Err(RecvError::Lagged(missed)) => {
-                    info!("missed {missed} room info updates; rebuilding the room list");
-                    controller.set_filter(listed_rooms_filter());
+                    info!("missed {missed} room info updates; re-reading every room");
+                    rooms.reload().await;
                 }
                 Err(RecvError::Closed) => break,
-            },
-            states = bridges.recv(), if bridges_open => match states {
-                Some(states) => rooms.apply_bridges(states),
-                None => bridges_open = false,
             },
         }
     }
 }
 
+/// Waits for the next update, then returns its room and the rooms of the
+/// updates queued behind it, each once: the SDK sends several updates per
+/// room for one sync response. Cancel safe.
+async fn next_updates<T: Clone>(
+    updates: &mut broadcast::Receiver<T>,
+    room_id: fn(T) -> OwnedRoomId,
+) -> Result<HashSet<OwnedRoomId>, RecvError> {
+    let mut rooms = HashSet::from([room_id(updates.recv().await?)]);
+    loop {
+        match updates.try_recv() {
+            Ok(update) => {
+                rooms.insert(room_id(update));
+            }
+            Err(TryRecvError::Lagged(missed)) => return Err(RecvError::Lagged(missed)),
+            // The next `recv` reports a closed channel.
+            Err(TryRecvError::Empty | TryRecvError::Closed) => return Ok(rooms),
+        }
+    }
+}
+
 /// Joined rooms that are not spaces, only the active version of an upgraded
-/// room.
-fn listed_rooms_filter() -> BoxedFilterFn {
-    Box::new(new_filter_all(vec![
-        Box::new(new_filter_joined()),
-        Box::new(new_filter_not(Box::new(new_filter_space()))),
-        Box::new(new_filter_deduplicate_versions()),
-    ]))
+/// room: as in matrix-sdk-ui's room list, a room whose successor the user
+/// has joined, left or been banned from is not listed.
+fn is_listed(client: &Client, room: &Room) -> bool {
+    room.state() == RoomState::Joined
+        && !room.is_space()
+        && room
+            .successor_room()
+            .and_then(|successor| client.get_room(&successor.room_id))
+            .is_none_or(|successor| {
+                !matches!(
+                    successor.state(),
+                    RoomState::Joined | RoomState::Left | RoomState::Banned
+                )
+            })
 }
 
 /// The room list state of `run`.
@@ -153,16 +155,10 @@ pub(crate) struct Rooms {
     /// Send errors are ignored: a closed channel means the core is gone and
     /// mxt is exiting.
     to_core: UnboundedSender<Msg>,
-    /// Rooms that appear in the list, for their bridge state.
-    to_bridges: UnboundedSender<Vec<OwnedRoomId>>,
-    /// The listed room IDs in the stream's order, to apply its diffs.
-    order: Vector<OwnedRoomId>,
     /// The rooms the core has, with their facts.
     listed: HashMap<OwnedRoomId, Listed>,
     /// The listed rooms per parent space (every `m.space.parent`, joined or not).
     spaces: Spaces,
-    /// Bridge state per room as far as known; an inner `None` means no bridge.
-    bridges: HashMap<OwnedRoomId, Option<BridgeInfo>>,
 }
 
 struct Listed {
@@ -175,50 +171,70 @@ impl Rooms {
         client: Client,
         settings: NotificationSettings,
         to_core: UnboundedSender<Msg>,
-        to_bridges: UnboundedSender<Vec<OwnedRoomId>>,
     ) -> Rooms {
         Rooms {
             client,
             settings,
             to_core,
-            to_bridges,
-            order: Vector::new(),
             listed: HashMap::new(),
             spaces: Spaces::default(),
-            bridges: HashMap::new(),
         }
     }
 
-    async fn apply(&mut self, batch: Vec<VectorDiff<RoomListItem>>) {
-        let changes = apply_batch(&mut self.order, batch, |item| item.room_id().to_owned());
+    /// Re-reads every joined room, and removes the listed rooms that are not
+    /// listed any more.
+    async fn reload(&mut self) {
+        let mut rooms: Vec<OwnedRoomId> = self
+            .client
+            .joined_rooms()
+            .iter()
+            .map(|room| room.room_id().to_owned())
+            .collect();
+        rooms.extend(self.listed.keys().cloned());
+        self.check(rooms).await;
+    }
+
+    /// After room info updates: the updated rooms, and the rooms that name an
+    /// updated room as a parent space.
+    async fn updated(&mut self, rooms: HashSet<OwnedRoomId>) {
+        for room in &rooms {
+            self.refresh_children(room).await;
+        }
+        self.check(rooms).await;
+    }
+
+    /// Upserts or removes each room of `updated` and the room it replaced,
+    /// see `changes`.
+    async fn check(&mut self, updated: impl IntoIterator<Item = OwnedRoomId>) {
+        let (client, listed) = (&self.client, &self.listed);
+        let changes = changes(
+            updated,
+            |room| Some(client.get_room(room)?.predecessor_room()?.room_id),
+            |room| {
+                client
+                    .get_room(room)
+                    .is_some_and(|room| is_listed(client, &room))
+            },
+            |room| listed.contains_key(room),
+        );
         for room in changes.removed {
-            if self.forget(&room) {
-                debug!(%room, "room left the list");
-                let _ = self
-                    .to_core
-                    .send(Msg::RoomRemoved(RoomId::new(room.as_str())));
-            }
+            self.forget(&room);
+            debug!(%room, "room left the list");
+            let _ = self
+                .to_core
+                .send(Msg::RoomRemoved(RoomId::new(room.as_str())));
         }
-        let mut new_rooms = Vec::new();
-        for item in changes.upserted {
-            let room = item.into_inner();
-            if !self.listed.contains_key(room.room_id())
-                && !self.bridges.contains_key(room.room_id())
-            {
-                new_rooms.push(room.room_id().to_owned());
+        for room in changes.upserted {
+            if let Some(room) = self.client.get_room(&room) {
+                self.refresh(&room).await;
             }
-            self.refresh(&room).await;
-        }
-        if !new_rooms.is_empty() {
-            let _ = self.to_bridges.send(new_rooms);
         }
     }
 
     /// Reads the room's facts and sends its summary when they changed.
     async fn refresh(&mut self, room: &Room) {
         let id = room.room_id().to_owned();
-        let bridge = self.bridges.get(&id).cloned().flatten();
-        let (facts, parents) = match room_facts(&self.client, &self.settings, room, bridge).await {
+        let (facts, parents) = match room_facts(&self.client, &self.settings, room).await {
             Ok(facts) => facts,
             Err(error) => {
                 warn!("reading a room for the room list failed: {}", error.brief());
@@ -247,15 +263,12 @@ impl Rooms {
         );
     }
 
-    /// Whether the room was listed.
-    fn forget(&mut self, room: &ruma::RoomId) -> bool {
-        let Some(listed) = self.listed.remove(room) else {
-            return false;
-        };
-        for parent in &listed.parents {
-            self.spaces.remove_child(parent, room);
+    fn forget(&mut self, room: &ruma::RoomId) {
+        if let Some(listed) = self.listed.remove(room) {
+            for parent in &listed.parents {
+                self.spaces.remove_child(parent, room);
+            }
         }
-        true
     }
 
     async fn refresh_modes(&mut self) {
@@ -286,19 +299,6 @@ impl Rooms {
             if let Some(child) = self.client.get_room(&child) {
                 self.refresh(&child).await;
             }
-        }
-    }
-
-    fn apply_bridges(&mut self, states: BridgeStates) {
-        for (room, bridge) in states {
-            if let Some(listed) = self.listed.get_mut(&room)
-                && listed.facts.bridge != bridge
-            {
-                debug!(%room, ?bridge, "bridge state");
-                listed.facts.bridge = bridge.clone();
-                let _ = self.to_core.send(Msg::RoomUpserted(summary(&listed.facts)));
-            }
-            self.bridges.insert(room, bridge);
         }
     }
 }
@@ -357,72 +357,48 @@ impl Spaces {
     }
 }
 
-/// What a batch of room list diffs changed.
-#[derive(Debug, PartialEq, Eq)]
-struct BatchChanges<T> {
-    /// Rooms that were listed before the batch and are not after it.
+/// What re-reading some rooms changes in the list.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Changes {
+    /// Rooms to read, and to send when their facts changed.
+    upserted: Vec<OwnedRoomId>,
+    /// Listed rooms that are not listed any more.
     removed: Vec<OwnedRoomId>,
-    /// Rooms the batch inserted, set or reset that are listed after it, once
-    /// each with their latest value.
-    upserted: Vec<T>,
 }
 
-/// Applies `batch` to `order`. A room that moves (a `Remove` and an `Insert`
-/// in one batch) is upserted, not removed.
-fn apply_batch<T: Clone>(
-    order: &mut Vector<OwnedRoomId>,
-    batch: Vec<VectorDiff<T>>,
-    id: impl Fn(&T) -> OwnedRoomId,
-) -> BatchChanges<T> {
-    let mut gone = Vec::new();
-    let mut touched = Vec::new();
-    for diff in batch {
-        match &diff {
-            VectorDiff::Append { values } => touched.extend(values.iter().cloned()),
-            VectorDiff::Reset { values } => {
-                gone.extend(order.iter().cloned());
-                touched.extend(values.iter().cloned());
-            }
-            VectorDiff::Clear => gone.extend(order.iter().cloned()),
-            VectorDiff::PushFront { value } | VectorDiff::PushBack { value } => {
-                touched.push(value.clone());
-            }
-            VectorDiff::Insert { value, .. } => touched.push(value.clone()),
-            VectorDiff::Set { index, value } => {
-                gone.extend(order.get(*index).cloned());
-                touched.push(value.clone());
-            }
-            VectorDiff::PopFront => gone.extend(order.front().cloned()),
-            VectorDiff::PopBack => gone.extend(order.back().cloned()),
-            VectorDiff::Remove { index } => gone.extend(order.get(*index).cloned()),
-            VectorDiff::Truncate { length } => gone.extend(order.iter().skip(*length).cloned()),
-        }
-        diff.map(|value| id(&value)).apply(order);
-    }
-    let listed: HashSet<&OwnedRoomId> = order.iter().collect();
+/// The rooms of `updated` (the joined and left rooms of a sync response, or
+/// the rooms of room info updates), each once, and the room each of them
+/// replaced, because whether an upgraded room is listed depends on its
+/// successor (see `is_listed`). Every room that is `listable` is upserted;
+/// the others are removed when they are `listed`.
+fn changes(
+    updated: impl IntoIterator<Item = OwnedRoomId>,
+    predecessor: impl Fn(&ruma::RoomId) -> Option<OwnedRoomId>,
+    listable: impl Fn(&ruma::RoomId) -> bool,
+    listed: impl Fn(&ruma::RoomId) -> bool,
+) -> Changes {
     let mut seen = HashSet::new();
-    let removed = gone
-        .into_iter()
-        .filter(|room| !listed.contains(room) && seen.insert(room.clone()))
-        .collect();
-    seen.clear();
-    let mut upserted: Vec<T> = touched
-        .into_iter()
-        .rev()
-        .filter(|value| {
-            let room = id(value);
-            listed.contains(&room) && seen.insert(room)
-        })
-        .collect();
-    upserted.reverse();
-    BatchChanges { removed, upserted }
+    let mut changes = Changes::default();
+    for room in updated {
+        let replaced = predecessor(&room);
+        for room in std::iter::once(room).chain(replaced) {
+            if !seen.insert(room.clone()) {
+                continue;
+            }
+            if listable(&room) {
+                changes.upserted.push(room);
+            } else if listed(&room) {
+                changes.removed.push(room);
+            }
+        }
+    }
+    changes
 }
 
 async fn room_facts(
     client: &Client,
     settings: &NotificationSettings,
     room: &Room,
-    bridge: Option<BridgeInfo>,
 ) -> Result<(RoomFacts, Vec<Parent>), Error> {
     let is_direct = room.is_direct().await?;
     let dm_partner_name = if is_direct {
@@ -446,7 +422,7 @@ async fn room_facts(
         latest: room
             .latest_event_timestamp()
             .map(|ts| Timestamp::from_millis(ts.0.into())),
-        bridge,
+        bridge: bridge_info(room).await?,
         canonical_parent_name: parents
             .iter()
             .find(|parent| parent.canonical && parent.name.is_some())
@@ -657,59 +633,44 @@ mod tests {
         );
     }
 
-    /// Rooms in the mirror as `(room ID, version)`, so a `Set` is visible.
-    fn apply(
-        order: &mut Vector<OwnedRoomId>,
-        batch: Vec<VectorDiff<(OwnedRoomId, u32)>>,
-    ) -> BatchChanges<(OwnedRoomId, u32)> {
-        apply_batch(order, batch, |(room, _)| room.clone())
-    }
-
     #[test]
-    fn a_moved_room_is_upserted_and_a_dropped_one_removed() {
-        let (a, b, c) = (
-            owned_room_id!("!a:example.org"),
-            owned_room_id!("!b:example.org"),
-            owned_room_id!("!c:example.org"),
+    fn updated_rooms_are_listed_or_removed_with_the_rooms_they_replaced() {
+        let (kept, joined, left, space, stranger, old, new) = (
+            owned_room_id!("!kept:example.org"),
+            owned_room_id!("!joined:example.org"),
+            owned_room_id!("!left:example.org"),
+            owned_room_id!("!space:example.org"),
+            owned_room_id!("!stranger:example.org"),
+            owned_room_id!("!old:example.org"),
+            owned_room_id!("!new:example.org"),
         );
-        let mut order = Vector::new();
-        let changes = apply(
-            &mut order,
-            vec![VectorDiff::Reset {
-                values: Vector::from(vec![(a.clone(), 1), (b.clone(), 1), (c.clone(), 1)]),
-            }],
-        );
-        assert!(changes.removed.is_empty());
-        assert_eq!(changes.upserted.len(), 3);
-
-        // `c` moves to the front with new data, then is set again; `b` goes.
-        let changes = apply(
-            &mut order,
-            vec![
-                VectorDiff::Remove { index: 2 },
-                VectorDiff::Insert {
-                    index: 0,
-                    value: (c.clone(), 2),
-                },
-                VectorDiff::Set {
-                    index: 0,
-                    value: (c.clone(), 3),
-                },
-                VectorDiff::Remove { index: 2 },
+        let listed = HashSet::from([kept.clone(), left.clone(), old.clone()]);
+        // After the response: the user joined `joined` and `new`, which
+        // replaces `old`, and left `left` and `stranger`, which was never
+        // listed; `space` is a space.
+        let listable = HashSet::from([kept.clone(), joined.clone(), new.clone()]);
+        let predecessors = HashMap::from([(new.clone(), old.clone())]);
+        let changes = changes(
+            [
+                joined.clone(),
+                kept.clone(),
+                left.clone(),
+                space,
+                new.clone(),
+                joined.clone(),
+                stranger,
             ],
+            |room| predecessors.get(room).cloned(),
+            |room| listable.contains(room),
+            |room| listed.contains(room),
         );
-        assert_eq!(changes.removed, vec![b]);
-        assert_eq!(changes.upserted, vec![(c.clone(), 3)]);
-        assert_eq!(order, Vector::from(vec![c.clone(), a.clone()]));
-
-        let changes = apply(
-            &mut order,
-            vec![VectorDiff::Reset {
-                values: Vector::from(vec![(a.clone(), 2)]),
-            }],
+        assert_eq!(
+            changes,
+            Changes {
+                upserted: vec![joined, kept, new],
+                removed: vec![left, old],
+            }
         );
-        assert_eq!(changes.removed, vec![c]);
-        assert_eq!(changes.upserted, vec![(a, 2)]);
     }
 
     #[test]
