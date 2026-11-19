@@ -1,8 +1,37 @@
 //! The open room's timeline as plain data: entries, their items and content,
 //! and the diffs the matrix adapter forwards from the SDK.
 
+use std::fmt;
+use std::sync::Arc;
+
 use crate::ids::{EventId, Timestamp, TxnId, UserId};
 use crate::rich::RichText;
+
+/// The bytes of an image or file, routed from the matrix adapter to the tui
+/// adapter (design, "Functional core"). The core never decodes them, and
+/// clones share them.
+#[derive(Clone, PartialEq, Eq)]
+pub struct MediaBytes(Arc<[u8]>);
+
+impl MediaBytes {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<Vec<u8>> for MediaBytes {
+    fn from(bytes: Vec<u8>) -> MediaBytes {
+        MediaBytes(bytes.into())
+    }
+}
+
+/// Only the length: media can be megabytes, which would bury the rest of a
+/// message or effect in its debug output and in test failures.
+impl fmt::Debug for MediaBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "MediaBytes({} bytes)", self.0.len())
+    }
+}
 
 /// A timeline item: a local echo before the server assigns an event ID, or a
 /// remote event. Mirrors the SDK's `TimelineEventItemId`.
@@ -339,5 +368,12 @@ mod tests {
             assert_eq!(own.as_ref().map(OwnEvent::item), Some(&id));
             assert_eq!(OwnEvent::new(&item(id, "@bob:example.org"), &me), None);
         }
+    }
+
+    #[test]
+    fn media_bytes_debug_shows_the_length_but_not_the_bytes() {
+        let bytes = MediaBytes::from(b"secret".to_vec());
+        assert_eq!(format!("{bytes:?}"), "MediaBytes(6 bytes)");
+        assert_eq!(bytes.as_bytes(), b"secret");
     }
 }

@@ -5,7 +5,7 @@ use crate::ids::{EventId, RoomId, TxnId};
 use crate::keys::Key;
 use crate::mention::RenderedBody;
 use crate::resolver::TimerId;
-use crate::timeline::ItemRef;
+use crate::timeline::{ItemRef, MediaBytes};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
@@ -75,6 +75,29 @@ pub enum MatrixEffect {
         room: RoomId,
         txn: TxnId,
     },
+    /// Mute the room, or remove its room rule so the account default applies
+    /// again (design, "Mute"). The room's mode changes when the SDK reports it.
+    SetMute {
+        room: RoomId,
+        muted: bool,
+    },
+    /// Save the item's image or file in the download directory; answered with
+    /// `Msg::Downloaded`.
+    Download {
+        room: RoomId,
+        item: ItemRef,
+    },
+    /// Send the file at `path` as an image or file message.
+    Upload {
+        room: RoomId,
+        path: String,
+    },
+    /// The item's image for the message view; answered with
+    /// `Msg::ImageFetched` or `Msg::ImageUnavailable`.
+    FetchImage {
+        room: RoomId,
+        item: ItemRef,
+    },
 }
 
 /// What the message view shows.
@@ -82,6 +105,14 @@ pub enum MatrixEffect {
 pub enum ViewContent {
     /// The message's text for the scratch editor.
     Text(String),
+    /// An image message: its name, size and dimensions, and the image once
+    /// `UiEffect::ShowImage` brings it.
+    Image {
+        item: ItemRef,
+        name: String,
+        size: Option<u64>,
+        dimensions: Option<(u32, u32)>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,6 +128,15 @@ pub enum UiEffect {
     OpenView(ViewContent),
     /// Close the message view; edits in its editor are discarded.
     CloseView,
+    /// The image of `item` for the open message view, which shows that item.
+    ShowImage {
+        item: ItemRef,
+        bytes: MediaBytes,
+    },
+    /// Run `files.opener` with the path of a downloaded file appended.
+    OpenPath(String),
+    /// Run `files.opener` with the URL appended.
+    OpenUrl(String),
     /// Copy to the clipboard (OSC 52) and the shared register.
     Yank(String),
     /// The room's composer gets the keys, in insert mode unless `mode` is `Keep`.

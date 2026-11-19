@@ -6,8 +6,11 @@ use super::{App, Focus, Motion, StatusKind};
 use crate::effect::{Effect, MatrixEffect};
 use crate::ids::RoomId;
 use crate::msg::Pane;
-use crate::room::RoomSummary;
+use crate::room::{NotificationMode, RoomSummary};
 use crate::rooms::{RoomTarget, resolve_room};
+
+/// When no room matches a target or the picker's query.
+pub(super) const NO_MATCHING_ROOM: &str = "No matching room";
 
 impl App {
     /// The cursor stays on its room when the order changes.
@@ -61,11 +64,17 @@ impl App {
     }
 
     pub(super) fn open_target(&mut self, target: &RoomTarget, effects: &mut Vec<Effect>) {
-        let found = resolve_room(&self.rooms, self.open_room.as_ref(), target)
-            .and_then(|id| self.rooms.position(&id));
-        match found {
+        match resolve_room(&self.rooms, self.open_room.as_ref(), target) {
+            Some(id) => self.open_id(&id, effects),
+            None => self.set_status(StatusKind::Error, NO_MATCHING_ROOM),
+        }
+    }
+
+    /// Opens the room with `id` as `room.open` does.
+    pub(super) fn open_id(&mut self, id: &RoomId, effects: &mut Vec<Effect>) {
+        match self.rooms.position(id) {
             Some(index) => self.open_at(index, effects),
-            None => self.set_status(StatusKind::Error, "No matching room"),
+            None => self.set_status(StatusKind::Error, NO_MATCHING_ROOM),
         }
     }
 
@@ -86,21 +95,47 @@ impl App {
         self.focus = Focus::Timeline;
     }
 
-    /// `room.mark_read` on the room under the cursor when the room list has
-    /// focus, otherwise on the open room. Its counts are cleared at once
-    /// (design, "Optimistic clearing"), so a following action sees it read.
+    /// The room that `room.mark_read`, `room.mute` and `room.unmute` act on:
+    /// the room under the cursor when the room list has focus, otherwise the
+    /// open room.
+    fn target_room(&self) -> Option<&RoomSummary> {
+        match self.focus {
+            Focus::RoomList => self.room_cursor().map(|index| &self.rooms.rooms()[index]),
+            Focus::Timeline | Focus::Composer => {
+                self.open_room.as_ref().and_then(|id| self.rooms.get(id))
+            }
+        }
+    }
+
+    /// `room.mark_read`. The room's counts are cleared at once (design,
+    /// "Optimistic clearing"), so a following action sees it read.
     pub(super) fn mark_read(&mut self, effects: &mut Vec<Effect>) {
-        let target = match self.focus {
-            Focus::RoomList => self
-                .room_cursor()
-                .map(|index| self.rooms.rooms()[index].id.clone()),
-            Focus::Timeline | Focus::Composer => self.open_room.clone(),
-        };
-        let Some(id) = target else {
+        let Some(id) = self.target_room().map(|room| room.id.clone()) else {
             return self.set_status(StatusKind::Error, "No room");
         };
         self.rooms.clear_unread(&id);
         effects.push(Effect::Matrix(MatrixEffect::MarkRoomRead(id)));
+    }
+
+    /// `room.mute` / `room.unmute`. The room's mode label changes when the
+    /// SDK reports the new mode. Unmuting removes the room's rule, so
+    /// `room.unmute` on a room that is not muted does nothing: a "Mentions
+    /// only" rule set elsewhere stays.
+    pub(super) fn set_mute(&mut self, muted: bool, effects: &mut Vec<Effect>) {
+        let Some(room) = self.target_room() else {
+            return self.set_status(StatusKind::Error, "No room");
+        };
+        if !muted && room.mode != NotificationMode::Mute {
+            let status = format!("{} is not muted", room.name);
+            return self.set_status(StatusKind::Error, status);
+        }
+        let verb = if muted { "Muted" } else { "Unmuted" };
+        let status = format!("{verb} {}", room.name);
+        effects.push(Effect::Matrix(MatrixEffect::SetMute {
+            room: room.id.clone(),
+            muted,
+        }));
+        self.set_status(StatusKind::Info, status);
     }
 }
 

@@ -201,7 +201,8 @@ impl Tui {
     /// - `ReplayKeys` goes to the message view's editor while it is open,
     ///   otherwise to the composer that last got the focus.
     /// - `OpenView` replaces the message view and `CloseView` drops it with
-    ///   its edits.
+    ///   its edits. `ShowImage`, `OpenPath` and `OpenUrl` are ignored until
+    ///   phase 4 Task 3.
     /// - `Yank` copies into the register, and the next draw sends it to the
     ///   terminal clipboard.
     /// - `FocusComposer` creates the room's composer on first focus.
@@ -230,9 +231,13 @@ impl Tui {
                     composer.replay(&keys, &mut msgs);
                 }
             }
-            UiEffect::OpenView(ViewContent::Text(text)) => {
+            // Until phase 4 Task 3 draws images, an image's view shows its
+            // name, as the text view did before.
+            UiEffect::OpenView(ViewContent::Text(text) | ViewContent::Image { name: text, .. }) => {
                 self.view = Some(Editor::new(&text, self.register.clone()));
             }
+            // Running the opener and drawing images arrive in phase 4 Task 3.
+            UiEffect::ShowImage { .. } | UiEffect::OpenPath(_) | UiEffect::OpenUrl(_) => {}
             UiEffect::CloseView => self.view = None,
             UiEffect::Yank(text) => self.register.copy(text),
             UiEffect::FocusComposer { room, mode } => self.composers.focus(room, mode, &mut msgs),

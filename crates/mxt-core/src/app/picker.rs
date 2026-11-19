@@ -1,14 +1,19 @@
 //! Pickers: a query, its ranked items and a selection. The emoji picker
-//! toggles a reaction on a timeline item.
+//! toggles a reaction on a timeline item, the room picker opens a room, and
+//! the link picker opens a link of a timeline item.
 
 use std::collections::HashSet;
 
 use super::command_line::Edit;
+use super::rooms::NO_MATCHING_ROOM;
 use super::{App, StatusKind};
 use crate::effect::{Effect, MatrixEffect};
 use crate::emoji::{self, Emoji};
+use crate::fuzzy;
 use crate::ids::RoomId;
 use crate::keys::Key;
+use crate::room::{Badge, RoomSummary};
+use crate::rooms::{RoomFilter, RoomList};
 use crate::timeline::{ItemRef, MessageContent};
 
 /// The open picker (`PICKER` mode).
@@ -22,29 +27,85 @@ pub struct Picker {
     pub selected: usize,
 }
 
+impl Picker {
+    /// What the picker shows while it has no items.
+    pub fn empty_text(&self) -> &'static str {
+        match self.kind {
+            PickerKind::Rooms { .. } => NO_MATCHING_ROOM,
+            PickerKind::Emoji { .. } | PickerKind::Links => "No match",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PickerKind {
     /// A reaction on `item` of `room`.
     Emoji { room: RoomId, item: ItemRef },
+    /// A room that passes `filter`.
+    Rooms { filter: RoomFilter },
+    /// A link of the item under the cursor.
+    Links,
 }
 
+/// Items carry their key, so two rooms with the same displayed name are both
+/// reachable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PickerItem {
     pub label: String,
-    /// What accepting the item uses: the reaction key for emoji.
-    pub key: String,
+    /// The room's unread badge, drawn in its own style; `None` for read rooms
+    /// and for other pickers' items.
+    pub badge: Option<Badge>,
+    pub key: PickerKey,
+}
+
+/// What accepting an item uses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PickerKey {
+    /// The reaction key, for the emoji picker.
+    Reaction(String),
+    Room(RoomId),
+    Url(String),
 }
 
 /// The picker and what its items are ranked from.
 pub(super) struct OpenPicker {
     picker: Picker,
+    source: Source,
+}
+
+/// What a picker's items come from, besides its query.
+enum Source {
     /// The keys the user reacted with on the item.
-    reacted: Vec<String>,
+    Emoji { reacted: Vec<String> },
+    /// The rooms that pass the filter, as the room list is at each edit.
+    Rooms(RoomFilter),
+    /// The URLs of the item's links.
+    Links(Vec<String>),
+}
+
+impl Source {
+    fn items(&self, query: &str, rooms: &RoomList) -> Vec<PickerItem> {
+        match self {
+            Source::Emoji { reacted } => emoji_items(query, reacted),
+            Source::Rooms(filter) => room_items(rooms, *filter, query),
+            Source::Links(urls) => link_items(urls, query),
+        }
+    }
 }
 
 impl App {
     pub fn picker(&self) -> Option<&Picker> {
         self.picker.as_ref().map(|open| &open.picker)
+    }
+
+    fn open_picker(&mut self, kind: PickerKind, source: Source) {
+        let picker = Picker {
+            kind,
+            query: String::new(),
+            items: source.items("", &self.rooms),
+            selected: 0,
+        };
+        self.picker = Some(OpenPicker { picker, source });
     }
 
     /// `message.react`: the emoji picker for the item under the cursor,
@@ -62,16 +123,21 @@ impl App {
             .filter(|group| group.mine)
             .map(|group| group.key.clone())
             .collect();
-        let picker = Picker {
-            kind: PickerKind::Emoji {
-                room: room.clone(),
-                item: item.id.clone(),
-            },
-            query: String::new(),
-            items: emoji_items("", &reacted),
-            selected: 0,
+        let kind = PickerKind::Emoji {
+            room: room.clone(),
+            item: item.id.clone(),
         };
-        self.picker = Some(OpenPicker { picker, reacted });
+        self.open_picker(kind, Source::Emoji { reacted });
+    }
+
+    /// `picker.rooms`: the room picker over the rooms that pass `filter`.
+    pub(super) fn pick_room(&mut self, filter: RoomFilter) {
+        self.open_picker(PickerKind::Rooms { filter }, Source::Rooms(filter));
+    }
+
+    /// The link picker over `urls`, the links of the item under the cursor.
+    pub(super) fn pick_link(&mut self, urls: Vec<String>) {
+        self.open_picker(PickerKind::Links, Source::Links(urls));
     }
 
     /// A key released to the picker: edits the query and ranks the items
@@ -81,7 +147,7 @@ impl App {
             return;
         };
         if edit.apply(&mut open.picker.query) {
-            open.picker.items = emoji_items(&open.picker.query, &open.reacted);
+            open.picker.items = open.source.items(&open.picker.query, &self.rooms);
             open.picker.selected = 0;
         }
     }
@@ -101,28 +167,74 @@ impl App {
         }
     }
 
-    /// `picker.accept`: toggles the selected reaction and closes the picker;
-    /// without items it stays open.
+    /// `picker.accept`: closes the picker and toggles the selected reaction,
+    /// opens the selected room by its ID, or opens the selected link. Without
+    /// items it stays open.
     pub(super) fn accept_picker(&mut self, effects: &mut Vec<Effect>) {
-        let Some(open) = &self.picker else {
+        let Some(mut open) = self
+            .picker
+            .take_if(|open| open.picker.selected < open.picker.items.len())
+        else {
             return;
         };
-        let Some(selected) = open.picker.items.get(open.picker.selected) else {
-            return;
-        };
-        let PickerKind::Emoji { room, item } = &open.picker.kind;
-        effects.push(Effect::Matrix(MatrixEffect::ToggleReaction {
-            room: room.clone(),
-            item: item.clone(),
-            key: selected.key.clone(),
-        }));
-        self.picker = None;
+        let key = open.picker.items.swap_remove(open.picker.selected).key;
+        match key {
+            PickerKey::Reaction(key) => {
+                // Only the emoji picker has reaction items.
+                if let PickerKind::Emoji { room, item } = open.picker.kind {
+                    effects.push(Effect::Matrix(MatrixEffect::ToggleReaction {
+                        room,
+                        item,
+                        key,
+                    }));
+                }
+            }
+            PickerKey::Room(id) => self.open_id(&id, effects),
+            PickerKey::Url(url) => self.open_url(url, effects),
+        }
     }
 
     /// `picker.cancel`.
     pub(super) fn cancel_picker(&mut self) {
         self.picker = None;
     }
+}
+
+/// The rooms that pass `filter`, labelled with the displayed name, with their
+/// badges: in room list order for an empty query, otherwise ranked on the
+/// displayed name.
+fn room_items(rooms: &RoomList, filter: RoomFilter, query: &str) -> Vec<PickerItem> {
+    let passing: Vec<&RoomSummary> = rooms
+        .rooms()
+        .iter()
+        .filter(|room| filter.matches(&room.unread))
+        .collect();
+    let mut names: Vec<String> = passing.iter().map(|room| room.name.to_string()).collect();
+    fuzzy::rank(query, &names)
+        .into_iter()
+        .map(|index| {
+            let room = passing[index];
+            // Each index comes once.
+            PickerItem {
+                label: std::mem::take(&mut names[index]),
+                badge: Badge::from_counts(&room.unread),
+                key: PickerKey::Room(room.id.clone()),
+            }
+        })
+        .collect()
+}
+
+/// The URLs as their own labels: in order for an empty query, otherwise
+/// ranked.
+fn link_items(urls: &[String], query: &str) -> Vec<PickerItem> {
+    fuzzy::rank(query, urls)
+        .into_iter()
+        .map(|index| PickerItem {
+            label: urls[index].clone(),
+            badge: None,
+            key: PickerKey::Url(urls[index].clone()),
+        })
+        .collect()
 }
 
 /// The emoji for `query`. An empty query lists the user's reactions on the
@@ -139,7 +251,8 @@ fn emoji_items(query: &str, reacted: &[String]) -> Vec<PickerItem> {
     };
     let item = |emoji: Emoji| PickerItem {
         label: emoji.label(),
-        key: key(emoji),
+        badge: None,
+        key: PickerKey::Reaction(key(emoji)),
     };
     if !query.trim().is_empty() {
         return emoji::search(query).into_iter().map(item).collect();
@@ -154,7 +267,8 @@ fn emoji_items(query: &str, reacted: &[String]) -> Vec<PickerItem> {
             }
             PickerItem {
                 label: emoji.map_or_else(|| key.clone(), Emoji::label),
-                key: key.clone(),
+                badge: None,
+                key: PickerKey::Reaction(key.clone()),
             }
         })
         .collect();

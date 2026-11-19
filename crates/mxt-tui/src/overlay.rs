@@ -1,15 +1,15 @@
 //! Overlays over the panes (design, "Layout", "Mention completion"): the
-//! mention menu above the composer and the emoji picker.
+//! mention menu above the composer and the pickers.
 
-use mxt_core::app::{Picker, PickerKind};
+use mxt_core::app::{Picker, PickerItem, PickerKind};
 use mxt_core::mention::Member;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear};
 
-use crate::view::{DIM, PLAIN, draw_prompt_line, fit};
+use crate::view::{DIM, PLAIN, draw_prompt_line, fit, push_badge};
 
 /// The most candidates the mention menu shows at once.
 const MENU_ROWS: u16 = 8;
@@ -95,6 +95,8 @@ impl Overlays {
         );
         let title = match picker.kind {
             PickerKind::Emoji { .. } => " Reaction ",
+            PickerKind::Rooms { .. } => " Room ",
+            PickerKind::Links => " Link ",
         };
         let block = Block::bordered().border_style(DIM).title(title);
         let inner = block.inner(area);
@@ -107,7 +109,7 @@ impl Overlays {
         }
         draw_prompt_line(frame, query, "> ", &picker.query);
         if picker.items.is_empty() {
-            frame.render_widget(Line::styled("No match", DIM), list);
+            frame.render_widget(Line::styled(picker.empty_text(), DIM), list);
             return;
         }
         let rows = usize::from(list.height);
@@ -116,7 +118,7 @@ impl Overlays {
         for (y, (index, item)) in
             (list.y..).zip(picker.items.iter().enumerate().skip(self.picker).take(rows))
         {
-            let line = Line::from(fit(&[(item.label.as_str(), PLAIN)], width).0);
+            let line = picker_row(item, width);
             let line = if index == picker.selected {
                 line.style(SELECTED)
             } else {
@@ -134,6 +136,24 @@ impl Overlays {
     }
 }
 
+/// The item's label, cut to fit, and its badge right-aligned in the room
+/// list's badge style.
+fn picker_row(item: &PickerItem, width: usize) -> Line<'_> {
+    let label = (item.label.as_str(), PLAIN);
+    let Some(badge) = item.badge else {
+        return Line::from(fit(&[label], width).0);
+    };
+    let mut badge_spans = Vec::with_capacity(1);
+    let badge_width = push_badge(&mut badge_spans, badge, width);
+    // One column stays between the label and the badge.
+    let (mut spans, used) = fit(&[label], width.saturating_sub(badge_width + 1));
+    spans.push(Span::raw(
+        " ".repeat(width.saturating_sub(used + badge_width)),
+    ));
+    spans.extend(badge_spans);
+    Line::from(spans)
+}
+
 /// The first of `len` items shown in `rows` rows: `offset`, moved as little
 /// as keeps `selected` visible.
 fn scroll(offset: usize, selected: usize, len: usize, rows: usize) -> usize {
@@ -147,5 +167,39 @@ fn scroll(offset: usize, selected: usize, len: usize, rows: usize) -> usize {
         selected + 1 - rows
     } else {
         offset
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mxt_core::app::PickerKey;
+    use mxt_core::ids::RoomId;
+    use mxt_core::room::Badge;
+    use ratatui::style::Color;
+
+    use super::*;
+    use crate::view::BOLD;
+
+    fn text(line: &Line) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn a_room_item_shows_its_badge_right_aligned_in_the_badge_style() {
+        let item = PickerItem {
+            label: "Work / ping".into(),
+            badge: Some(Badge::Mentions(3)),
+            key: PickerKey::Room(RoomId::new("!ping:example.org")),
+        };
+        let line = picker_row(&item, 16);
+        assert_eq!(text(&line), "Work / ping   @3");
+        let badge = line.spans.last().unwrap();
+        assert_eq!(badge.content, "@3");
+        assert_eq!(badge.style, BOLD.fg(Color::Red));
+        // A narrow row cuts the label, not the badge.
+        assert_eq!(text(&picker_row(&item, 8)), "Work… @3");
     }
 }

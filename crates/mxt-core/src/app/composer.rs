@@ -1,6 +1,7 @@
 //! The composers: per-room drafts and mentions, sending, replies and edits,
 //! and the mention menu (design, "Terminal adapter and the composer").
 
+use super::timeline::NOT_SENT;
 use super::{App, Focus, StatusKind};
 use crate::action::FocusMode;
 use crate::effect::{Effect, MatrixEffect, Outgoing, OutgoingKind, UiEffect};
@@ -169,7 +170,7 @@ impl App {
             return;
         };
         let ItemRef::Remote(to) = &item.id else {
-            return self.set_status(StatusKind::Error, "Wait until the message is sent");
+            return self.set_status(StatusKind::Error, NOT_SENT);
         };
         if self
             .composers
