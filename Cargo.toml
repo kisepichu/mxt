@@ -64,6 +64,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # boundaries.
 unicode-segmentation = "1"
 
+# edtui from mxt's fork (design, "Nix flake"): the `mxt` branch of
+# kisepichu/edtui, which is 0.11.8 with the cursor and wrapping measured by
+# grapheme cluster and vim's character classes for word motions. Pinned to a
+# commit, tagged `mxt-<short hash>` in the fork so that it stays reachable;
+# the flake fetches it by that commit.
+[patch.crates-io]
+edtui = { git = "https://github.com/kisepichu/edtui", rev = "1182cb9c02f671f56a63c7da6a532d91e12755f1" }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

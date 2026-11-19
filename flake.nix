@@ -30,7 +30,13 @@
               ./crates
             ];
           };
-          cargoLock.lockFile = ./Cargo.lock;
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+            # The edtui fork is the one git dependency (design, "Nix flake").
+            # nixpkgs fetches it with builtins.fetchGit by the commit in
+            # Cargo.lock, so there is no output hash to maintain.
+            allowBuiltinFetchGit = true;
+          };
           cargoBuildFlags = [ "--package" "mxt" ];
           cargoTestFlags = [ "--workspace" ];
           # matrix-sdk needs these (the same inputs as nixpkgs' iamb package).

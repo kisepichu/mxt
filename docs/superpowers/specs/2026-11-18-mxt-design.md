@@ -975,7 +975,7 @@ platforms.
   - On every push and pull request, inside `nix develop` with the Cargo cache
     restored between runs: `cargo fmt --check`,
     `cargo clippy --all-targets -- -D warnings`, `cargo test`, and
-    `cargo deny check licenses advisories`.
+    `cargo deny check licenses advisories sources`.
   - The package build (`nix build`, which also runs the tests) runs when
     `flake.nix`, `flake.lock`, `Cargo.lock` or a `Cargo.toml` changes, every
     week, and on demand. This keeps the full Nix build of matrix-rust-sdk out
@@ -1002,8 +1002,21 @@ lighter.
   dropped `x86_64-darwin` in 2026.
 - `packages.default`: `rustPlatform.buildRustPackage` with
   `cargoLock.lockFile = ./Cargo.lock`. `Cargo.lock` is committed. Git
-  dependencies are avoided, so no output hashes need maintenance. Native
-  inputs follow the SDK's needs (nixpkgs' iamb package, also built on
+  dependencies are avoided, so no output hashes need maintenance, with one
+  exception: edtui comes from mxt's fork, the `mxt` branch of
+  `kisepichu/edtui` (edtui 0.11.8 with the cursor and line wrapping
+  measured by grapheme cluster and vim's character classes for word
+  motions, which upstream does not have yet; see "edtui differences from
+  vim"). `Cargo.toml` pins it in `[patch.crates-io]` to a full commit hash,
+  and `cargoLock.allowBuiltinFetchGit = true` lets nixpkgs fetch it with
+  `builtins.fetchGit` by the commit in `Cargo.lock`, so it needs no output
+  hash either. `fetchGit` fetches all refs, so a pinned commit must stay
+  reachable: every fork commit mxt pins is tagged `mxt-<short hash>` in the
+  fork, and neither the tags nor the `mxt` branch are rewritten (the branch
+  takes fork changes as new merge commits), so earlier mxt commits still
+  build. `cargo deny check sources` allows only crates.io and that
+  repository, and requires a git dependency to name a commit. Native inputs
+  follow the SDK's needs (nixpkgs' iamb package, also built on
   matrix-rust-sdk, needs `sqlite`, `aws-lc` and `pkg-config`).
 - `devShells.default`: the toolchain listed above.
 - `checks.package`: the package build.
@@ -1071,7 +1084,8 @@ separate device) and the edtui check program. Counts are from that account.
    the cursor drawn after emoji grapheme clusters (skin tones, ZWJ sequences,
    VS16; up to 4 columns off), CJK word motions (`w`, `e`, `b` treat every
    non-ASCII character as its own word), operators with `F`, `T`, `;` and `,`,
-   and a linewise `p` on the last line (pastes above).
+   and a linewise `p` on the last line (pastes above). mxt's edtui fork fixes
+   the first two (see "Nix flake").
 6. **Mentions on the remote network:** answered for the Discord bridge. A
    mention sent from mxt in a bridged guild channel (a `matrix.to` link and
    `m.mentions`) arrived on Discord as a real mention of that user, with a
@@ -1113,15 +1127,19 @@ asking for the recovery key ("Startup").
   still work, and `;` and `,` repeat their find. Other operators with these
   motions (`dF`, `cT`, `yf`, `d;`) are not supported and do nothing; the
   character after `dF` or `yf` is dropped, as is the one after `r` in visual
-  mode. Still needing edtui patches, or accepted for the first release: the
-  cursor drawn after emoji clusters (edtui sums the widths of single
-  characters, so it is up to 4 columns off), `x`, `r`, `a`, insert-mode
-  arrows and visual selections that work on single characters inside a
-  cluster, edtui's `df`, `dt`, `cf` and `ct`, which work on single
-  characters and can split a cluster (`df👍` leaves the skin tone), `df<Tab>`,
-  which cancels where `f<Tab>` finds a tab, CJK word classes for `w`, `e` and
-  `b`, operators with `F`, `T`, `;` and `,`, a linewise `p` on the last line,
-  `.` repeating `r`, and `r` in visual mode.
+  mode. mxt's edtui fork (see "Nix flake") draws the cursor and wraps lines
+  by grapheme cluster, and groups characters for `w`, `e`, `b`, `dw`, `cw`
+  and `iw` into vim's classes: kanji, hiragana and katakana are separate
+  words, full-width punctuation is punctuation, and the ideographic space is
+  a space; emoji count as punctuation, where vim gives them a class of their
+  own. Still needing edtui patches, or accepted for the first release: `x`,
+  `r`, `a`, insert-mode arrows and visual selections that work on single
+  characters inside a cluster, `e` stopping on the last character of a
+  cluster (the variation selector of `❤️`, drawn on the emoji's cell),
+  edtui's `df`, `dt`, `cf` and `ct`, which work on single characters and can
+  split a cluster (`df👍` leaves the skin tone), `df<Tab>`, which cancels
+  where `f<Tab>` finds a tab, operators with `F`, `T`, `;` and `,`, a
+  linewise `p` on the last line, `.` repeating `r`, and `r` in visual mode.
 - **Mentions on the remote network.** mxt relies on bridges turning
   `matrix.to` user links and `m.mentions` into remote mentions. Phase 0
   confirmed it for the Discord bridge in both directions; other bridges are
@@ -1158,7 +1176,7 @@ dependencies with notable licenses:
 | Component | License |
 |---|---|
 | matrix-rust-sdk (`matrix-sdk`, `matrix-sdk-ui`), vodozemac | Apache-2.0 |
-| ratatui, ratatui-image, edtui, ruma (`ruma::html`), pulldown-cmark | MIT |
+| ratatui, ratatui-image, edtui (mxt's fork, see "Nix flake"), ruma (`ruma::html`), pulldown-cmark | MIT |
 | `nucleo-matcher` | MPL-2.0 |
 | `emojis` | (MIT OR Apache-2.0) AND Unicode-3.0 |
 | jiff | Unlicense OR MIT |

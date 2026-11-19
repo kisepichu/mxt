@@ -1,4 +1,4 @@
-# Only `licenses` and `advisories` are checked (see the CI workflow).
+# `licenses`, `advisories` and `sources` are checked (see the CI workflow).
 
 [licenses]
 version = 2
@@ -40,3 +40,13 @@ ignore = [
   # which must be 3.54.0 or newer.
   { id = "RUSTSEC-2026-0459", reason = "system SQLite is linked; the fix is in SQLite 3.54.0" },
 ]
+
+[sources]
+# Crates come from crates.io, except edtui from mxt's fork (design, "Nix
+# flake"), which must be pinned to a commit. Any other registry or git
+# repository is denied.
+unknown-registry = "deny"
+unknown-git = "deny"
+required-git-spec = "rev"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com/kisepichu/edtui"]
