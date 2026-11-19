@@ -226,7 +226,8 @@ the view closes. `q` and `<Esc>` close it in normal and visual mode.
 Yanks (`yy` in the timeline, `y` in the editors) go to one register that
 every editor shares, and to the terminal's clipboard
 ([Terminal setup](terminal.md#clipboard)). `p` pastes from that register, not
-from the system clipboard.
+from the system clipboard; the terminal's own paste goes in as text, line
+breaks included, and runs no keys.
 
 ### Differences from vim
 
