@@ -56,7 +56,7 @@ fn minimal_file_uses_defaults() {
     assert_eq!(
         c.room_list_layout,
         RoomListLayout {
-            width: 30,
+            width: RoomListWidth::new(30).unwrap(),
             network: NetworkPlacement::Inline,
         }
     );
@@ -134,7 +134,7 @@ fn settings_are_read() {
     assert_eq!(
         c.room_list_layout,
         RoomListLayout {
-            width: 40,
+            width: RoomListWidth::new(40).unwrap(),
             network: NetworkPlacement::Below,
         }
     );
@@ -172,7 +172,7 @@ fn the_room_list_width_is_from_12_to_80() {
         let c = ok(&format!(
             "{MINIMAL}[ui]\nroom_list = {{ width = {width} }}\n"
         ));
-        assert_eq!(c.room_list_layout.width, width);
+        assert_eq!(c.room_list_layout.width.columns(), width);
     }
     for width in ["11", "81", "0", "-30", "70000"] {
         let text = format!("{MINIMAL}[ui]\nroom_list = {{ width = {width} }}\n");

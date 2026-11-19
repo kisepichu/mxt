@@ -18,7 +18,7 @@ use mxt_core::ids::UserId;
 use mxt_core::keymap::{Keymap, TableId};
 use mxt_core::keys::{Key, KeyParseError, KeySeq};
 use mxt_core::settings::Settings;
-use mxt_tui::{RoomListLayout, TimeFormat};
+use mxt_tui::{RoomListLayout, RoomListWidth, TimeFormat};
 use toml::Spanned;
 use toml::de::{DeTable, DeValue};
 
@@ -129,26 +129,19 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Config, ConfigError
         }
         None => TimeFormat::default(),
     };
-    let layout_defaults = RoomListLayout::default();
     let room_list_width = match ui.room_list.width {
-        Some(width) => u16::try_from(*width.get_ref())
-            .ok()
-            .filter(|columns| RoomListLayout::WIDTHS.contains(columns))
-            .ok_or_else(|| {
-                let (min, max) = RoomListLayout::WIDTHS.into_inner();
-                source.invalid(
-                    &width,
-                    format!("ui.room_list.width: must be from {min} to {max}"),
-                )
-            })?,
-        None => layout_defaults.width,
+        Some(width) => RoomListWidth::new(*width.get_ref()).ok_or_else(|| {
+            let (min, max) = RoomListWidth::RANGE.into_inner();
+            source.invalid(
+                &width,
+                format!("ui.room_list.width: must be from {min} to {max}"),
+            )
+        })?,
+        None => RoomListWidth::default(),
     };
     let room_list_layout = RoomListLayout {
         width: room_list_width,
-        network: ui
-            .room_list
-            .network
-            .map_or(layout_defaults.network, Into::into),
+        network: ui.room_list.network.map(Into::into).unwrap_or_default(),
     };
 
     let download_dir = match files.download_dir {

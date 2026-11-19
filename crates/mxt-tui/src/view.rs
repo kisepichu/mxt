@@ -53,27 +53,40 @@ const MIN_NAME_WIDTH: usize = 6;
 const NETWORK_INDENT: &str = "  ";
 
 /// `ui.room_list.width` and `ui.room_list.network` (design, "Room list").
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RoomListLayout {
-    /// The room list's columns, its border included. Terminals narrower
-    /// than 90 columns give it a third of their width instead, and it never
-    /// takes more than half of the width.
-    pub width: u16,
+    pub width: RoomListWidth,
     pub network: NetworkPlacement,
 }
 
-impl RoomListLayout {
-    /// The widths `ui.room_list.width` accepts.
-    pub const WIDTHS: RangeInclusive<u16> = 12..=80;
+/// A checked `ui.room_list.width`: the room list's columns, its border
+/// included. Terminals narrower than 90 columns give the list a third of
+/// their width instead, and it never takes more than half of the width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoomListWidth(u16);
+
+impl RoomListWidth {
+    /// The columns `ui.room_list.width` accepts.
+    pub const RANGE: RangeInclusive<u16> = 12..=80;
+
+    /// `None` outside `RANGE`, so the configuration loader reports the
+    /// value before the UI starts.
+    pub fn new(columns: i64) -> Option<RoomListWidth> {
+        u16::try_from(columns)
+            .ok()
+            .filter(|columns| RoomListWidth::RANGE.contains(columns))
+            .map(RoomListWidth)
+    }
+
+    pub fn columns(self) -> u16 {
+        self.0
+    }
 }
 
-/// 30 columns, and the network part inline.
-impl Default for RoomListLayout {
-    fn default() -> RoomListLayout {
-        RoomListLayout {
-            width: 30,
-            network: NetworkPlacement::Inline,
-        }
+/// 30 columns.
+impl Default for RoomListWidth {
+    fn default() -> RoomListWidth {
+        RoomListWidth(30)
     }
 }
 
@@ -195,7 +208,7 @@ pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
                 let width = if main.width < NARROW_WIDTH {
                     main.width / 3
                 } else {
-                    layout.width.min(main.width / 2)
+                    layout.width.columns().min(main.width / 2)
                 };
                 let [list, right] =
                     Layout::horizontal([Constraint::Length(width), Constraint::Fill(1)])
@@ -246,8 +259,9 @@ pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
 }
 
 /// The list scrolls so the cursor stays visible. The range it returns is in
-/// rooms: ratatui draws the rooms whose rows fit whole, from the offset it
-/// leaves in `state`, and a room can take two rows.
+/// rooms, and a room can take two rows: ratatui draws the rooms from the
+/// offset it leaves in `state` whose rows fit whole, once `scroll_offset`
+/// has set where a downward scroll starts.
 fn draw_room_list(
     frame: &mut Frame,
     area: Rect,
@@ -271,10 +285,14 @@ fn draw_room_list(
         Focus::Timeline | Focus::Composer => Modifier::UNDERLINED,
     };
     let list = List::new(items).block(block).highlight_style(cursor);
-    state.select(app.room_cursor());
+    let height = usize::from(inner.height);
+    let selected = app.room_cursor();
+    state.select(selected);
+    if let Some(selected) = selected {
+        *state.offset_mut() = scroll_offset(rooms, network, selected, state.offset(), height);
+    }
     frame.render_stateful_widget(list, area, state);
 
-    let height = usize::from(inner.height);
     let first = state.offset();
     let shown = rooms
         .iter()
@@ -285,6 +303,35 @@ fn draw_room_list(
         })
         .count();
     (shown > 0).then(|| (first, first + shown - 1))
+}
+
+/// The list's offset for a frame with the cursor on room `selected`.
+/// Scrolling down, ratatui drops rooms from the top until the rows down to
+/// the cursor's room fit, and then draws no room after the cursor, which
+/// leaves a row blank when a dropped room had two rows. Starting at the
+/// first room from which the cursor's room still fits, it fills the rows
+/// after the cursor too. An offset after the cursor stays: scrolling up,
+/// ratatui starts at the cursor's room and fills the rows after it.
+fn scroll_offset(
+    rooms: &[RoomSummary],
+    network: NetworkPlacement,
+    selected: usize,
+    offset: usize,
+    height: usize,
+) -> usize {
+    let Some(down_to) = rooms.get(..=selected) else {
+        return offset;
+    };
+    let mut rows = 0;
+    let first = down_to
+        .iter()
+        .rposition(|room| {
+            rows += room_height(room, network);
+            rows > height
+        })
+        .map_or(0, |dropped| dropped + 1);
+    // A cursor's room taller than the list is not drawn; it stays first.
+    offset.max(first.min(selected))
 }
 
 /// A room's rows: the row of `room_row`, then with
@@ -913,8 +960,8 @@ pub(crate) mod tests {
         }
     }
 
-    fn row_text(room: &RoomSummary, width: usize) -> String {
-        let line = room_row(room, false, width, NetworkPlacement::Inline);
+    fn row_text(room: &RoomSummary, width: usize, network: NetworkPlacement) -> String {
+        let line = room_row(room, false, width, network);
         let drawn = text(&line.spans);
         assert_eq!(text_width(&drawn), width, "{drawn:?}");
         drawn
@@ -975,13 +1022,31 @@ pub(crate) mod tests {
             NotificationMode::MentionsAndKeywords,
         );
         assert_eq!(
-            row_text(&room, 40),
+            row_text(&room, 40, NetworkPlacement::Inline),
             "Discord / plain-room    @3 Mentions only"
         );
-        assert_eq!(row_text(&room, 22), "Disco… / plain-room @3");
+        assert_eq!(
+            row_text(&room, 22, NetworkPlacement::Inline),
+            "Disco… / plain-room @3"
+        );
         // A short name keeps the label while it fits whole.
         let short = summary(name(None, "ops"), mentions(3), NotificationMode::Mute);
-        assert_eq!(row_text(&short, 13), "ops  @3 Muted");
+        assert_eq!(
+            row_text(&short, 13, NetworkPlacement::Inline),
+            "ops  @3 Muted"
+        );
+    }
+
+    #[test]
+    fn below_the_label_depends_on_the_room_part_alone() {
+        let room = summary(
+            name(Some("Zulip"), "x"),
+            UnreadCounts::default(),
+            NotificationMode::Mute,
+        );
+        // Inline the label would leave `Zulip / x` four columns.
+        assert_eq!(row_text(&room, 10, NetworkPlacement::Inline), "Zulip / x ");
+        assert_eq!(row_text(&room, 10, NetworkPlacement::Below), "x    Muted");
     }
 
     #[test]
@@ -991,9 +1056,9 @@ pub(crate) mod tests {
             mentions(100),
             NotificationMode::Mute,
         );
-        assert_eq!(row_text(&room, 4), "@99+");
-        assert_eq!(row_text(&room, 3), "@9…");
-        assert_eq!(row_text(&room, 0), "");
+        assert_eq!(row_text(&room, 4, NetworkPlacement::Inline), "@99+");
+        assert_eq!(row_text(&room, 3, NetworkPlacement::Inline), "@9…");
+        assert_eq!(row_text(&room, 0, NetworkPlacement::Inline), "");
     }
 
     /// The columns of a 30-column room list's rows: the border and the
@@ -1001,7 +1066,10 @@ pub(crate) mod tests {
     const LIST_COLUMNS: u16 = 28;
 
     fn layout(width: u16, network: NetworkPlacement) -> RoomListLayout {
-        RoomListLayout { width, network }
+        RoomListLayout {
+            width: RoomListWidth::new(width.into()).unwrap(),
+            network,
+        }
     }
 
     /// Listed in this order: a Discord DM, a muted Discord room with
@@ -1133,5 +1201,31 @@ pub(crate) mod tests {
 
         let mut screen = Screen::sized(100, layout(30, NetworkPlacement::Inline));
         assert_eq!(screen.draw(&app, None).room_list, Some((0, 7)));
+    }
+
+    #[test]
+    fn scrolling_down_past_a_two_row_room_fills_the_last_row() {
+        // `room 0` takes two rows and the 11 rooms after it one each, in a
+        // list of 11 rows.
+        let rooms = (0..12)
+            .map(|n| {
+                let network = (n == 0).then_some("Discord");
+                let room = format!("room {n}");
+                summary(
+                    name(network, &room),
+                    UnreadCounts::default(),
+                    NotificationMode::Default,
+                )
+            })
+            .collect();
+        let mut app = app_with(rooms);
+        let mut screen = Screen::sized(100, layout(30, NetworkPlacement::Below));
+        press(&mut app, &"j".repeat(9));
+        assert_eq!(screen.draw(&app, None).room_list, Some((0, 9)));
+        // `room 10` scrolls `room 0` out, and leaves a row for `room 11`.
+        press(&mut app, "j");
+        assert_eq!(screen.draw(&app, None).room_list, Some((1, 11)));
+        let rows = screen.list_rows(11);
+        assert_eq!([rows[0].as_str(), &rows[10]], ["room 1", "room 11"]);
     }
 }
