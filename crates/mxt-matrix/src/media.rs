@@ -3,7 +3,6 @@
 //! bytes are never logged, and file names only at `debug`.
 
 use std::{
-    ffi::OsStr,
     fs::{self, OpenOptions},
     io::{self, Write as _},
     path::{Path, PathBuf},
@@ -28,7 +27,11 @@ use mime_guess::{Mime, mime};
 use mxt_core::{msg::Msg, timeline::ItemRef};
 use tracing::debug;
 
-use crate::{Error, error::without_url, timeline::message_type};
+use crate::{
+    Error,
+    error::{timeline_error, without_url},
+    timeline::{enable_sending, message_type},
+};
 
 /// The largest image the message view fetches (design, "Images"): 10 MB, in
 /// the binary units the timeline shows sizes in.
@@ -40,6 +43,14 @@ const TOO_LARGE: &str = "too large to preview";
 /// The file name of a download whose event names none that is usable, and
 /// of an upload whose path has none.
 const FALLBACK_NAME: &str = "download";
+
+/// The longest file name Linux and macOS create, in bytes.
+const NAME_MAX: usize = 255;
+
+/// The longest extension `numbered` keeps apart from the stem, in bytes with
+/// its dot: in a longer one, the last dot is part of the name (of a
+/// sentence used as the name, for example).
+const MAX_EXTENSION: usize = 16;
 
 /// `MatrixEffect::Download`: the item's file, decrypted in encrypted rooms,
 /// saved in `dir` under the event's file name made safe (see
@@ -99,33 +110,58 @@ pub(crate) async fn fetch_image(
     })
 }
 
-/// `MatrixEffect::Upload` (design, "Files and images"): the file at `path`,
-/// where a leading `~/` stands for `home` and a relative path is relative to
-/// the directory mxt was started in, sent to `room` under its file name. The
-/// SDK picks the message type from the MIME type guessed from the name: an
-/// image for `image/*`, a video or audio message for `video/*` and
+/// `MatrixEffect::Upload` (design, "Files and images"): the file at `path`
+/// (see `expand_home`), queued in `room`'s send queue under its file name.
+/// The SDK picks the message type from the MIME type guessed from the name:
+/// an image for `image/*`, a video or audio message for `video/*` and
 /// `audio/*` (which mxt shows as files), a file otherwise.
-pub(crate) async fn upload(room: &Room, path: &str, home: Option<&OsStr>) -> Result<(), Error> {
-    let path = expand_home(path, home);
+///
+/// Like a message, it shows as a local echo while it uploads, keeps its
+/// place in the room's queue (later messages wait for it), and when it
+/// fails stays with its reason for `message.resend` (see `send_queue`). The
+/// SDK copies the file into its media store, where it stays until it is
+/// sent. Only a regular file up to the homeserver's upload limit is read:
+/// a larger one would be read into memory only to be refused.
+pub(crate) async fn upload(room: &Room, path: PathBuf) -> Result<(), Error> {
+    let io_error = |error| Error::Io {
+        path: path.clone(),
+        error,
+    };
+    let metadata = {
+        let path = path.clone();
+        blocking(move || fs::metadata(path)).await
+    };
+    let metadata = metadata.map_err(io_error)?;
+    if !metadata.is_file() {
+        return Err(Error::NotAFile);
+    }
+    let limit = room
+        .client()
+        .load_or_fetch_max_upload_size()
+        .await
+        .map_err(|error| Error::from(without_url(error)))?;
+    if metadata.len() > u64::from(limit) {
+        return Err(Error::UploadTooLarge {
+            limit: limit.into(),
+        });
+    }
     let read = {
         let path = path.clone();
         blocking(move || fs::read(path)).await
     };
-    let bytes = read.map_err(|error| Error::Io {
-        path: path.clone(),
-        error,
-    })?;
+    let bytes = read.map_err(io_error)?;
     let name = path.file_name().map_or(FALLBACK_NAME.into(), |name| {
         name.to_string_lossy().into_owned()
     });
     let mime = mime_guess::from_path(&path).first_or_octet_stream();
     let config = AttachmentConfig::new().info(attachment_info(&mime, bytes.len()));
     debug!("uploading {}", path.display());
-    room.send_attachment(name, &mime, bytes, config)
-        .store_in_cache()
+    enable_sending(room);
+    room.send_queue()
+        .send_attachment(name, mime, bytes, config)
         .await
         .map(drop)
-        .map_err(|error| without_url(error).into())
+        .map_err(|error| timeline_error(error.into()))
 }
 
 /// The source and the file name of the message's attachment; video and
@@ -195,24 +231,31 @@ fn attachment_info(mime: &Mime, len: usize) -> AttachmentInfo {
 }
 
 /// A leading `~/` stands for `home`, as in the configuration; other paths
-/// stay as typed.
-fn expand_home(path: &str, home: Option<&OsStr>) -> PathBuf {
-    match (path.strip_prefix("~/"), home) {
-        (Some(rest), Some(home)) => Path::new(home).join(rest.trim_start_matches('/')),
-        _ => PathBuf::from(path),
+/// stay as typed, so a relative one is relative to the directory mxt was
+/// started in.
+pub(crate) fn expand_home(path: &str, home: &Path) -> PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => home.join(rest.trim_start_matches('/')),
+        None => PathBuf::from(path),
     }
 }
 
 /// A file name from an event, made safe to create in the download
 /// directory: it names a file directly in it, and not a hidden one. Path
-/// separators and control characters become `_`, leading dots are dropped,
-/// and a name that is empty then becomes `download`.
+/// separators, control characters and bidirectional formatting characters
+/// (Unicode's `Bidi_Control`, which could make "Saved <path>" show another
+/// extension than the one the opener goes by) become `_`, leading dots are
+/// dropped, and a name that is empty then becomes `download`.
 fn safe_file_name(name: &str) -> String {
     let safe: String = name
         .trim_start_matches('.')
         .chars()
         .map(|c| {
-            if matches!(c, '/' | '\\') || c.is_control() {
+            let bidi = matches!(
+                c,
+                '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+            );
+            if matches!(c, '/' | '\\') || c.is_control() || bidi {
                 '_'
             } else {
                 c
@@ -228,16 +271,22 @@ fn safe_file_name(name: &str) -> String {
 
 /// The `n`th name to try for `name` (design, "Files and images"): `name`
 /// itself, then `name (1).ext`, `name (2).ext`, …, where the extension
-/// starts at the last dot.
+/// starts at the last dot and is at most `MAX_EXTENSION` long. The stem is
+/// cut at a character boundary so that the name fits in `NAME_MAX`: the
+/// sender picks the name (a caption, with older clients), and a longer one
+/// could not be saved at all.
 fn numbered(name: &str, n: u32) -> String {
-    if n == 0 {
-        return name.to_owned();
-    }
     let (stem, extension) = match name.rfind('.') {
-        Some(dot) if dot > 0 => name.split_at(dot),
+        Some(dot) if dot > 0 && name.len() - dot <= MAX_EXTENSION => name.split_at(dot),
         _ => (name, ""),
     };
-    format!("{stem} ({n}){extension}")
+    let number = if n == 0 {
+        String::new()
+    } else {
+        format!(" ({n})")
+    };
+    let stem = &stem[..stem.floor_char_boundary(NAME_MAX - number.len() - extension.len())];
+    format!("{stem}{number}{extension}")
 }
 
 /// Saves `bytes` in `dir`, which is created when it is missing, under the
@@ -301,6 +350,37 @@ mod tests {
     }
 
     #[test]
+    fn long_names_are_cut_to_255_bytes_at_a_character_and_keep_their_extension() {
+        let ascii = format!("{}.png", "a".repeat(296));
+        assert_eq!(ascii.len(), 300);
+        assert_eq!(numbered(&ascii, 0), format!("{}.png", "a".repeat(251)));
+        assert_eq!(
+            numbered(&ascii, 12),
+            format!("{} (12).png", "a".repeat(246))
+        );
+        // 3 bytes a character: 83 of them fit before the extension, 82
+        // before the number too.
+        let cjk = format!("{}.pdf", "資料".repeat(50));
+        let first = numbered(&cjk, 0);
+        assert_eq!(first, format!("{}資.pdf", "資料".repeat(41)));
+        assert_eq!(first.len(), 253);
+        let twelfth = numbered(&cjk, 12);
+        assert_eq!(twelfth, format!("{} (12).pdf", "資料".repeat(41)));
+        assert_eq!(twelfth.len(), 255);
+    }
+
+    #[test]
+    fn an_extension_above_sixteen_bytes_is_part_of_the_name() {
+        assert_eq!(numbered("x.abcdefghijklmno", 1), "x (1).abcdefghijklmno");
+        assert_eq!(
+            numbered("see you. at the north exit", 1),
+            "see you. at the north exit (1)"
+        );
+        let long = format!("{}.{}", "a".repeat(200), "b".repeat(100));
+        assert_eq!(numbered(&long, 1), format!("{} (1)", &long[..251]));
+    }
+
+    #[test]
     fn safe_file_names_stay_in_the_directory_and_are_not_hidden() {
         assert_eq!(safe_file_name("cat.png"), "cat.png");
         assert_eq!(
@@ -311,6 +391,13 @@ mod tests {
         assert_eq!(safe_file_name("a\\b.txt"), "a_b.txt");
         assert_eq!(safe_file_name(".bashrc"), "bashrc");
         assert_eq!(safe_file_name("two\nlines\0.txt"), "two_lines_.txt");
+        // A right-to-left override would show `invoice` and `hs.pdf`.
+        assert_eq!(safe_file_name("invoice\u{202E}fdp.sh"), "invoice_fdp.sh");
+        assert_eq!(
+            safe_file_name("a\u{200E}\u{200F}\u{202A}\u{202C}\u{2066}\u{2069}\u{061C}b.txt"),
+            "a_______b.txt"
+        );
+        assert_eq!(safe_file_name("資料.pdf"), "資料.pdf");
         assert_eq!(safe_file_name(".."), "download");
         assert_eq!(safe_file_name(""), "download");
     }
@@ -338,6 +425,19 @@ mod tests {
 
         assert_eq!(saved, downloads.join("cat.png"));
         assert_eq!(fs::read(&saved).unwrap(), b"cat");
+    }
+
+    #[test]
+    fn a_long_name_is_numbered_when_its_shortened_name_exists() {
+        let dir = TestDir::new("download-long-name");
+        let name = format!("{}.png", "a".repeat(296));
+        fs::write(dir.join(numbered(&name, 0)), "first").unwrap();
+
+        let saved = save(&dir, &name, b"second").unwrap();
+
+        assert_eq!(saved, dir.join(numbered(&name, 1)));
+        assert_eq!(fs::read(&saved).unwrap(), b"second");
+        assert_eq!(fs::read(dir.join(numbered(&name, 0))).unwrap(), b"first");
     }
 
     fn image(size: Option<u64>, thumbnail: Option<Option<u64>>) -> ImageMessageEventContent {
@@ -402,13 +502,11 @@ mod tests {
 
     #[test]
     fn upload_paths_expand_a_leading_tilde_slash() {
-        let home = Some(OsStr::new("/home/alice"));
-        let expanded = |path| expand_home(path, home);
+        let expanded = |path| expand_home(path, Path::new("/home/alice"));
         assert_eq!(expanded("~/cat.png"), Path::new("/home/alice/cat.png"));
         assert_eq!(expanded("~//cat.png"), Path::new("/home/alice/cat.png"));
         assert_eq!(expanded("cat.png"), Path::new("cat.png"));
         assert_eq!(expanded("/tmp/cat.png"), Path::new("/tmp/cat.png"));
         assert_eq!(expanded("~bob/cat.png"), Path::new("~bob/cat.png"));
-        assert_eq!(expand_home("~/cat.png", None), Path::new("~/cat.png"));
     }
 }

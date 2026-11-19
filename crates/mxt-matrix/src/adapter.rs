@@ -45,16 +45,18 @@ impl Matrix {
     /// info updates and notification settings changes into
     /// `Msg::RoomUpserted` / `Msg::RoomRemoved`, the sync loop's state into
     /// `Msg::SyncState`, and edits, reactions and redactions that fail for
-    /// good into `Msg::EffectFailed` (see `send_queue`). The effects sent to
-    /// `effects` run in the background; failures arrive as
+    /// good, and uploads, into `Msg::EffectFailed` (see `send_queue`). The
+    /// effects sent to `effects` run in the background; failures arrive as
     /// `Msg::EffectFailed`, and sends are answered with `Msg::SendQueued` or
     /// `Msg::SendFailed`. Downloads are saved in `download_dir`
-    /// (`files.download_dir`).
+    /// (`files.download_dir`), and a leading `~/` in an upload's path stands
+    /// for `home`.
     pub async fn start(
         client: Client,
         sync: SyncLoop,
         receipts: ReceiptKind,
         download_dir: PathBuf,
+        home: PathBuf,
         to_core: UnboundedSender<Msg>,
         effects: UnboundedReceiver<MatrixEffect>,
     ) -> Matrix {
@@ -64,12 +66,13 @@ impl Matrix {
         let mut tasks = JoinSet::new();
         tasks.spawn(watch_sync(client.clone(), sync.state(), to_core.clone()));
         tasks.spawn(rooms::run(rooms, sync.rooms()));
-        tasks.spawn(send_queue::drop_failed_aggregations(
+        tasks.spawn(send_queue::handle_failures(
             client.clone(),
             send_updates,
             to_core.clone(),
         ));
-        let effects = run_effects(client, settings, receipts, download_dir, to_core, effects);
+        let files = Files { download_dir, home };
+        let effects = run_effects(client, settings, receipts, files, to_core, effects);
         tasks.spawn(effects);
         Matrix { tasks, sync }
     }
@@ -132,14 +135,28 @@ async fn watch_sync(
     }
 }
 
-/// Subscriptions run in order, so the last one wins; messages are queued in
-/// the order they were sent, by `send_messages`, and notification modes
-/// change in order, by `set_mutes`; the rest runs concurrently.
+/// Where downloads go, and what a leading `~/` in an upload's path stands
+/// for.
+struct Files {
+    download_dir: PathBuf,
+    home: PathBuf,
+}
+
+/// A request for a room's send queue, see `send_messages`.
+enum Queued {
+    Message(Arc<Timeline>, SendId, Outgoing),
+    Upload(Room, PathBuf),
+}
+
+/// Subscriptions run in order, so the last one wins; messages and uploads
+/// are queued in the order they were sent, by `send_messages`, and
+/// notification modes change in order, by `set_mutes`; the rest runs
+/// concurrently.
 async fn run_effects(
     client: Client,
     settings: NotificationSettings,
     receipts: ReceiptKind,
-    download_dir: PathBuf,
+    files: Files,
     to_core: UnboundedSender<Msg>,
     mut queue: UnboundedReceiver<MatrixEffect>,
 ) {
@@ -195,7 +212,7 @@ async fn run_effects(
                 Some(MatrixEffect::Send { room, id, message }) => {
                     match open_timeline(&timeline, &room) {
                         Ok(open) => {
-                            let _ = sends.send((open, id, message));
+                            let _ = sends.send(Queued::Message(open, id, message));
                         }
                         Err(error) => report_send(&to_core, id, &error),
                     }
@@ -222,19 +239,19 @@ async fn run_effects(
                     let _ = mutes.send((room, muted));
                 }
                 Some(MatrixEffect::Download { room, item }) => {
-                    let (client, dir) = (client.clone(), download_dir.clone());
+                    let (client, dir) = (client.clone(), files.download_dir.clone());
                     let open = open_timeline(&timeline, &room);
                     let downloaded =
                         async move { media::download(&client, &*open?, &item, dir).await };
                     running.spawn(answered(&to_core, "Downloading the file failed", downloaded));
                 }
-                Some(MatrixEffect::Upload { room, path }) => {
-                    let room = sdk_room(&client, &room);
-                    let home = std::env::var_os("HOME");
-                    let uploaded =
-                        async move { media::upload(&room?, &path, home.as_deref()).await };
-                    running.spawn(reported(&to_core, "Uploading the file failed", uploaded));
-                }
+                Some(MatrixEffect::Upload { room, path }) => match sdk_room(&client, &room) {
+                    Ok(room) => {
+                        let path = media::expand_home(&path, &files.home);
+                        let _ = sends.send(Queued::Upload(room, path));
+                    }
+                    Err(error) => report(&to_core, "Uploading the file failed", &error),
+                },
                 Some(MatrixEffect::FetchImage { room, item }) => {
                     let client = client.clone();
                     let open = open_timeline(&timeline, &room);
@@ -287,22 +304,30 @@ where
     }
 }
 
-/// Queues the messages one at a time, in the order they were sent, and
-/// answers each with `Msg::SendQueued` or `Msg::SendFailed`. A reply or an
-/// edit of a sent message fetches its target event first when the event
-/// cache lacks it, which can take up to three attempts of the client's
-/// request timeout, and a later message must not overtake it; meanwhile the
-/// other effects (switching rooms, pagination, receipts) do not wait.
-async fn send_messages(
-    mut messages: UnboundedReceiver<(Arc<Timeline>, SendId, Outgoing)>,
-    to_core: UnboundedSender<Msg>,
-) {
-    while let Some((timeline, id, message)) = messages.recv().await {
-        match send_message(&timeline, message).await {
-            Ok(()) => {
-                let _ = to_core.send(Msg::SendQueued { id });
+/// Queues the messages and uploads one at a time, in the order they were
+/// sent; a message is answered with `Msg::SendQueued` or `Msg::SendFailed`,
+/// an upload that cannot be queued is reported. A reply or an edit of a
+/// sent message fetches its target event first when the event cache lacks
+/// it, which can take up to three attempts of the client's request timeout,
+/// and an upload reads its file (and fetches the homeserver's upload limit
+/// once); a later message must not overtake either, so it waits. Meanwhile
+/// the other effects (switching rooms, pagination, receipts) do not wait.
+async fn send_messages(mut requests: UnboundedReceiver<Queued>, to_core: UnboundedSender<Msg>) {
+    while let Some(request) = requests.recv().await {
+        match request {
+            Queued::Message(timeline, id, message) => {
+                match send_message(&timeline, message).await {
+                    Ok(()) => {
+                        let _ = to_core.send(Msg::SendQueued { id });
+                    }
+                    Err(error) => report_send(&to_core, id, &error),
+                }
             }
-            Err(error) => report_send(&to_core, id, &error),
+            Queued::Upload(room, path) => {
+                if let Err(error) = media::upload(&room, path).await {
+                    report(&to_core, "Uploading the file failed", &error);
+                }
+            }
         }
     }
 }
