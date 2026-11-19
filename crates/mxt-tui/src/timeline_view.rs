@@ -22,7 +22,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::view::{BOLD, DIM, ERROR, PLAIN, fit, grapheme_width, text_width};
 
-/// `ui.time_format` until [`TimelinePane::set_time_format`].
+/// `ui.time_format` when the configuration has none.
 const DEFAULT_TIME_FORMAT: &str = "%H:%M";
 /// The date on a date divider.
 const DATE_FORMAT: &str = "%Y-%m-%d (%a)";
@@ -52,6 +52,13 @@ impl TimeFormat {
     }
 }
 
+/// `%H:%M`, the default of `ui.time_format`.
+impl Default for TimeFormat {
+    fn default() -> TimeFormat {
+        TimeFormat(DEFAULT_TIME_FORMAT.to_owned())
+    }
+}
+
 /// What the timeline pane keeps between frames.
 pub(crate) struct TimelinePane {
     time_format: TimeFormat,
@@ -71,7 +78,7 @@ struct Anchor {
 impl TimelinePane {
     pub(crate) fn new() -> TimelinePane {
         TimelinePane {
-            time_format: TimeFormat(DEFAULT_TIME_FORMAT.to_owned()),
+            time_format: TimeFormat::default(),
             zone: TimeZone::system(),
             anchor: None,
         }

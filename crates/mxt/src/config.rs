@@ -18,6 +18,7 @@ use mxt_core::ids::UserId;
 use mxt_core::keymap::{Keymap, TableId};
 use mxt_core::keys::{Key, KeyParseError, KeySeq};
 use mxt_core::settings::Settings;
+use mxt_tui::TimeFormat;
 use toml::Spanned;
 use toml::de::{DeTable, DeValue};
 
@@ -31,12 +32,8 @@ pub struct Config {
     pub homeserver: Option<String>,
     pub keymap: Keymap,
     pub settings: Settings,
-    /// strftime format, applied in the local time zone by `mxt-tui`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the timeline (phase 2) formats times with it")
-    )]
-    pub time_format: String,
+    /// Applied in the local time zone by `mxt-tui`.
+    pub time_format: TimeFormat,
     /// Absolute.
     #[cfg_attr(
         not(test),
@@ -53,7 +50,6 @@ pub struct Config {
 /// Printed with the path when the file does not exist.
 pub const MINIMAL_EXAMPLE: &str = "[account]\nuser_id = \"@alice:example.org\"\n";
 
-const DEFAULT_TIME_FORMAT: &str = "%H:%M";
 const DEFAULT_DOWNLOAD_DIR: &str = "~/Downloads";
 const DEFAULT_OPENER: &str = if cfg!(target_os = "macos") {
     "open"
@@ -127,6 +123,14 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Config, ConfigError
         image_preview: ui.image_preview.map_or(defaults.image_preview, Into::into),
         read_receipts: ui.read_receipts.map_or(defaults.read_receipts, Into::into),
     };
+    let time_format = match ui.time_format {
+        Some(format) => {
+            let at = format.span().start;
+            TimeFormat::parse(format.into_inner())
+                .map_err(|error| source.invalid_at(at, format!("ui.time_format: {error}")))?
+        }
+        None => TimeFormat::default(),
+    };
 
     let download_dir = match files.download_dir {
         Some(dir) => {
@@ -159,9 +163,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Config, ConfigError
         homeserver: account.homeserver.map(Spanned::into_inner),
         keymap: Keymap::new(&leader, bindings),
         settings,
-        time_format: ui
-            .time_format
-            .unwrap_or_else(|| DEFAULT_TIME_FORMAT.to_owned()),
+        time_format,
         download_dir,
         opener,
     })

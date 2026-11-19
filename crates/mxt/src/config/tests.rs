@@ -41,7 +41,7 @@ fn minimal_file_uses_defaults() {
     assert!(c.settings.room_list_visible);
     assert_eq!(c.settings.image_preview, ImagePreview::Auto);
     assert_eq!(c.settings.read_receipts, ReceiptKind::Public);
-    assert_eq!(c.time_format, "%H:%M");
+    assert_eq!(c.time_format, TimeFormat::default());
     assert_eq!(c.download_dir, PathBuf::from("/home/alice/Downloads"));
     assert!(!c.opener.is_empty());
     assert_eq!(
@@ -123,7 +123,22 @@ fn homeserver_and_time_format_are_read() {
         "{MINIMAL}homeserver = \"https://matrix.example.org\"\n[ui]\ntime_format = \"%Y-%m-%d %H:%M\"\n"
     ));
     assert_eq!(c.homeserver.as_deref(), Some("https://matrix.example.org"));
-    assert_eq!(c.time_format, "%Y-%m-%d %H:%M");
+    assert_eq!(
+        c.time_format,
+        TimeFormat::parse("%Y-%m-%d %H:%M".to_owned()).unwrap()
+    );
+}
+
+#[test]
+fn an_invalid_time_format_names_its_line() {
+    let (line, msg) = err(&format!(
+        "{MINIMAL}[ui]\ntimeoutlen = 300\ntime_format = \"%H:%K\"\n"
+    ));
+    assert_eq!(line, 5);
+    assert!(msg.starts_with("ui.time_format: "), "{msg}");
+    let (line, msg) = err(&format!("{MINIMAL}[ui]\ntime_format = \"\"\n"));
+    assert_eq!(line, 4);
+    assert!(msg.starts_with("ui.time_format: "), "{msg}");
 }
 
 #[test]

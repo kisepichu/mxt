@@ -75,7 +75,7 @@ pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
     let mut visible = Visible::default();
     let mut composer = panes.composer;
     let focused = app.focus() == Focus::Composer && composer.is_some();
-    let search = match panes.view {
+    let (search, view_mode) = match panes.view {
         Some(view) => {
             frame.render_widget(Clear, main);
             view.draw(
@@ -84,7 +84,7 @@ pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
                 Block::new().padding(Padding::horizontal(1)),
                 true,
             );
-            view.search()
+            (view.search(), Some(view.mode()))
         }
         None => {
             let right = if app.sidebar_visible() {
@@ -120,16 +120,18 @@ pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
             } else {
                 visible.timeline = draw_timeline(frame, right, app, panes.timeline);
             }
-            composer
+            let search = composer
                 .as_deref()
                 .filter(|_| focused)
-                .and_then(Composer::search)
+                .and_then(Composer::search);
+            (search, None)
         }
     };
     if let Some(picker) = app.picker() {
         panes.overlays.draw_picker(frame, main, picker);
     }
-    let editor = composer.filter(|_| focused).map(|composer| composer.mode());
+    // The message view's editor while it is open, else the focused composer's.
+    let editor = view_mode.or_else(|| composer.filter(|_| focused).map(|composer| composer.mode()));
     match (app.command_line(), search) {
         (Some(line), _) => draw_command_line(frame, bottom, line),
         (None, Some(pattern)) => draw_prompt_line(frame, bottom, "/", &pattern),
@@ -350,10 +352,11 @@ fn draft_label(app: &App) -> Option<String> {
     }
 }
 
-/// The mode (the composer's editor mode while it has focus), the pending
-/// count and keys, the open room, the confirmation question or the status
-/// message, and right-aligned the sync state. When they do not fit, the room
-/// name is cut first, so the question or the status message stays readable.
+/// The mode (with the mode of the message view's editor, or of the
+/// composer's while it has focus), the pending count and keys, the open
+/// room, the confirmation question or the status message, and right-aligned
+/// the sync state. When they do not fit, the room name is cut first, so the
+/// question or the status message stays readable.
 fn draw_status_line(frame: &mut Frame, area: Rect, app: &App, editor: Option<EditorMode>) {
     let mode = format!(" {} ", app.mode_label(editor));
     let mut pending = app
@@ -508,10 +511,147 @@ pub(crate) fn grapheme_width(grapheme: &str) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    use mxt_core::ids::RoomId;
+    use crate::clipboard::SharedRegister;
+    use crate::editor::tests::keys;
+    use mxt_core::effect::Effect;
+    use mxt_core::ids::{EventId, RoomId, Timestamp, UserId};
+    use mxt_core::keymap::Keymap;
+    use mxt_core::keys::KeySeq;
+    use mxt_core::msg::Msg;
+    use mxt_core::rich::RichText;
     use mxt_core::room::{NotificationMode, RoomKind, UnreadCounts};
+    use mxt_core::settings::Settings;
+    use mxt_core::timeline::{MessageContent, TimelineDiff, TimelineItem};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    /// The app with the rooms `!a` and `!b`, `!a` first, and the room list
+    /// focused.
+    pub(crate) fn app() -> App {
+        let leader = KeySeq::parse("<Space>", &KeySeq::default()).unwrap();
+        let mut app = App::new(
+            Keymap::new(&leader, []),
+            Settings::default(),
+            UserId::new("@me:example.org"),
+        );
+        for (id, at) in [("!a:example.org", 20), ("!b:example.org", 10)] {
+            app.update(Msg::RoomUpserted(RoomSummary {
+                id: RoomId::new(id),
+                name: name(None, id),
+                kind: RoomKind::Group,
+                unread: UnreadCounts::default(),
+                mode: NotificationMode::Default,
+                latest_activity: Some(Timestamp::from_millis(at)),
+            }));
+        }
+        app
+    }
+
+    /// The keys in key notation, as the core resolves them.
+    pub(crate) fn press(app: &mut App, text: &str) -> Vec<Effect> {
+        keys(text)
+            .into_iter()
+            .flat_map(|key| app.update(Msg::Key { key, editor: None }))
+            .collect()
+    }
+
+    /// `room`'s timeline as one-line messages with the events `$<n>`.
+    pub(crate) fn reset(room: &str, events: std::ops::Range<u32>) -> Msg {
+        let entries = events
+            .map(|n| {
+                TimelineEntry::Item(TimelineItem {
+                    id: ItemRef::Remote(EventId::new(format!("${n}:example.org"))),
+                    sender: UserId::new("@alice:example.org"),
+                    sender_name: "Alice".to_owned(),
+                    timestamp: Timestamp::from_millis(0),
+                    content: MessageContent::Text {
+                        body: format!("message {n}"),
+                        rich: RichText::plain(&format!("message {n}")),
+                    },
+                    reply: None,
+                    reactions: Vec::new(),
+                    edited: false,
+                    send_state: None,
+                })
+            })
+            .collect();
+        Msg::Timeline {
+            room: RoomId::new(room),
+            diffs: vec![TimelineDiff::Reset(entries)],
+        }
+    }
+
+    /// A terminal and the panes' state between its frames.
+    pub(crate) struct Screen {
+        terminal: Terminal<TestBackend>,
+        room_list: ListState,
+        timeline: TimelinePane,
+        overlays: Overlays,
+    }
+
+    impl Screen {
+        pub(crate) fn new() -> Screen {
+            Screen {
+                terminal: Terminal::new(TestBackend::new(80, 12)).unwrap(),
+                room_list: ListState::default(),
+                timeline: TimelinePane::new(),
+                overlays: Overlays::default(),
+            }
+        }
+
+        /// One frame, with the message view's editor while it is open.
+        pub(crate) fn draw(&mut self, app: &App, view: Option<&mut Editor>) -> Visible {
+            let mut visible = Visible::default();
+            self.terminal
+                .draw(|frame| {
+                    let panes = Panes {
+                        room_list: &mut self.room_list,
+                        timeline: &mut self.timeline,
+                        view,
+                        composer: None,
+                        overlays: &mut self.overlays,
+                    };
+                    visible = draw(frame, app, panes);
+                })
+                .unwrap();
+            visible
+        }
+
+        fn bottom_line(&self) -> String {
+            let buffer = self.terminal.backend().buffer();
+            let y = buffer.area.bottom() - 1;
+            (buffer.area.left()..buffer.area.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
+        }
+    }
+
+    #[test]
+    fn the_status_line_shows_the_message_view_editor_mode() {
+        let mut app = app();
+        press(&mut app, "<CR>");
+        app.update(reset("!a:example.org", 1..4));
+        press(&mut app, "<CR>");
+        assert!(app.view_open());
+        let mut screen = Screen::new();
+        let mut editor = Editor::new("message 3", SharedRegister::default());
+        screen.draw(&app, Some(&mut editor));
+        assert!(
+            screen.bottom_line().starts_with(" VIEW NORMAL "),
+            "{:?}",
+            screen.bottom_line()
+        );
+        // In insert mode `q` is text, not `view.close`.
+        keys("i").into_iter().for_each(|key| editor.feed(key));
+        screen.draw(&app, Some(&mut editor));
+        assert!(
+            screen.bottom_line().starts_with(" VIEW INSERT "),
+            "{:?}",
+            screen.bottom_line()
+        );
+    }
 
     const FAMILY: &str = "👨\u{200d}👩\u{200d}👧";
 

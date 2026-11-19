@@ -46,8 +46,6 @@ pub struct Tui {
     /// The room list range last reported with `Msg::Viewport`.
     room_list_viewport: Option<(usize, usize)>,
     timeline: TimelinePane,
-    /// The timeline range last reported with `Msg::Viewport`.
-    timeline_viewport: Option<(usize, usize)>,
     /// The message view's scratch editor while it is open.
     view: Option<Editor>,
     composers: Composers,
@@ -74,7 +72,6 @@ impl Tui {
                     room_list: ListState::default(),
                     room_list_viewport: None,
                     timeline: TimelinePane::new(),
-                    timeline_viewport: None,
                     view: None,
                     composers: Composers::new(register.clone()),
                     overlays: Overlays::default(),
@@ -97,11 +94,12 @@ impl Tui {
     }
 
     /// Sends the last copy to the terminal clipboard if it has not reached
-    /// it yet, draws the frame, and returns `Msg::Viewport` for panes whose
-    /// visible range changed since the last draw. Fails once the terminal
-    /// has been restored, which while the UI runs only the panic hook does,
-    /// so a panic in any task ends the event loop instead of drawing onto
-    /// the main screen.
+    /// it yet, draws the frame, and returns `Msg::Viewport` for the room
+    /// list when its visible range changed since the last draw, and for the
+    /// timeline when its visible range is not the one the core has (see
+    /// `timeline_report`). Fails once the terminal has been restored, which
+    /// while the UI runs only the panic hook does, so a panic in any task
+    /// ends the event loop instead of drawing onto the main screen.
     pub fn draw(&mut self, app: &App) -> io::Result<Vec<Msg>> {
         if !ACTIVE.load(Ordering::SeqCst) {
             return Err(io::Error::other("the terminal was restored after a panic"));
@@ -134,25 +132,17 @@ impl Tui {
         })?;
 
         let mut msgs = Vec::new();
-        for (pane, range, reported) in [
-            (
-                Pane::RoomList,
-                visible.room_list,
-                &mut self.room_list_viewport,
-            ),
-            (
-                Pane::Timeline,
-                visible.timeline,
-                &mut self.timeline_viewport,
-            ),
-        ] {
-            if let Some((first, last)) = range
-                && *reported != range
-            {
-                *reported = range;
-                msgs.push(Msg::Viewport { pane, first, last });
-            }
+        if let Some((first, last)) = visible.room_list
+            && self.room_list_viewport != visible.room_list
+        {
+            self.room_list_viewport = visible.room_list;
+            msgs.push(Msg::Viewport {
+                pane: Pane::RoomList,
+                first,
+                last,
+            });
         }
+        msgs.extend(timeline_report(app, visible.timeline));
         Ok(msgs)
     }
 
@@ -359,4 +349,74 @@ fn restore_terminal() -> io::Result<()> {
     let raw = crossterm::terminal::disable_raw_mode();
     let screen = execute!(io::stdout(), DisableFocusChange, LeaveAlternateScreen, Show);
     raw.and(screen)
+}
+
+/// `Msg::Viewport` for the timeline range a frame drew (`drawn`) when the
+/// core has another one. The core forgets the range when another room
+/// opens, so the opened room's range is reported even when its indices are
+/// the ones reported before, also after a quick return to a room (A, B,
+/// then A again before B was drawn with entries).
+fn timeline_report(app: &App, drawn: Option<(usize, usize)>) -> Option<Msg> {
+    let (first, last) = drawn.filter(|&range| app.timeline_viewport() != Some(range))?;
+    Some(Msg::Viewport {
+        pane: Pane::Timeline,
+        first,
+        last,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::view::tests::{Screen, app, press, reset};
+    use mxt_core::effect::{Effect, MatrixEffect};
+    use mxt_core::ids::EventId;
+
+    /// Draws a frame and gives the core the timeline report it makes.
+    fn frame(app: &mut App, screen: &mut Screen) -> Vec<Effect> {
+        let visible = screen.draw(app, None);
+        timeline_report(app, visible.timeline)
+            .map(|msg| app.update(msg))
+            .unwrap_or_default()
+    }
+
+    fn receipt(room: &str, event: u32) -> Effect {
+        Effect::Matrix(MatrixEffect::SendReceipt {
+            room: RoomId::new(room),
+            event: EventId::new(format!("${event}:example.org")),
+        })
+    }
+
+    #[test]
+    fn the_opened_room_range_is_reported_even_when_its_indices_are_the_same() {
+        let mut app = app();
+        let mut screen = Screen::new();
+        press(&mut app, "<CR>");
+        app.update(reset("!a:example.org", 1..4));
+        assert_eq!(frame(&mut app, &mut screen), [receipt("!a:example.org", 3)]);
+        assert_eq!(app.timeline_viewport(), Some((0, 2)));
+        // Reported once.
+        let visible = screen.draw(&app, None);
+        assert_eq!(timeline_report(&app, visible.timeline), None);
+
+        // `!b` shows the same range.
+        press(&mut app, "<C-w>hj<CR>");
+        app.update(reset("!b:example.org", 11..14));
+        assert_eq!(
+            frame(&mut app, &mut screen),
+            [receipt("!b:example.org", 13)]
+        );
+
+        // To `!a` and back to `!b` before `!a`'s timeline arrives: the frame
+        // between shows no entries.
+        press(&mut app, "<C-w>hk<CR>");
+        assert_eq!(frame(&mut app, &mut screen), []);
+        press(&mut app, "<C-w>hj<CR>");
+        app.update(reset("!b:example.org", 11..14));
+        assert_eq!(
+            frame(&mut app, &mut screen),
+            [receipt("!b:example.org", 13)]
+        );
+        assert_eq!(app.timeline_viewport(), Some((0, 2)));
+    }
 }

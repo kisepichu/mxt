@@ -403,7 +403,10 @@ fn message_view_opens_and_closes() {
         )))]
     );
     assert!(app.view_open());
-    assert_eq!(app.mode_label(Some(EditorMode::Normal)), "VIEW");
+    assert_eq!(app.mode_label(Some(EditorMode::Normal)), "VIEW NORMAL");
+    // The status line tells why `q` types text instead of closing the view.
+    assert_eq!(app.mode_label(Some(EditorMode::Insert)), "VIEW INSERT");
+    assert_eq!(app.mode_label(Some(EditorMode::Visual)), "VIEW VISUAL");
     // Unbound keys go to the view's editor; in insert mode, every key does.
     assert_eq!(
         keys_in(&mut app, "j", Some(EditorMode::Normal)),
@@ -566,6 +569,23 @@ fn opening_another_room_resets_the_timeline() {
     );
     assert!(app.timeline_follows());
     assert_eq!(viewport(&mut app, 0, 3), vec![receipt("!c:example.org", 2)]);
+}
+
+#[test]
+fn an_opened_room_gets_no_receipt_until_its_own_viewport_arrives() {
+    let mut app = opened();
+    reset(&mut app, msgs(1..3));
+    assert_eq!(viewport(&mut app, 0, 1), vec![receipt("!c:example.org", 2)]);
+    keys(&mut app, "<C-w>hj<CR>");
+    assert_eq!(app.open_room(), Some(&id("!b:example.org")));
+    // `!b`'s newest item is at an index that `!c`'s last viewport showed.
+    let fx = app.update(Msg::Timeline {
+        room: id("!b:example.org"),
+        diffs: vec![TimelineDiff::Reset(msgs(5..7))],
+    });
+    assert_eq!(fx, vec![paginate("!b:example.org")]);
+    assert_eq!(app.update(Msg::TerminalFocus(true)), vec![]);
+    assert_eq!(viewport(&mut app, 0, 1), vec![receipt("!b:example.org", 6)]);
 }
 
 #[test]

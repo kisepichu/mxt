@@ -117,6 +117,7 @@ pub struct App {
     terminal_focused: bool,
     status: Option<StatusMessage>,
     room_list_viewport: Option<Viewport>,
+    /// The open room's, from a render of that room; `None` until then.
     timeline_viewport: Option<Viewport>,
     command_line: Option<OpenLine>,
     /// The pattern `search.next` and `search.prev` repeat.
@@ -234,6 +235,13 @@ impl App {
         self.timeline.follows()
     }
 
+    /// The first and last timeline entries of the open room's last reported
+    /// viewport; `None` until a render of that room reported one.
+    pub fn timeline_viewport(&self) -> Option<(usize, usize)> {
+        self.timeline_viewport
+            .map(|viewport| (viewport.first, viewport.last))
+    }
+
     pub fn view_open(&self) -> bool {
         self.view.is_some()
     }
@@ -275,8 +283,9 @@ impl App {
 
     /// "CONFIRM" while an action asks for confirmation, "COMMAND" while a
     /// command or search line is open, "PICKER" while a picker is open,
-    /// "VIEW" while the message view is open, "NORMAL", or for the
-    /// composer's editor "INSERT", "NORMAL", "VISUAL" or "SEARCH".
+    /// "VIEW" and the mode of its editor while the message view is open
+    /// ("VIEW INSERT": keys go to the editor, `q` included), "NORMAL", or
+    /// for the composer's editor "INSERT", "NORMAL", "VISUAL" or "SEARCH".
     pub fn mode_label(&self, editor: Option<EditorMode>) -> &'static str {
         if self.confirm.is_some() {
             return "CONFIRM";
@@ -288,7 +297,13 @@ impl App {
             return "PICKER";
         }
         if self.view.is_some() {
-            return "VIEW";
+            return match editor {
+                None => "VIEW",
+                Some(EditorMode::Normal) => "VIEW NORMAL",
+                Some(EditorMode::Insert) => "VIEW INSERT",
+                Some(EditorMode::Visual) => "VIEW VISUAL",
+                Some(EditorMode::Search) => "VIEW SEARCH",
+            };
         }
         match (self.focus, editor) {
             (Focus::Composer, Some(EditorMode::Insert)) => "INSERT",

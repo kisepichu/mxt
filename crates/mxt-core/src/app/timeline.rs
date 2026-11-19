@@ -394,10 +394,13 @@ impl App {
     }
 
     /// Starts a new timeline when another room or no room is open, and closes
-    /// what belongs to the previous one: the message view, the picker, a
-    /// confirmation, and the focus and mention menu of its composer.
+    /// what belongs to the previous one: its viewport, which must not count
+    /// for the new room's entries before the new room is drawn, the message
+    /// view, the picker, a confirmation, and the focus and mention menu of
+    /// its composer.
     pub(super) fn reset_timeline(&mut self, effects: &mut Vec<Effect>) {
         self.timeline = Timeline::default();
+        self.timeline_viewport = None;
         self.close_view(effects);
         self.picker = None;
         self.confirm = None;
