@@ -334,12 +334,16 @@ impl From<RecoveryError> for Error {
             RecoveryError::SecretStorage(SecretStorageError::MissingKeyInfo { .. }) => {
                 Error::NoSecretStorage
             }
+            // Importing each secret fetches it from account data, so an
+            // expired token can show up there too.
             RecoveryError::Sdk(error)
-            | RecoveryError::SecretStorage(SecretStorageError::Sdk(error))
-                if is_unknown_token(&error) =>
-            {
-                Error::UnknownToken
-            }
+            | RecoveryError::SecretStorage(
+                SecretStorageError::Sdk(error)
+                | SecretStorageError::ImportError {
+                    error: ImportError::Sdk(error),
+                    ..
+                },
+            ) if is_unknown_token(&error) => Error::UnknownToken,
             error => Error::Recovery(error),
         }
     }
@@ -418,6 +422,11 @@ mod tests {
         assert!(Error::from(recovery).is_unknown_token());
         let storage = SecretStorageError::Sdk(server_error("M_UNKNOWN_TOKEN").into());
         assert!(Error::from(RecoveryError::SecretStorage(storage)).is_unknown_token());
+        let import = SecretStorageError::ImportError {
+            name: SecretName::CrossSigningMasterKey,
+            error: ImportError::Sdk(server_error("M_UNKNOWN_TOKEN").into()),
+        };
+        assert!(Error::from(RecoveryError::SecretStorage(import)).is_unknown_token());
         let cached = HttpError::Cached(Arc::new(server_error("M_UNKNOWN_TOKEN")));
         assert!(Error::from(cached).is_unknown_token());
     }
