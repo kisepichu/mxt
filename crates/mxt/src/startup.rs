@@ -16,7 +16,7 @@ use mxt_core::settings::Settings;
 use mxt_matrix::{
     Client, Homeserver, Matrix, RecoveryStatus, SavedSession, SessionWatch, SyncLoop,
 };
-use mxt_tui::Tui;
+use mxt_tui::{TimeFormat, Tui};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
@@ -62,11 +62,21 @@ pub async fn run(config: Config, paths: &Paths) -> Outcome {
         homeserver,
         keymap,
         settings,
+        time_format,
         ..
     } = config;
     match connect(&user_id, homeserver.as_deref(), paths).await {
         Ok((client, sync, mut session)) => {
-            run_ui(client, sync, &mut session, keymap, settings, user_id).await
+            run_ui(
+                client,
+                sync,
+                &mut session,
+                keymap,
+                settings,
+                time_format,
+                user_id,
+            )
+            .await
         }
         Err(outcome) => outcome,
     }
@@ -236,6 +246,7 @@ async fn run_ui(
     session: &mut SessionWatch,
     keymap: Keymap,
     settings: Settings,
+    time_format: TimeFormat,
     me: UserId,
 ) -> Outcome {
     let receipts = settings.read_receipts;
@@ -251,6 +262,7 @@ async fn run_ui(
             return Outcome::Failed(format!("cannot set up the terminal: {error}"));
         }
     };
+    tui.set_time_format(time_format);
     let outcome = tokio::select! {
         // The adapter's panic first: the panic hook has restored the terminal
         // and printed the panic, and the next frame fails then.

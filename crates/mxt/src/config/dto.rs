@@ -37,7 +37,7 @@ pub struct Ui {
     pub leader: Option<Spanned<String>>,
     pub timeoutlen: Option<u64>,
     pub room_list: RoomList,
-    pub time_format: Option<String>,
+    pub time_format: Option<Spanned<String>>,
     pub image_preview: Option<ImagePreview>,
     pub read_receipts: Option<ReadReceipts>,
 }
