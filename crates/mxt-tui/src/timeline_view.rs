@@ -614,15 +614,19 @@ impl<'a> Body<'a> {
                     self.line(line);
                 }
             }
-            Block::Code { text, spoiler, .. } => {
-                for line in text.split('\n') {
-                    let line = if *spoiler {
-                        Cow::Owned(hidden(line))
-                    } else {
-                        Cow::Borrowed(line)
-                    };
-                    self.line(vec![(line, CODE_BLOCK)]);
+            Block::Code { runs, .. } => {
+                let mut line = Vec::new();
+                for run in runs {
+                    for (index, part) in run.text.split('\n').enumerate() {
+                        if index > 0 {
+                            self.line(std::mem::take(&mut line));
+                        }
+                        if !part.is_empty() {
+                            line.push((shown(part, run.spoiler), CODE_BLOCK));
+                        }
+                    }
                 }
+                self.line(line);
             }
             Block::Quote(blocks) => self.nested(Prefix::Quote, blocks),
             Block::List {
@@ -725,17 +729,22 @@ fn paragraph_lines(inlines: &[Inline]) -> Vec<Vec<Piece<'_>>> {
             if part.is_empty() {
                 continue;
             }
-            let part = if spoiler {
-                Cow::Owned(hidden(part))
-            } else {
-                Cow::Borrowed(part)
-            };
+            let part = shown(part, spoiler);
             if let Some(line) = lines.last_mut() {
                 line.push((part, style));
             }
         }
     }
     lines
+}
+
+/// `text`, or for spoiler text, blocks in its place (see `hidden`).
+fn shown(text: &str, spoiler: bool) -> Cow<'_, str> {
+    if spoiler {
+        Cow::Owned(hidden(text))
+    } else {
+        Cow::Borrowed(text)
+    }
 }
 
 /// Spoiler text as blocks of the same width; the message view shows the
@@ -1098,12 +1107,17 @@ mod tests {
     }
 
     #[test]
-    fn code_blocks_in_spoilers_are_hidden() {
-        let code = |spoiler| RichText {
+    fn spoiler_text_in_code_blocks_is_hidden() {
+        let code = |runs: &[(&str, bool)]| RichText {
             blocks: vec![Block::Code {
                 language: None,
-                text: "let x;\n\n\tx".into(),
-                spoiler,
+                runs: runs
+                    .iter()
+                    .map(|&(text, spoiler)| rich::CodeRun {
+                        text: text.into(),
+                        spoiler,
+                    })
+                    .collect(),
             }],
         };
         let rows = |rich: &RichText| -> Vec<String> {
@@ -1114,8 +1128,19 @@ mod tests {
                 .map(|row| row.spans.iter().map(|span| span.content.as_ref()).collect())
                 .collect()
         };
-        assert_eq!(rows(&code(true)), ["██████", "", "    █"]);
-        assert_eq!(rows(&code(false)), ["let x;", "", "    x"]);
+        // A code block in a spoiler.
+        let block = "let x;\n\n\tx";
+        assert_eq!(rows(&code(&[(block, true)])), ["██████", "", "    █"]);
+        assert_eq!(rows(&code(&[(block, false)])), ["let x;", "", "    x"]);
+        // Spoilers in a code block, one of them over a line break.
+        let runs = [
+            ("x = ", false),
+            ("secret", true),
+            ("\n\ty = ", false),
+            ("two\nlines", true),
+            (";", false),
+        ];
+        assert_eq!(rows(&code(&runs)), ["x = ██████", "    y = ███", "█████;"]);
     }
 
     #[test]

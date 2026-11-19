@@ -64,20 +64,21 @@ impl Matrix {
     ) -> Matrix {
         let settings = client.notification_settings().await;
         let rooms = rooms::Rooms::new(client.clone(), settings.clone(), to_core.clone());
-        let send_updates = client.send_queue().subscribe();
-        let edits = Edits::default();
-        let mut tasks = JoinSet::new();
-        tasks.spawn(watch_sync(client.clone(), sync.state(), to_core.clone()));
-        tasks.spawn(rooms::run(rooms, sync.rooms()));
-        tasks.spawn(send_queue::handle_failures(
-            client.clone(),
-            edits.clone(),
-            send_updates,
-            to_core.clone(),
-        ));
         let files = Files { download_dir, home };
-        let effects = run_effects(client, settings, receipts, files, edits, to_core, effects);
-        tasks.spawn(effects);
+        let mut tasks = JoinSet::new();
+        // First, so the send queue's updates are watched before `watch_sync`
+        // enables the queues.
+        spawn_send_paths(
+            &mut tasks,
+            client.clone(),
+            settings,
+            receipts,
+            files,
+            to_core.clone(),
+            effects,
+        );
+        tasks.spawn(watch_sync(client, sync.state(), to_core.clone()));
+        tasks.spawn(rooms::run(rooms, sync.rooms()));
         Matrix { tasks, sync }
     }
 
@@ -144,6 +145,31 @@ async fn watch_sync(
 struct Files {
     download_dir: PathBuf,
     home: PathBuf,
+}
+
+/// Spawns in `tasks` the effects (`run_effects`) and the task that answers
+/// and reports the requests leaving the send queue
+/// (`send_queue::handle_failures`); the latter's subscription to the send
+/// queue's updates is made before any effect runs, so it sees every
+/// request's outcome.
+fn spawn_send_paths(
+    tasks: &mut JoinSet<()>,
+    client: Client,
+    settings: NotificationSettings,
+    receipts: ReceiptKind,
+    files: Files,
+    to_core: UnboundedSender<Msg>,
+    effects: UnboundedReceiver<MatrixEffect>,
+) {
+    let edits = Edits::default();
+    tasks.spawn(send_queue::handle_failures(
+        client.clone(),
+        edits.clone(),
+        client.send_queue().subscribe(),
+        to_core.clone(),
+    ));
+    let effects = run_effects(client, settings, receipts, files, edits, to_core, effects);
+    tasks.spawn(effects);
 }
 
 /// A request for a room's send queue, see `send_messages`.
@@ -569,3 +595,6 @@ fn logged(what: &str, brief: &dyn Display, full: &dyn Display) -> String {
     debug!("{what}: {full}");
     format!("{what}: {brief}")
 }
+
+#[cfg(test)]
+mod tests;

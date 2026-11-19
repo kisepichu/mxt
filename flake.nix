@@ -38,7 +38,10 @@
             allowBuiltinFetchGit = true;
           };
           cargoBuildFlags = [ "--package" "mxt" ];
-          cargoTestFlags = [ "--workspace" ];
+          # mxt-matrix's tests enable matrix-sdk's `testing` feature, which
+          # would build the SDK stack a second time; ci.yml's check job runs
+          # them on Linux and macOS.
+          cargoTestFlags = [ "--workspace" "--exclude" "mxt-matrix" ];
           # matrix-sdk needs these (the same inputs as nixpkgs' iamb package).
           nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = [

@@ -12,7 +12,7 @@ use matrix_sdk::ruma::{
 };
 use mxt_core::{
     ids::UserId,
-    rich::{Block, Inline, MentionTarget, RichText, Style},
+    rich::{Block, CodeRun, Inline, MentionTarget, RichText, Style},
 };
 
 /// Elements nested deeper than this are dropped, as the SDK's sanitizer drops
@@ -372,7 +372,8 @@ impl Line {
 }
 
 /// A `<pre>` as a code block: its text as written, with the language of the
-/// `<code>` inside it; `spoiler` when the `<pre>` is in a spoiler.
+/// `<code>` inside it, and the spoilers in it; all of it is spoiler text
+/// when the `<pre>` is in a spoiler (`spoiler`).
 fn code_block(pre: &NodeRef, spoiler: bool, depth: usize) -> Block {
     let language = pre
         .children()
@@ -380,34 +381,51 @@ fn code_block(pre: &NodeRef, spoiler: bool, depth: usize) -> Block {
             MatrixElement::Code(code) => code.language.map(|language| language.to_string()),
             _ => None,
         });
-    let mut text = String::new();
-    raw_text(pre, depth, &mut text);
+    let mut runs = Vec::new();
+    code_runs(pre, spoiler, depth, &mut runs);
     // The newline before `</code></pre>` ends the last line; it is not an
     // empty line.
-    if text.ends_with('\n') {
-        text.pop();
+    if let Some(last) = runs.last_mut()
+        && last.text.ends_with('\n')
+    {
+        last.text.pop();
+        if last.text.is_empty() {
+            runs.pop();
+        }
     }
-    Block::Code {
-        language,
-        text,
-        spoiler,
-    }
+    Block::Code { language, runs }
 }
 
-/// The text in `node` as written, with `<br>` as a newline.
-fn raw_text(node: &NodeRef, depth: usize, out: &mut String) {
+/// The text in `node` as written, with `<br>` as a newline, as runs of
+/// spoiler text and other text; `spoiler` when `node` is in a spoiler.
+/// Other elements keep only their text.
+fn code_runs(node: &NodeRef, spoiler: bool, depth: usize, runs: &mut Vec<CodeRun>) {
     for child in node.children() {
         match child.data() {
-            NodeData::Text(text) => out.push_str(&text.borrow()),
+            NodeData::Text(text) => push_run(runs, &text.borrow(), spoiler),
             NodeData::Element(element) if depth + 1 < MAX_DEPTH => {
-                if &*element.name.local == "br" {
-                    out.push('\n');
-                } else {
-                    raw_text(&child, depth + 1, out);
+                match element.to_matrix().element {
+                    MatrixElement::Br => push_run(runs, "\n", spoiler),
+                    MatrixElement::Span(span) if span.spoiler.is_some() => {
+                        code_runs(&child, true, depth + 1, runs);
+                    }
+                    _ => code_runs(&child, spoiler, depth + 1, runs),
                 }
             }
             _ => {}
         }
+    }
+}
+
+/// Appends `text` to the last run when it is the same kind of text.
+fn push_run(runs: &mut Vec<CodeRun>, text: &str, spoiler: bool) {
+    match runs.last_mut() {
+        Some(last) if last.spoiler == spoiler => last.text.push_str(text),
+        _ if text.is_empty() => {}
+        _ => runs.push(CodeRun {
+            text: text.to_owned(),
+            spoiler,
+        }),
     }
 }
 
@@ -621,6 +639,19 @@ mod tests {
         );
     }
 
+    fn code(language: Option<&str>, runs: &[(&str, bool)]) -> Block {
+        Block::Code {
+            language: language.map(str::to_owned),
+            runs: runs
+                .iter()
+                .map(|&(text, spoiler)| CodeRun {
+                    text: text.into(),
+                    spoiler,
+                })
+                .collect(),
+        }
+    }
+
     #[test]
     fn pre_code_is_a_code_block_with_its_language() {
         assert_eq!(
@@ -629,16 +660,11 @@ mod tests {
                  <pre><code>a  b\n\nc\n</code></pre>"
             ),
             vec![
-                Block::Code {
-                    language: Some("rust".into()),
-                    text: "fn main() {\n    println!(\"hi\");\n}".into(),
-                    spoiler: false,
-                },
-                Block::Code {
-                    language: None,
-                    text: "a  b\n\nc".into(),
-                    spoiler: false,
-                },
+                code(
+                    Some("rust"),
+                    &[("fn main() {\n    println!(\"hi\");\n}", false)]
+                ),
+                code(None, &[("a  b\n\nc", false)]),
             ]
         );
     }
@@ -648,26 +674,47 @@ mod tests {
         let rich = render_html(
             "<span data-mx-spoiler>the answer: <pre><code class=\"language-py\">\
              print(42)\n</code></pre></span><blockquote><span data-mx-spoiler>\
-             <pre>quoted</pre></span></blockquote><pre>shown</pre>",
+             <pre>quo<span data-mx-spoiler>ted</span></pre></span></blockquote><pre>shown</pre>",
         );
-        let code = |language: Option<&str>, text: &str, spoiler| Block::Code {
-            language: language.map(str::to_owned),
-            text: text.into(),
-            spoiler,
-        };
         assert_eq!(
             rich.blocks,
             vec![
                 paragraph(vec![styled("the answer:", |s| s.spoiler = true)]),
-                code(Some("py"), "print(42)", true),
-                Block::Quote(vec![code(None, "quoted", true)]),
-                code(None, "shown", false),
+                code(Some("py"), &[("print(42)", true)]),
+                Block::Quote(vec![code(None, &[("quoted", true)])]),
+                code(None, &[("shown", false)]),
             ]
         );
         // A reply preview shows none of their text.
         assert_eq!(
             rich.to_plain_hiding_spoilers(),
             "[spoiler]\n[spoiler]\n> [spoiler]\nshown"
+        );
+    }
+
+    #[test]
+    fn spoilers_in_code_blocks_are_spoiler_runs() {
+        let rich = render_html(
+            "<pre><code>x = <span data-mx-spoiler>secret</span>\n\
+             <b>y</b> = <span data-mx-spoiler>two<br>lines</span>\n</code></pre>",
+        );
+        assert_eq!(
+            rich.blocks,
+            vec![code(
+                None,
+                &[
+                    ("x = ", false),
+                    ("secret", true),
+                    ("\ny = ", false),
+                    ("two\nlines", true),
+                ]
+            )]
+        );
+        assert_eq!(rich.to_plain(), "x = secret\ny = two\nlines");
+        // A reply preview hides them.
+        assert_eq!(
+            rich.to_plain_hiding_spoilers(),
+            "x = [spoiler]\ny = [spoiler]"
         );
     }
 
