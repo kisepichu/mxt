@@ -1,11 +1,12 @@
 //! The `Matrix` handle: runs the tasks that report to the core while the
 //! sync loop runs, and executes matrix effects.
 
-use std::{fmt::Display, sync::Arc};
+use std::{fmt::Display, path::PathBuf, sync::Arc};
 
 use matrix_sdk::{
     Client, Room, RoomMemberships,
     latest_events::LatestEventValue,
+    notification_settings::{NotificationSettings, RoomNotificationMode},
     room::{Receipts, RoomMember},
     ruma::OwnedEventId,
 };
@@ -29,7 +30,7 @@ use tracing::{debug, warn};
 use crate::{
     Error, SyncLoop,
     error::without_url,
-    rooms, send_queue,
+    media, rooms, send_queue,
     timeline::{Subscription, event_id, redact, resend, send_message, toggle_reaction},
 };
 
@@ -44,29 +45,35 @@ impl Matrix {
     /// info updates and notification settings changes into
     /// `Msg::RoomUpserted` / `Msg::RoomRemoved`, the sync loop's state into
     /// `Msg::SyncState`, and edits, reactions and redactions that fail for
-    /// good into `Msg::EffectFailed` (see `send_queue`). The effects sent to
-    /// `effects` run in the background; failures arrive as
+    /// good, and uploads, into `Msg::EffectFailed` (see `send_queue`). The
+    /// effects sent to `effects` run in the background; failures arrive as
     /// `Msg::EffectFailed`, and sends are answered with `Msg::SendQueued` or
-    /// `Msg::SendFailed`.
+    /// `Msg::SendFailed`. Downloads are saved in `download_dir`
+    /// (`files.download_dir`), and a leading `~/` in an upload's path stands
+    /// for `home`.
     pub async fn start(
         client: Client,
         sync: SyncLoop,
         receipts: ReceiptKind,
+        download_dir: PathBuf,
+        home: PathBuf,
         to_core: UnboundedSender<Msg>,
         effects: UnboundedReceiver<MatrixEffect>,
     ) -> Matrix {
         let settings = client.notification_settings().await;
-        let rooms = rooms::Rooms::new(client.clone(), settings, to_core.clone());
+        let rooms = rooms::Rooms::new(client.clone(), settings.clone(), to_core.clone());
         let send_updates = client.send_queue().subscribe();
         let mut tasks = JoinSet::new();
         tasks.spawn(watch_sync(client.clone(), sync.state(), to_core.clone()));
         tasks.spawn(rooms::run(rooms, sync.rooms()));
-        tasks.spawn(send_queue::drop_failed_aggregations(
+        tasks.spawn(send_queue::handle_failures(
             client.clone(),
             send_updates,
             to_core.clone(),
         ));
-        tasks.spawn(run_effects(client, receipts, to_core, effects));
+        let files = Files { download_dir, home };
+        let effects = run_effects(client, settings, receipts, files, to_core, effects);
+        tasks.spawn(effects);
         Matrix { tasks, sync }
     }
 
@@ -128,17 +135,41 @@ async fn watch_sync(
     }
 }
 
-/// Subscriptions run in order, so the last one wins; messages are queued in
-/// the order they were sent, by `send_messages`; the rest runs concurrently.
+/// Where downloads go, and what a leading `~/` in an upload's path stands
+/// for.
+struct Files {
+    download_dir: PathBuf,
+    home: PathBuf,
+}
+
+/// A request for a room's send queue, see `send_messages`.
+enum Queued {
+    Message(Arc<Timeline>, SendId, Outgoing),
+    Upload(Room, PathBuf),
+}
+
+/// Subscriptions run in order, so the last one wins; messages and uploads
+/// are queued in the order they were sent, by `send_messages`, and
+/// notification modes change in order, by `set_mutes`; the rest runs
+/// concurrently.
 async fn run_effects(
     client: Client,
+    settings: NotificationSettings,
     receipts: ReceiptKind,
+    files: Files,
     to_core: UnboundedSender<Msg>,
     mut queue: UnboundedReceiver<MatrixEffect>,
 ) {
     let mut running = JoinSet::new();
     let (sends, to_send) = mpsc::unbounded_channel();
     running.spawn(send_messages(to_send, to_core.clone()));
+    let (mutes, to_mute) = mpsc::unbounded_channel();
+    running.spawn(set_mutes(
+        client.clone(),
+        settings,
+        to_mute,
+        to_core.clone(),
+    ));
     // The open room's timeline; at most one.
     let mut timeline: Option<Subscription> = None;
     loop {
@@ -181,7 +212,7 @@ async fn run_effects(
                 Some(MatrixEffect::Send { room, id, message }) => {
                     match open_timeline(&timeline, &room) {
                         Ok(open) => {
-                            let _ = sends.send((open, id, message));
+                            let _ = sends.send(Queued::Message(open, id, message));
                         }
                         Err(error) => report_send(&to_core, id, &error),
                     }
@@ -204,13 +235,29 @@ async fn run_effects(
                 Some(MatrixEffect::LoadMembers(room)) => {
                     running.spawn(load_members(client.clone(), room, to_core.clone()));
                 }
-                // Notification modes and media arrive in phase 4 Task 2.
-                Some(
-                    MatrixEffect::SetMute { .. }
-                    | MatrixEffect::Download { .. }
-                    | MatrixEffect::Upload { .. }
-                    | MatrixEffect::FetchImage { .. },
-                ) => {}
+                Some(MatrixEffect::SetMute { room, muted }) => {
+                    let _ = mutes.send((room, muted));
+                }
+                Some(MatrixEffect::Download { room, item }) => {
+                    let (client, dir) = (client.clone(), files.download_dir.clone());
+                    let open = open_timeline(&timeline, &room);
+                    let downloaded =
+                        async move { media::download(&client, &*open?, &item, dir).await };
+                    running.spawn(answered(&to_core, "Downloading the file failed", downloaded));
+                }
+                Some(MatrixEffect::Upload { room, path }) => match sdk_room(&client, &room) {
+                    Ok(room) => {
+                        let path = media::expand_home(&path, &files.home);
+                        let _ = sends.send(Queued::Upload(room, path));
+                    }
+                    Err(error) => report(&to_core, "Uploading the file failed", &error),
+                },
+                Some(MatrixEffect::FetchImage { room, item }) => {
+                    let client = client.clone();
+                    let open = open_timeline(&timeline, &room);
+                    let fetched = async move { media::fetch_image(&client, &*open?, item).await };
+                    running.spawn(answered(&to_core, "Loading the image failed", fetched));
+                }
                 None => break,
             },
             Some(finished) = running.join_next(), if !running.is_empty() => pass_on(finished),
@@ -236,24 +283,97 @@ where
     }
 }
 
-/// Queues the messages one at a time, in the order they were sent, and
-/// answers each with `Msg::SendQueued` or `Msg::SendFailed`. A reply or an
-/// edit of a sent message fetches its target event first when the event
-/// cache lacks it, which can take up to three attempts of the client's
-/// request timeout, and a later message must not overtake it; meanwhile the
-/// other effects (switching rooms, pagination, receipts) do not wait.
-async fn send_messages(
-    mut messages: UnboundedReceiver<(Arc<Timeline>, SendId, Outgoing)>,
-    to_core: UnboundedSender<Msg>,
-) {
-    while let Some((timeline, id, message)) = messages.recv().await {
-        match send_message(&timeline, message).await {
-            Ok(()) => {
-                let _ = to_core.send(Msg::SendQueued { id });
+/// `effect`, with its answer sent to the core, or its failure reported as
+/// `what`.
+fn answered<F>(
+    to_core: &UnboundedSender<Msg>,
+    what: &'static str,
+    effect: F,
+) -> impl Future<Output = ()> + use<F>
+where
+    F: Future<Output = Result<Msg, Error>>,
+{
+    let to_core = to_core.clone();
+    async move {
+        match effect.await {
+            Ok(answer) => {
+                let _ = to_core.send(answer);
             }
-            Err(error) => report_send(&to_core, id, &error),
+            Err(error) => report(&to_core, what, &error),
         }
     }
+}
+
+/// Queues the messages and uploads one at a time, in the order they were
+/// sent; a message is answered with `Msg::SendQueued` or `Msg::SendFailed`,
+/// an upload that cannot be queued is reported. A reply or an edit of a
+/// sent message fetches its target event first when the event cache lacks
+/// it, which can take up to three attempts of the client's request timeout,
+/// and an upload reads its file (and fetches the homeserver's upload limit
+/// once); a later message must not overtake either, so it waits. Meanwhile
+/// the other effects (switching rooms, pagination, receipts) do not wait.
+async fn send_messages(mut requests: UnboundedReceiver<Queued>, to_core: UnboundedSender<Msg>) {
+    while let Some(request) = requests.recv().await {
+        match request {
+            Queued::Message(timeline, id, message) => {
+                match send_message(&timeline, message).await {
+                    Ok(()) => {
+                        let _ = to_core.send(Msg::SendQueued { id });
+                    }
+                    Err(error) => report_send(&to_core, id, &error),
+                }
+            }
+            Queued::Upload(room, path) => {
+                if let Err(error) = media::upload(&room, path).await {
+                    report(&to_core, "Uploading the file failed", &error);
+                }
+            }
+        }
+    }
+}
+
+/// Changes notification modes one at a time, in the order they were asked
+/// for: each change reads the push rules the previous one left, so muting
+/// and then unmuting a room ends with the room unmuted. The room's mode in
+/// the room list changes when the push rules arrive with the sync.
+async fn set_mutes(
+    client: Client,
+    settings: NotificationSettings,
+    mut changes: UnboundedReceiver<(RoomId, bool)>,
+    to_core: UnboundedSender<Msg>,
+) {
+    while let Some((room, muted)) = changes.recv().await {
+        if let Err(error) = set_mute(&client, &settings, &room, muted).await {
+            let what = if muted {
+                "Muting the room failed"
+            } else {
+                "Unmuting the room failed"
+            };
+            report(&to_core, what, &error);
+        }
+    }
+}
+
+/// Muting sets the room's mode to mute; unmuting removes the room's
+/// user-defined rules, so the account default applies again (design,
+/// "Mute").
+async fn set_mute(
+    client: &Client,
+    settings: &NotificationSettings,
+    room: &RoomId,
+    muted: bool,
+) -> Result<(), Error> {
+    let room = sdk_room(client, room)?;
+    let changed = if muted {
+        settings
+            .set_room_notification_mode(room.room_id(), RoomNotificationMode::Mute)
+            .await
+    } else {
+        settings
+            .delete_user_defined_room_rules(room.room_id())
+            .await
+    };
+    changed.map_err(Error::NotificationSettings)
 }
 
 /// `room`'s timeline if it is the open one: sending, reactions and

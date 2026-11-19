@@ -100,12 +100,13 @@ fn main() -> ExitCode {
         eprintln!("mxt: {message}");
         return ExitCode::FAILURE;
     }
-    run(config, &paths)
+    run(config, &paths, home)
 }
 
 /// Everything after the configuration: the directories, the lock, the log,
-/// then the startup flow until `:q`. The lock is released last.
-fn run(config: Config, paths: &Paths) -> ExitCode {
+/// then the startup flow until `:q`. The lock is released last. `home` is
+/// the checked `HOME`.
+fn run(config: Config, paths: &Paths, home: PathBuf) -> ExitCode {
     if let Err(error) = paths.create_dirs() {
         eprintln!("mxt: {error}");
         return ExitCode::FAILURE;
@@ -154,7 +155,7 @@ fn run(config: Config, paths: &Paths) -> ExitCode {
     let task = {
         let handle = runtime.handle().clone();
         let paths = paths.clone();
-        runtime.spawn_blocking(move || handle.block_on(startup::run(config, &paths)))
+        runtime.spawn_blocking(move || handle.block_on(startup::run(config, &paths, home)))
     };
     let outcome = match runtime.block_on(task) {
         Ok(outcome) => outcome,

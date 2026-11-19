@@ -6,7 +6,7 @@
 
 use std::error::Error;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use mxt_core::app::App;
@@ -53,11 +53,12 @@ pub enum Invalid {
 }
 
 /// Runs mxt from the session to the end of the terminal UI. The caller holds
-/// the data directory lock and drops the runtime afterwards.
-pub async fn run(config: Config, paths: &Paths) -> Outcome {
+/// the data directory lock and drops the runtime afterwards. A leading `~/`
+/// in an upload's path stands for `home`.
+pub async fn run(config: Config, paths: &Paths, home: PathBuf) -> Outcome {
     let connected = connect(&config.user_id, config.homeserver.as_deref(), paths).await;
     match connected {
-        Ok((client, sync, mut session)) => run_ui(client, sync, &mut session, config).await,
+        Ok((client, sync, mut session)) => run_ui(client, sync, &mut session, config, home).await,
         Err(outcome) => outcome,
     }
 }
@@ -225,6 +226,7 @@ async fn run_ui(
     sync: SyncLoop,
     session: &mut SessionWatch,
     config: Config,
+    home: PathBuf,
 ) -> Outcome {
     let Config {
         user_id,
@@ -232,6 +234,7 @@ async fn run_ui(
         settings,
         time_format,
         room_list_layout,
+        download_dir,
         opener,
         ..
     } = config;
@@ -240,7 +243,8 @@ async fn run_ui(
     let mut app = App::new(keymap, settings, user_id);
     let (to_core, from_matrix) = mpsc::unbounded_channel();
     let (to_matrix, effects) = mpsc::unbounded_channel();
-    let mut matrix = Matrix::start(client, sync, receipts, to_core, effects).await;
+    let mut matrix =
+        Matrix::start(client, sync, receipts, download_dir, home, to_core, effects).await;
     mxt_tui::install_panic_hook();
     let mut tui = match Tui::new(opener, image_preview) {
         Ok(tui) => tui,

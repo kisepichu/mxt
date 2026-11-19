@@ -126,8 +126,10 @@ fn gx_on_an_attachment_downloads_it_and_opens_the_saved_file() {
     let mut app = opened();
     reset(&mut app, vec![image(1), file(2)]);
     assert_eq!(gx(&mut app), vec![download(remote(2))]);
+    assert_eq!(info(&app), Some("Downloading notes.pdf"));
     keys(&mut app, "k");
     assert_eq!(gx(&mut app), vec![download(remote(1))]);
+    assert_eq!(info(&app), Some("Downloading cat.png"));
     let path = "/downloads/cat (1).png";
     assert_eq!(
         app.update(Msg::Downloaded { path: path.into() }),

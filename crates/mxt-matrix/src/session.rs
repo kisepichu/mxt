@@ -187,25 +187,7 @@ mod tests {
     };
 
     use super::*;
-
-    /// A fresh directory under the system's temporary directory, removed on drop.
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(name: &str) -> TempDir {
-            let path =
-                std::env::temp_dir().join(format!("mxt-matrix-test-{}-{name}", std::process::id()));
-            let _ = fs::remove_dir_all(&path);
-            fs::create_dir_all(&path).unwrap();
-            TempDir(path)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_dir::TestDir;
 
     fn made_up_session() -> SavedSession {
         SavedSession {
@@ -225,8 +207,8 @@ mod tests {
 
     #[test]
     fn a_saved_session_loads_back_and_is_private() {
-        let dir = TempDir::new("round-trip");
-        let path = dir.0.join("session.json");
+        let dir = TestDir::new("round-trip");
+        let path = dir.join("session.json");
 
         save_session(&path, &made_up_session()).unwrap();
         let loaded = load_session(&path)
@@ -241,15 +223,15 @@ mod tests {
 
     #[test]
     fn saving_replaces_an_existing_session_file() {
-        let dir = TempDir::new("replace");
-        let path = dir.0.join("session.json");
+        let dir = TestDir::new("replace");
+        let path = dir.join("session.json");
         fs::write(&path, "old").unwrap();
 
         save_session(&path, &made_up_session()).unwrap();
 
         assert!(load_session(&path).unwrap().is_some());
         assert_eq!(
-            fs::read_dir(&dir.0).unwrap().count(),
+            fs::read_dir(&*dir).unwrap().count(),
             1,
             "no temporary file is left"
         );
@@ -257,9 +239,9 @@ mod tests {
 
     #[test]
     fn a_leftover_temporary_file_is_replaced_by_a_private_one() {
-        let dir = TempDir::new("leftover");
-        let path = dir.0.join("session.json");
-        let temporary = dir.0.join("session.json.tmp");
+        let dir = TestDir::new("leftover");
+        let path = dir.join("session.json");
+        let temporary = dir.join("session.json.tmp");
         fs::write(&temporary, "partial").unwrap();
         fs::set_permissions(&temporary, fs::Permissions::from_mode(0o644)).unwrap();
 
@@ -273,9 +255,9 @@ mod tests {
 
     #[test]
     fn a_failed_save_names_the_file_and_leaves_no_temporary_file() {
-        let dir = TempDir::new("failed-save");
+        let dir = TestDir::new("failed-save");
         // Renaming a file onto a non-empty directory fails.
-        let path = dir.0.join("session.json");
+        let path = dir.join("session.json");
         fs::create_dir(&path).unwrap();
         fs::write(path.join("occupied"), "").unwrap();
 
@@ -287,13 +269,13 @@ mod tests {
                 .starts_with(&format!("{}: ", path.display())),
             "{error}"
         );
-        assert!(!dir.0.join("session.json.tmp").exists());
+        assert!(!dir.join("session.json.tmp").exists());
     }
 
     #[test]
     fn a_missing_session_file_loads_as_none() {
-        let dir = TempDir::new("missing");
-        assert!(load_session(&dir.0.join("session.json")).unwrap().is_none());
+        let dir = TestDir::new("missing");
+        assert!(load_session(&dir.join("session.json")).unwrap().is_none());
     }
 
     #[test]
