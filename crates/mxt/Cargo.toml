@@ -9,8 +9,6 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-crossterm.workspace = true
-futures-util.workspace = true
 mxt-core.workspace = true
 mxt-matrix.workspace = true
 mxt-tui.workspace = true

@@ -6,12 +6,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{DisableFocusChange, EnableFocusChange, Event};
+use crossterm::event::{DisableFocusChange, EnableFocusChange, Event, EventStream};
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
-use edtui::{EditorState, system_editor};
+use edtui::system_editor;
+use futures_util::StreamExt as _;
 use mxt_core::app::{App, Focus};
 use mxt_core::effect::{UiEffect, ViewContent};
+use mxt_core::ids::RoomId;
 use mxt_core::msg::{EditorMode, Msg, Pane};
 use mxt_core::resolver::TimerId;
 use ratatui::Terminal;
@@ -36,6 +38,9 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub struct Tui {
     terminal: Terminal<Backend>,
+    /// Terminal input, created by the first [`Tui::next_event`] after
+    /// [`Tui::new`] or the external editor.
+    events: Option<EventStream>,
     /// The room list's cursor and scroll offset between frames.
     room_list: ListState,
     /// The room list range last reported with `Msg::Viewport`.
@@ -65,6 +70,7 @@ impl Tui {
                 let register = SharedRegister::default();
                 Ok(Tui {
                     terminal,
+                    events: None,
                     room_list: ListState::default(),
                     room_list_viewport: None,
                     timeline: TimelinePane::new(),
@@ -150,6 +156,15 @@ impl Tui {
         Ok(msgs)
     }
 
+    /// The next terminal event, `None` once the input has ended. Safe to
+    /// cancel, as in `select!`.
+    pub async fn next_event(&mut self) -> Option<io::Result<Event>> {
+        self.events
+            .get_or_insert_with(EventStream::new)
+            .next()
+            .await
+    }
+
     /// Converts one terminal event. Key presses and repeats become `Msg::Key`
     /// with the mode of the editor that has the keys: the message view's
     /// while it is open, otherwise the open room's composer's while it has
@@ -195,9 +210,9 @@ impl Tui {
     ///   it is empty and, in insert mode, `Msg::MentionQuery` when they
     ///   change the `@` token; `ClearComposer` and `LoadComposer` leave the
     ///   emptiness to the core.
-    /// - `ExternalEditor` runs `$VISUAL` or `$EDITOR` on the main screen,
-    ///   and so does edtui's own `<C-e>` when a replayed key reaches it. A
-    ///   failure becomes `Msg::EffectFailed`.
+    /// - `ExternalEditor` runs `$VISUAL` or `$EDITOR` on the main screen
+    ///   (see [`Tui::edit_externally`]). A failure becomes
+    ///   `Msg::EffectFailed`.
     /// - `Quit` sets `should_quit`.
     pub fn execute(&mut self, effect: UiEffect, now: Instant) -> Vec<Msg> {
         let mut msgs = Vec::new();
@@ -213,7 +228,6 @@ impl Tui {
                     keys.into_iter().for_each(|key| view.feed(key));
                 } else if let Some(composer) = self.composers.focused_mut() {
                     composer.replay(&keys, &mut msgs);
-                    edit_externally(&mut self.terminal, composer, &mut msgs);
                 }
             }
             UiEffect::OpenView(ViewContent::Text(text)) => {
@@ -246,15 +260,50 @@ impl Tui {
                     composer.replace_token(&text, &mut msgs);
                 }
             }
-            UiEffect::ExternalEditor(room) => {
-                if let Some(composer) = self.composers.get_mut(&room) {
-                    composer.request_external_editor();
-                    edit_externally(&mut self.terminal, composer, &mut msgs);
-                }
-            }
+            UiEffect::ExternalEditor(room) => self.edit_externally(&room, &mut msgs),
             UiEffect::Quit => self.should_quit = true,
         }
         msgs
+    }
+
+    /// Runs the external editor on the room's composer.
+    ///
+    /// - The event stream is dropped first. While a poll of it is pending,
+    ///   as after a timer won the event loop's `select!`, its reader thread
+    ///   waits on the terminal and would take keys from the editor. The new
+    ///   stream after the editor shares crossterm's event queue, so no event
+    ///   is lost.
+    /// - edtui leaves raw mode and the alternate screen around the editor
+    ///   and clears the terminal after it, so the next draw repaints
+    ///   everything. The editor gets the cursor shown and no focus reports.
+    /// - A panic in another task while the editor runs restores the
+    ///   terminal under it, and edtui enters raw mode and the alternate
+    ///   screen again afterwards, so they are left again. The next draw
+    ///   then ends the event loop.
+    fn edit_externally(&mut self, room: &RoomId, msgs: &mut Vec<Msg>) {
+        let Some(composer) = self.composers.get_mut(room) else {
+            return;
+        };
+        self.events = None;
+        let terminal = &mut self.terminal;
+        // edtui's request is made right before its `open`, which takes it,
+        // so a failure here does not leave it pending.
+        let edited = execute!(io::stdout(), DisableFocusChange, Show).and_then(|()| {
+            let edited =
+                composer.edit_externally(msgs, |state| system_editor::open(state, terminal));
+            let restored = if ACTIVE.load(Ordering::SeqCst) {
+                execute!(io::stdout(), EnableFocusChange, Hide)
+            } else {
+                crossterm::terminal::disable_raw_mode()
+                    .and_then(|()| execute!(io::stdout(), LeaveAlternateScreen))
+            };
+            edited.and(restored)
+        });
+        if let Err(error) = edited {
+            msgs.push(Msg::EffectFailed {
+                error: format!("The external editor failed: {error}"),
+            });
+        }
     }
 
     pub fn should_quit(&self) -> bool {
@@ -284,24 +333,6 @@ impl Drop for Tui {
     fn drop(&mut self) {
         // Nothing is left to report the error to.
         let _ = self.restore();
-    }
-}
-
-/// Runs the external editor if the composer asked for it. edtui leaves raw
-/// mode and the alternate screen around it and clears the terminal after it,
-/// so the next draw repaints everything; the editor gets the cursor shown
-/// and no focus reports.
-fn edit_externally(terminal: &mut Terminal<Backend>, composer: &mut Composer, msgs: &mut Vec<Msg>) {
-    let open = |state: &mut EditorState| {
-        execute!(io::stdout(), DisableFocusChange, Show)?;
-        let edited = system_editor::open(state, terminal);
-        let restored = execute!(io::stdout(), EnableFocusChange, Hide);
-        edited.and(restored)
-    };
-    if let Err(error) = composer.edit_externally(msgs, open) {
-        msgs.push(Msg::EffectFailed {
-            error: format!("The external editor failed: {error}"),
-        });
     }
 }
 

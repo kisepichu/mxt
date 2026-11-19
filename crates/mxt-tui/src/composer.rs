@@ -4,9 +4,10 @@
 //! the `@` token at its cursor, which a composer reports when they change.
 
 use std::collections::HashMap;
+use std::io;
 
 use edtui::actions::{LineBreak, MoveForward, OpenSystemEditor, SwitchMode};
-use edtui::{EditorState, Index2, Lines, RowIndex, system_editor};
+use edtui::{EditorState, Index2, Lines, RowIndex};
 use mxt_core::action::FocusMode;
 use mxt_core::ids::RoomId;
 use mxt_core::keys::Key;
@@ -103,14 +104,21 @@ impl Composer {
 
     /// The rows the text takes at `width` columns, at least one. Like
     /// edtui's wrapping, a character that does not fit on a row moves to the
-    /// next one whole, and an empty line takes a row.
+    /// next one whole, and an empty line takes a row. In insert mode the
+    /// cursor after the end of its line takes a column too: edtui draws it
+    /// on the next row when the line's last row is full.
     pub(crate) fn rows(&self, width: usize) -> usize {
-        let rows: usize = self
-            .editor
-            .state
+        let state = &self.editor.state;
+        let insert = state.mode == edtui::EditorMode::Insert;
+        let rows: usize = state
             .lines
             .iter_row()
-            .map(|line| wrapped_rows(line, width))
+            .enumerate()
+            .map(|(row, line)| {
+                let cursor_after =
+                    insert && row == state.cursor.row && state.cursor.col >= line.len();
+                wrapped_rows(line, width, cursor_after)
+            })
             .sum();
         rows.max(1)
     }
@@ -121,11 +129,15 @@ impl Composer {
 
     /// `FocusComposer`. Insert mode starts after the character under the
     /// cursor, like `a`, so the text continues where leaving insert mode
-    /// left it; `Keep` keeps the mode. The core closed its mention menu, so
-    /// the token is reported even when it did not change.
+    /// left it; a visual selection is dropped. `Keep` keeps the mode. The
+    /// core closed its mention menu, so the token is reported even when it
+    /// did not change.
     fn focus(&mut self, mode: FocusMode, msgs: &mut Vec<Msg>) {
         let state = &mut self.editor.state;
         if mode == FocusMode::Insert && state.mode != edtui::EditorMode::Insert {
+            // edtui keeps the selection when switching to insert mode, and
+            // it would stay highlighted while typing.
+            state.selection = None;
             state.execute(SwitchMode(edtui::EditorMode::Insert));
             state.execute(MoveForward(1));
         }
@@ -154,6 +166,13 @@ impl Composer {
     /// The core set its emptiness already.
     pub(crate) fn load(&mut self, text: &str, msgs: &mut Vec<Msg>) {
         self.reset(text);
+        self.move_to_end();
+        self.empty = text.is_empty();
+        self.report(msgs);
+    }
+
+    /// The cursor on the last character, or after it in insert mode.
+    fn move_to_end(&mut self) {
         let state = &mut self.editor.state;
         let row = state.lines.len().saturating_sub(1);
         let len = state.lines.len_col(row).unwrap_or(0);
@@ -163,8 +182,6 @@ impl Composer {
             len.saturating_sub(1)
         };
         state.cursor = Index2::new(row, col);
-        self.empty = text.is_empty();
-        self.report(msgs);
     }
 
     /// `ClearComposer`. The core set its emptiness and closed its menu.
@@ -187,9 +204,10 @@ impl Composer {
         self.editor.state = state;
     }
 
-    /// `ReplaceMentionToken`: the token at the cursor and the rest of its
-    /// word become `text` and a space, with the cursor after the space. The
-    /// core closed its menu.
+    /// `ReplaceMentionToken`: the token, from its `@` to the cursor, becomes
+    /// `text` and a space, with the cursor after the space. Text after the
+    /// cursor stays, also when it is glued to the token. The core closed its
+    /// menu.
     pub(crate) fn replace_token(&mut self, text: &str, msgs: &mut Vec<Msg>) {
         let state = &mut self.editor.state;
         let Some(line) = state.lines.get_mut(RowIndex::new(state.cursor.row)) else {
@@ -199,34 +217,27 @@ impl Composer {
         let Some(start) = token_start(line, col) else {
             return;
         };
-        let end = col
-            + line[col..]
-                .iter()
-                .take_while(|c| !c.is_whitespace())
-                .count();
-        line.splice(start..end, text.chars().chain([' ']));
+        line.splice(start..col, text.chars().chain([' ']));
         state.cursor.col = start + text.chars().count() + 1;
         self.query = None;
         self.report(msgs);
     }
 
-    /// Asks edtui to open the external editor; see [`Composer::edit_externally`].
-    pub(crate) fn request_external_editor(&mut self) {
-        self.editor.state.execute(OpenSystemEditor);
-    }
-
-    /// Runs `open` with the editor state if the external editor was asked
-    /// for, by [`Composer::request_external_editor`] or edtui's own `<C-e>`,
-    /// then reports the edit.
-    pub(crate) fn edit_externally<E>(
+    /// `ExternalEditor`: asks edtui for the external editor and runs `open`,
+    /// which is edtui's `system_editor::open`, with the editor state. After
+    /// the editor the cursor is at the end of the text, as after
+    /// `LoadComposer`, where edtui leaves it at the start. The edit is
+    /// reported also when `open` failed.
+    pub(crate) fn edit_externally(
         &mut self,
         msgs: &mut Vec<Msg>,
-        open: impl FnOnce(&mut EditorState) -> Result<(), E>,
-    ) -> Result<(), E> {
-        if !system_editor::is_pending(&self.editor.state) {
-            return Ok(());
-        }
+        open: impl FnOnce(&mut EditorState) -> io::Result<()>,
+    ) -> io::Result<()> {
+        self.editor.state.execute(OpenSystemEditor);
         let opened = open(&mut self.editor.state);
+        if opened.is_ok() {
+            self.move_to_end();
+        }
         self.report(msgs);
         opened
     }
@@ -282,14 +293,16 @@ fn token_start(line: &[char], col: usize) -> Option<usize> {
     (before.get(start) == Some(&'@')).then_some(start)
 }
 
-fn wrapped_rows(line: &[char], width: usize) -> usize {
+/// The rows `line` takes at `width` columns; with `cursor_after`, the cursor
+/// after its end takes a column as well.
+fn wrapped_rows(line: &[char], width: usize, cursor_after: bool) -> usize {
+    let columns = line.iter().map(|&c| match c {
+        '\t' => TAB_WIDTH,
+        c => grapheme_width(c.encode_utf8(&mut [0; 4])),
+    });
     let mut rows = 1;
     let mut used = 0;
-    for &c in line {
-        let columns = match c {
-            '\t' => TAB_WIDTH,
-            c => grapheme_width(c.encode_utf8(&mut [0; 4])),
-        };
+    for columns in columns.chain(cursor_after.then_some(1)) {
         if used > 0 && used + columns > width {
             rows += 1;
             used = 0;
@@ -303,6 +316,9 @@ fn wrapped_rows(line: &[char], width: usize) -> usize {
 mod tests {
     use super::*;
     use crate::editor::tests::keys;
+    use edtui::system_editor;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn composer() -> Composer {
         Composer::new(RoomId::new("!room:example.org"), SharedRegister::default())
@@ -404,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn accepting_replaces_the_token_and_the_rest_of_its_word() {
+    fn accepting_replaces_the_token_up_to_the_cursor() {
         let mut composer = focused("hi<Space>@alice");
         assert_eq!(
             type_keys(&mut composer, "<Left><Left><Left>"),
@@ -414,7 +430,26 @@ mod tests {
         composer.replace_token("@Alice", &mut msgs);
         assert_eq!(msgs, []);
         type_keys(&mut composer, "x");
-        assert_eq!(composer.text(), "hi @Alice x");
+        assert_eq!(composer.text(), "hi @Alice xice");
+    }
+
+    #[test]
+    fn accepting_keeps_text_glued_after_the_cursor() {
+        for (typed, expected) in [
+            // `@al` typed at the start of a Japanese draft.
+            (
+                "さん、確認お願いします<Esc>0i@al",
+                "@Alice xさん、確認お願いします",
+            ),
+            (",<Space>there<Esc>0ihi<Space>@al", "hi @Alice x, there"),
+        ] {
+            let mut composer = focused(typed);
+            let mut msgs = Vec::new();
+            composer.replace_token("@Alice", &mut msgs);
+            assert_eq!(msgs, []);
+            type_keys(&mut composer, "x");
+            assert_eq!(composer.text(), expected);
+        }
     }
 
     #[test]
@@ -426,17 +461,80 @@ mod tests {
     }
 
     #[test]
-    fn rows_wrap_whole_characters() {
-        let rows = |text: &str, width| {
-            let mut composer = composer();
+    fn focus_from_visual_mode_drops_the_selection() {
+        let mut composer = focused("hello<Esc>vh");
+        assert_eq!(composer.mode(), EditorMode::Visual);
+        composer.focus(FocusMode::Insert, &mut Vec::new());
+        assert_eq!(composer.mode(), EditorMode::Insert);
+        assert!(composer.editor.state.selection.is_none());
+    }
+
+    #[test]
+    fn the_external_editor_is_asked_for_and_its_edit_reported() {
+        let replace = |text: &'static str, result: io::Result<()>| {
+            move |state: &mut EditorState| {
+                // edtui's `open` does nothing unless it was asked for.
+                assert!(system_editor::is_pending(state));
+                state.lines = Lines::from(text);
+                state.cursor = Index2::new(0, 0);
+                result
+            }
+        };
+        let mut composer = focused("draft");
+        let mut msgs = Vec::new();
+        composer
+            .edit_externally(&mut msgs, replace("first\nsecond", Ok(())))
+            .unwrap();
+        assert_eq!(msgs, []);
+        // The cursor is at the end.
+        type_keys(&mut composer, "!");
+        assert_eq!(composer.text(), "first\nsecond!");
+
+        // A failure is returned after the edit is reported.
+        let failed = replace("", Err(io::Error::other("no editor")));
+        let error = composer.edit_externally(&mut msgs, failed).unwrap_err();
+        assert_eq!(error.to_string(), "no editor");
+        assert_eq!(msgs, [edited(true)]);
+    }
+
+    #[test]
+    fn rows_wrap_whole_characters_and_the_insert_cursor() {
+        let rows = |mut composer: Composer, text: &str, width| {
             composer.load(text, &mut Vec::new());
             composer.rows(width)
         };
-        assert_eq!(rows("", 4), 1);
-        assert_eq!(rows("abcd", 4), 1);
-        assert_eq!(rows("abcde", 4), 2);
+        assert_eq!(rows(composer(), "", 4), 1);
+        assert_eq!(rows(composer(), "abcd", 4), 1);
+        assert_eq!(rows(composer(), "abcde", 4), 2);
         // `う` does not fit after `あい` in five columns.
-        assert_eq!(rows("あいう", 5), 2);
-        assert_eq!(rows("a\n\nb", 4), 3);
+        assert_eq!(rows(composer(), "あいう", 5), 2);
+        assert_eq!(rows(composer(), "a\n\nb", 4), 3);
+        // The insert cursor after the text needs a column.
+        assert_eq!(rows(focused(""), "abcd", 4), 2);
+        assert_eq!(rows(focused(""), "abc", 4), 1);
+        assert_eq!(rows(focused(""), "あい", 4), 2);
+        assert_eq!(rows(focused(""), "あい", 5), 1);
+        // Only on its own line.
+        assert_eq!(rows(focused(""), "abcd\nab", 4), 2);
+        let mut composer = focused("abcd");
+        type_keys(&mut composer, "<Left>");
+        assert_eq!(composer.rows(4), 1);
+    }
+
+    #[test]
+    fn edtui_draws_the_insert_cursor_on_the_counted_rows() {
+        for (text, width) in [("abcd", 4), ("abc", 4), ("あい", 4), ("abcdabcd", 4)] {
+            let mut composer = focused("");
+            composer.load(text, &mut Vec::new());
+            let rows = u16::try_from(composer.rows(width)).unwrap();
+            let width = u16::try_from(width).unwrap();
+            let mut terminal = Terminal::new(TestBackend::new(width, rows + 1)).unwrap();
+            let area = Rect::new(0, 0, width, rows);
+            terminal
+                .draw(|frame| composer.draw(frame, area, Block::new(), true))
+                .unwrap();
+            let cursor = composer.editor.state.cursor_screen_position().unwrap();
+            assert!(cursor.y < rows, "{text:?} at {width}: {cursor:?}");
+        }
     }
 }

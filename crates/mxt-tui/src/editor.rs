@@ -3,7 +3,7 @@
 //! composer").
 
 use crossterm::event::{KeyCode as C, KeyModifiers as M};
-use edtui::events::KeyInput;
+use edtui::events::{KeyEventRegister, KeyInput};
 use edtui::{EditorEventHandler, EditorState, EditorTheme, EditorView, Lines};
 use mxt_core::keys::{Key, KeyCode};
 use mxt_core::msg::EditorMode;
@@ -24,10 +24,12 @@ impl Editor {
     pub(crate) fn new(text: &str, register: SharedRegister) -> Editor {
         let mut state = EditorState::new(Lines::from(text));
         state.set_clipboard(register);
-        Editor {
-            state,
-            keys: EditorEventHandler::vim_mode(),
-        }
+        let mut keys = EditorEventHandler::vim_mode();
+        // edtui's `<C-e>` in normal mode asks for the external editor, which
+        // only the keymap's `composer.external_editor` opens.
+        keys.key_handler
+            .remove(&KeyEventRegister::n(vec![KeyInput::ctrl('e')]));
+        Editor { state, keys }
     }
 
     pub(crate) fn mode(&self) -> EditorMode {

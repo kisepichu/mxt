@@ -6,8 +6,6 @@ use std::collections::VecDeque;
 use std::io;
 use std::time::Instant;
 
-use crossterm::event::EventStream;
-use futures_util::StreamExt;
 use mxt_core::app::App;
 use mxt_core::effect::{Effect, MatrixEffect};
 use mxt_core::msg::Msg;
@@ -22,7 +20,6 @@ pub async fn run(
     mut from_matrix: UnboundedReceiver<Msg>,
     to_matrix: UnboundedSender<MatrixEffect>,
 ) -> io::Result<()> {
-    let mut terminal_events = EventStream::new();
     let mut queue = VecDeque::new();
     draw(app, tui, &to_matrix, &mut queue)?;
     while !tui.should_quit() {
@@ -34,7 +31,7 @@ pub async fn run(
             }
         };
         tokio::select! {
-            event = terminal_events.next() => match event {
+            event = tui.next_event() => match event {
                 Some(event) => queue.extend(tui.handle_event(app, event?)),
                 // The terminal input has ended, so nothing can quit later.
                 None => return Ok(()),
