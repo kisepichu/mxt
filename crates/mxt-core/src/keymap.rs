@@ -196,6 +196,7 @@ const DEFAULTS: &[(&[TableId], &str, Action)] = &[
     (&[TableId::Timeline], "+", Action::MessageReact),
     (&[TableId::Timeline], "gx", Action::MessageOpen),
     (&[TableId::Timeline], "gd", Action::MessageGotoReply),
+    (&[TableId::Timeline], "R", Action::MessageResend),
     (&[TableId::ComposerInsert], "<CR>", Action::ComposerSend),
     (&[TableId::ComposerInsert], "<C-j>", Action::ComposerNewline),
     (

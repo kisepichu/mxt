@@ -1,0 +1,342 @@
+# Configuration
+
+mxt reads one TOML file when it starts:
+`$XDG_CONFIG_HOME/mxt/config.toml`, or `~/.config/mxt/config.toml` when
+`XDG_CONFIG_HOME` is not set, empty or a relative path (on macOS too).
+`mxt --config PATH` reads another file. Changes take effect at the next start.
+
+Only `account.user_id` is required. This is the smallest file, which mxt
+prints when the file does not exist:
+
+```toml
+[account]
+user_id = "@alice:example.org"
+```
+
+Every setting with its default where there is one, plus example keymap
+bindings (they change the default keymap; see [Keymap](#keymap)):
+
+```toml
+[account]
+user_id = "@alice:example.org"
+# homeserver = "https://matrix.example.org"  # omitted: discovered via .well-known
+
+[ui]
+leader = "<Space>"
+timeoutlen = 1000                                 # milliseconds
+# sort: "recent" | "name"; width: 12 to 80; network: "inline" | "below"
+room_list = { visible = true, sort = "recent", width = 30, network = "inline" }
+time_format = "%H:%M"                             # strftime, in the local time zone
+image_preview = "auto"                            # "auto" | "off" (message view)
+read_receipts = "public"                          # "public" | "private"
+
+[files]
+download_dir = "~/Downloads"
+opener = ["xdg-open"]           # ["open"] on macOS, for example ["wslview"] on WSL
+
+[keymap.normal]                 # outside text input, in every pane
+"]u" = { action = "room.open", filter = "unread", pick = "next" }
+"<leader>x" = ["room.mark_read", { action = "room.open", filter = "unread", pick = "next" }]
+
+[keymap.timeline]               # only while the timeline has focus
+"dd" = "nop"                    # remove a default binding
+"D" = "message.delete"
+
+[keymap.composer.insert]        # checked before keys reach the editor
+"<C-s>" = "composer.send"
+```
+
+## Errors
+
+mxt checks the whole file before the terminal UI starts. A mistake stops the
+start with the file, the line and the column, the setting, and the reason,
+and mxt exits with a non-zero status. For example, with a misspelled action
+on line 5:
+
+```toml
+[account]
+user_id = "@alice:example.org"
+
+[keymap.timeline]
+"x" = "message.dlete"
+```
+
+```text
+mxt: /home/alice/.config/mxt/config.toml:5:7: keymap.timeline.x: unknown action "message.dlete"
+```
+
+Nothing is silently ignored. These are all errors:
+
+- a key the tables below do not list, such as `timeoutln`, or a table that
+  does not exist, such as `[keymap.composer.foo]`;
+- a value of the wrong type, or a string outside the accepted values;
+- an `account.user_id` that is not `@localpart:server`, and an
+  `account.homeserver` that is not an `https://` or `http://` URL;
+- a `ui.room_list.width` outside 12 to 80, and a `ui.time_format` that is
+  empty or has an unknown directive;
+- a `files.download_dir` that is neither absolute nor starts with `~/`, and a
+  `files.opener` without a program;
+- invalid key notation, an unknown action, an argument the action does not
+  take or a wrong argument value, `pick` together with `query`, and an empty
+  array as a binding;
+- the same key sequence written twice in one table in different spellings,
+  such as `"<leader>x"` and `"<Space>x"`, or `"<C-a>"` and `"<C-A>"`.
+
+## `[account]`
+
+| Key | Default | Values | Meaning |
+|---|---|---|---|
+| `user_id` | required | a Matrix user ID, `@localpart:server` | The account to log in to. A saved session of another account stops the start (see [Files](../README.md#files)). |
+| `homeserver` | discovered | an `https://` or `http://` URL | The homeserver. When it is not set, mxt asks the server named in `user_id` (`.well-known`). Once a session is saved, the homeserver of the session is used, so a change takes effect only at the next login. |
+
+## `[ui]`
+
+| Key | Default | Values | Meaning |
+|---|---|---|---|
+| `leader` | `"<Space>"` | [key notation](#key-notation), without `<leader>` | What `<leader>` stands for in the default keymap and in your bindings. |
+| `timeoutlen` | `1000` | milliseconds, a non-negative integer | How long a key sequence that starts a longer binding waits for the next key, like nvim's `timeoutlen`. |
+| `room_list` | see below | a table | The room list. |
+| `time_format` | `"%H:%M"` | a [strftime format](https://docs.rs/jiff/latest/jiff/fmt/strtime/index.html), not empty | The time in each message header, in the local time zone. |
+| `image_preview` | `"auto"` | `"auto"`, `"off"` | `"auto"` shows images in the message view in the terminal's graphics protocol (see [Terminal setup](terminal.md#images)). `"off"` shows only the file name and size there, and mxt never asks the terminal for its graphics protocol. |
+| `read_receipts` | `"public"` | `"public"`, `"private"` | `"public"` sends `m.read` receipts, which other users see. `"private"` sends `m.read.private`, which only your own devices see. |
+
+`room_list` is a table; write it inline as in the example, or as a section:
+
+```toml
+[account]
+user_id = "@alice:example.org"
+
+[ui.room_list]
+sort = "name"
+network = "below"
+```
+
+| Key | Default | Values | Meaning |
+|---|---|---|---|
+| `visible` | `true` | `true`, `false` | Whether the room list is shown at startup. `<leader>e` (`sidebar.toggle`) shows and hides it. |
+| `sort` | `"recent"` | `"recent"`, `"name"` | `"recent"`: latest activity first. `"name"`: by the displayed name (`network / room`), ignoring case, which groups rooms by network. |
+| `width` | `30` | an integer from 12 to 80 | The room list's width in columns, its border included. A terminal narrower than 90 columns gives it a third of its width instead, and it never takes more than half. |
+| `network` | `"inline"` | `"inline"`, `"below"` | Where a bridged room's network name goes. `"inline"`: one row, `Discord / Alice`. `"below"`: the room name on the first row with the badge, and the network name dim on a second row. A room without a network name keeps one row. |
+
+## `[files]`
+
+| Key | Default | Values | Meaning |
+|---|---|---|---|
+| `download_dir` | `"~/Downloads"` | an absolute path, or one that starts with `~/` | Where attachments are saved before they are opened. A leading `~` is your home directory. The directory is created when a download needs it. A file never replaces another: the second `photo.png` is saved as `photo (1).png`. |
+| `opener` | `["xdg-open"]`, `["open"]` on macOS | an array: a program and its arguments | What opens downloaded files and links. mxt appends the path or URL as one more argument, runs the program without a shell, does not wait for it, and discards its output. On WSL, `["wslview"]` opens them in Windows. Over SSH it runs on the machine mxt runs on. |
+
+## Keymap
+
+`[keymap.<table>]` sections bind key sequences in one table each. Your
+bindings are merged over the [default keymap](keys.md#default-keymap) key by
+key: a binding replaces the default binding of the same keys in the same
+table, and every other default stays.
+
+| Table | Used when | If the key is not bound there |
+|---|---|---|
+| `normal` | (fallback only) | depends on the table that falls back to it |
+| `room_list` | the room list has focus | look in `normal`, then ignore the key |
+| `timeline` | the timeline has focus | look in `normal`, then ignore the key |
+| `composer.normal`, `composer.visual` | the composer has focus and its editor is in normal or visual mode | look in `normal`, then pass the key to the editor |
+| `composer.insert` | the composer's editor is in insert mode | pass the key to the editor |
+| `composer.completion` | the mention menu is open in insert mode | look in `composer.insert`, then pass the key to the editor |
+| `message_view` | the message view is open and its editor is in normal or visual mode | pass the key to the editor |
+| `picker` | a picker (rooms, emoji or links) is open | type the key into the query |
+| `command_line` | the `:` command line or a `/` search line is open | type the key into the line |
+
+`normal` holds bindings that make sense everywhere outside text input. The
+movement keys are in `room_list` and `timeline`, so `j` and `k` still reach
+the composer's editor. Only `room_list` and `timeline` take a count prefix
+(`5j`).
+
+A table that is checked first wins: with `"]"` in `timeline` and `"]u"` in
+`normal`, `]` in the timeline waits for the next key, as in nvim, and runs
+the `timeline` binding when the next key is not `u` or when `timeoutlen`
+passes. Some keys never reach the keymap: in the editors' search mode, after
+a key that waits for its character (`f`, `F`, `t`, `T`, `r`), and in the
+message view's insert mode, every key goes to the editor (see
+[Keys](keys.md#the-editors)).
+
+### Binding values
+
+- A string names an action without arguments: `"picker.rooms"`.
+- A table names an action with arguments:
+  `{ action = "room.open", filter = "unread", pick = "next" }`.
+- An array runs several actions in order, each on the state the previous one
+  left: `["room.mark_read", { action = "room.open", filter = "unread", pick = "next" }]`.
+- `"nop"` does nothing, like nvim's `<Nop>`. It hides the same keys in the
+  tables after it, which is how you remove a default binding.
+
+A binding with arguments can also be a section of its own:
+
+```toml
+[account]
+user_id = "@alice:example.org"
+
+[keymap.normal."]u"]
+action = "room.open"
+filter = "unread"
+pick = "next"
+```
+
+### Key notation
+
+Keys use nvim's notation. Key sequences are TOML strings, so quote them:
+`"gg"`, `"<C-x><C-e>"`, `"<leader>m"`.
+
+- A character stands for itself: `j`, `G`, `+`, `/`, `あ`. An uppercase
+  letter is the letter typed with shift.
+- `<...>` names a key, optionally with modifiers: `C-` (ctrl), `A-` or `M-`
+  (alt) and `S-` (shift), in any order and any case: `<C-w>`, `<A-x>`,
+  `<S-Tab>`, `<C-A-x>`.
+- Key names, in any case: `CR` (also `Enter`, `Return`), `Esc`, `Tab`, `BS`
+  (also `Backspace`), `Del` (also `Delete`), `Insert` (also `Ins`), `Up`,
+  `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`, `Space`,
+  `F1` to `F12`, and `lt`, `Bslash` and `Bar` for `<`, `\` and `|`.
+- `<leader>` is `ui.leader`.
+- A `<` that does not start a key name is an error; write `<lt>` for `<`.
+- With ctrl, letters have no case: `<C-a>` and `<C-A>` are the same key.
+  `S-` on a character must give an uppercase letter (`<S-a>` is `A`), so
+  write `!` instead of `<S-1>`.
+
+Terminals send some keys alike: `<C-i>` arrives as `<Tab>`, `<C-m>` as
+`<CR>`, `<C-[>` as `<Esc>`, and many terminals send Shift+Enter as `<CR>`.
+Bind the key that arrives.
+
+### Examples
+
+Open the next room with unread messages with `]u`, the previous one with
+`[u`, and the next one that notifies you with `]n`:
+
+```toml
+[account]
+user_id = "@alice:example.org"
+
+[keymap.normal]
+"]u" = { action = "room.open", filter = "unread", pick = "next" }
+"[u" = { action = "room.open", filter = "unread", pick = "prev" }
+"]n" = { action = "room.open", filter = "notify", pick = "next" }
+```
+
+Mark the current room as read and open the next unread room with
+`<leader>x`. `room.mark_read` has no default binding. It acts on the room
+under the cursor while the room list has focus, and on the open room
+otherwise, and it counts the room as read at once, so the `room.open` after
+it skips that room:
+
+```toml
+[account]
+user_id = "@alice:example.org"
+
+[keymap.normal]
+"<leader>x" = ["room.mark_read", { action = "room.open", filter = "unread", pick = "next" }]
+```
+
+Use `,` as the leader, open a room by name with `<leader>g`, and quit with
+`<leader>q`:
+
+```toml
+[account]
+user_id = "@alice:example.org"
+
+[ui]
+leader = ","
+
+[keymap.normal]
+"<leader>g" = { action = "room.open", query = "general" }
+"<leader>q" = "app.quit"
+```
+
+Delete messages with `D` instead of `dd`, send with `<C-s>` as well as
+`<CR>`, and keep the editor's mode when the composer gets focus with `i`:
+
+```toml
+[account]
+user_id = "@alice:example.org"
+
+[keymap.timeline]
+"dd" = "nop"
+"D" = "message.delete"
+"i" = { action = "composer.focus", mode = "keep" }
+
+[keymap.composer.insert]
+"<C-s>" = "composer.send"
+```
+
+### Actions
+
+Actions are named `<target>.<verb>`. Only the actions marked so take
+arguments; any other argument is an error. Actions on "the message" use the
+message under the timeline cursor.
+
+| Action | Arguments | What it does |
+|---|---|---|
+| `room.open` | `filter`, and `pick` or `query` (below) | Opens the room the arguments choose, or says "No matching room". |
+| `room.open_selected` | | Opens the room under the room list cursor. |
+| `room.mark_read` | | Marks the room as read: the room under the cursor while the room list has focus, otherwise the open room. Sends a read receipt for the room's latest message, moves the fully-read marker there, and clears the manual unread mark. |
+| `room.mute` | | Mutes the room (the same room as `room.mark_read`). |
+| `room.unmute` | | Removes the room's own notification setting, so the account's default applies again. On a room that is not muted it does nothing and says so, so a "mentions only" setting made in another client stays. |
+| `message.reply` | | Starts a reply to the message in the composer. Not for a message that is still being sent, and not while an edit is open in the composer. |
+| `message.edit` | | Loads your own text message into the composer to edit it. The composer must be empty. |
+| `message.delete` | | Deletes your own message after you confirm with `y`. |
+| `message.yank` | | Copies the message's text to the clipboard (see [Terminal setup](terminal.md#clipboard)). |
+| `message.react` | | Opens the emoji picker. Choosing an emoji you already reacted with removes your reaction. |
+| `message.open` | | Downloads an attachment to `files.download_dir` and opens it with `files.opener`, or opens the message's web link with `files.opener`, or offers a link picker when there are several. Only `http://` and `https://` links. |
+| `message.goto_reply` | | Moves the cursor to the message this one replies to, if it is loaded. |
+| `message.resend` | | Sends a failed message again. |
+| `message.view` | | Opens the message in a full-screen view: text in an editor where vim motions, search, visual selection and yanks work (changes are discarded), or an image. |
+| `composer.focus` | `mode` | Moves the focus to the open room's composer. `mode = "insert"` (default) starts insert mode after the character under the cursor; `mode = "keep"` keeps the editor's last mode. |
+| `composer.send` | | Sends the composer's text as Markdown. A blank text does nothing. |
+| `composer.newline` | | Inserts a line break. |
+| `composer.cancel` | | Ends a reply (the text stays) or an edit (the composer is cleared). |
+| `composer.external_editor` | | Edits the composer's text in `$VISUAL` or `$EDITOR`. |
+| `completion.next`, `completion.prev` | | Selects the next or previous member in the mention menu. |
+| `completion.accept` | | Inserts the selected mention. |
+| `completion.cancel` | | Closes the mention menu. |
+| `picker.rooms` | `filter` | Opens the fuzzy room picker over the rooms that pass `filter`. |
+| `picker.next`, `picker.prev` | | Selects the next or previous item. |
+| `picker.accept` | | Takes the selected item and closes the picker. |
+| `picker.cancel` | | Closes the picker. |
+| `command_line.open` | | Opens the `:` command line. |
+| `command_line.execute` | | Runs the command, or searches with a `/` line. |
+| `command_line.cancel` | | Closes the line. |
+| `command_line.complete` | | Completes command names, and room names after `:open`; pressing it again cycles through the candidates. |
+| `cursor.down`, `cursor.up` | | Moves the cursor of the focused list by one room or message, or by the count. |
+| `cursor.first`, `cursor.last` | | Moves it to the first or last room or message. |
+| `cursor.half_page_down`, `cursor.half_page_up` | | Moves it by half of the visible rooms or messages, times the count. |
+| `search.start` | | Opens a `/` line that searches the focused list. |
+| `search.next`, `search.prev` | | Repeats the last search forwards or backwards. |
+| `view.close` | | Closes the message view. |
+| `sidebar.toggle` | | Shows or hides the room list. |
+| `focus.room_list` | | Moves the focus to the room list, and shows it if it is hidden. |
+| `focus.timeline` | | Moves the focus to the timeline. |
+| `file.upload` | `path`, required | Uploads the file at `path` to the open room. `~/` is your home directory; a relative path is relative to the directory mxt was started in. |
+| `account.recover` | | Not available yet: says "account.recover is not available yet". |
+| `app.quit` | | Quits mxt. |
+| `nop` | | Does nothing. |
+
+`room.open` and `picker.rooms` choose among the rooms that pass `filter`, in
+the room list's order:
+
+| Argument | Value | Meaning |
+|---|---|---|
+| `filter` | `"all"` (default) | every room in the room list |
+| | `"unread"` | rooms with any badge: unread messages, notifications or mentions, or the manual unread mark |
+| | `"notify"` | rooms with notifications or mentions, or the manual unread mark |
+| | `"mentions"` | rooms with unread mentions |
+| `pick` | `"first"` (default) | the first such room |
+| | `"next"` | the first one after the open room, wrapping around, never the open room itself; the first one when no room is open |
+| | `"prev"` | the same, backwards; the last one when no room is open |
+| `query` | a non-empty string | the best fuzzy match for the query among their names |
+
+`room.open` takes `pick` or `query`, not both. `picker.rooms` takes only
+`filter`.
+
+## Environment variables
+
+| Variable | Meaning |
+|---|---|
+| `XDG_CONFIG_HOME` | the configuration file's directory, see above |
+| `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME`, `HOME` | where mxt keeps its data, see [Files](../README.md#files) |
+| `MXT_LOG` | the log filter, see [Files](../README.md#files) |
+| `VISUAL`, `EDITOR` | the external editor (`<C-x><C-e>`); a platform default when neither is set |

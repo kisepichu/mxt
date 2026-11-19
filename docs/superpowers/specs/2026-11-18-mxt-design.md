@@ -141,9 +141,9 @@ flowchart BT
 | Crate | Responsibility | May depend on |
 |---|---|---|
 | `mxt-core` | Domain types, keymap and its resolver, action registry, pickers, mention rendering, `App` state and `update` | `std` and small pure crates without I/O (`nucleo-matcher`, `emojis`, `pulldown-cmark`, `unicode-segmentation`). Not the SDK, `ruma`, an async runtime, a terminal library, `serde` or `toml`. |
-| `mxt-matrix` | Builds the SDK client, converts SDK data into domain types, executes matrix effects, forwards SDK streams as `Msg`s, reads bridge state, renders HTML bodies into domain rich text, reads and writes the session file | `mxt-core`, `matrix-sdk`, `matrix-sdk-ui`, tokio, `serde`/`serde_json` (the session file holds the SDK's serde session type); HTML parsing through `matrix_sdk::ruma::html`, plus a feature-only `ruma` dependency of the SDK's ruma version that enables `html-matrix` (the SDK enables only `html`) and `markdown` (`FormattedBody::markdown`) |
-| `mxt-tui` | Layout and widgets, input routing, the composers and the message view (edtui), image decoding and previews, OSC 52 clipboard, local time formatting, executing UI effects | `mxt-core`, ratatui, crossterm, edtui, ratatui-image, image, jiff |
-| `mxt` | Command line, startup flow, configuration file loading (TOML DTOs), paths, the data directory lock, logging, wiring the adapters and the event loop | all of the above, `serde`, `toml`, `tracing` |
+| `mxt-matrix` | Builds the SDK client, converts SDK data into domain types, executes matrix effects, forwards SDK streams as `Msg`s, reads bridge state, renders HTML bodies into domain rich text, reads and writes the session file | `mxt-core`, `matrix-sdk`, `matrix-sdk-ui`, tokio, `futures-util`, `tracing`, `serde`/`serde_json` (the session file holds the SDK's serde session type), `mime_guess` (the MIME type of an upload), `image` (the dimensions of uploaded images); HTML parsing through `matrix_sdk::ruma::html`, plus a feature-only `ruma` dependency of the SDK's ruma version that enables `html-matrix` (the SDK enables only `html`) and `markdown` (`FormattedBody::markdown`); as dev-dependencies, `matrix-sdk` with its `testing` feature, `matrix-sdk-test` and `mxt-core` with its `testing` feature (the tests against `MatrixMockServer`) |
+| `mxt-tui` | Layout and widgets, input routing, the composers and the message view (edtui), image decoding and previews, OSC 52 clipboard, local time formatting, executing UI effects | `mxt-core`, ratatui, crossterm, edtui, ratatui-image, image, jiff, `base64` (OSC 52), `futures-util` (the terminal event stream), `unicode-segmentation` |
+| `mxt` | Command line, startup flow, configuration file loading (TOML DTOs), paths, the data directory lock, logging, wiring the adapters and the event loop | all of the above, `serde`, `toml`, `tracing`, `tracing-appender` and `tracing-subscriber` (the log files), `rpassword` (the password and recovery key prompts); `matrix-sdk` as a dev-dependency |
 
 Because `mxt-core` does not depend on the SDK, its tests build and run without
 compiling matrix-rust-sdk, and SDK upgrades only touch `mxt-matrix`.
@@ -294,8 +294,10 @@ covered by unit tests.
 
 - Sync: classic `/sync` (phase 0 decided it; see "Phase 0 findings"). mxt
   runs its own loop of `Client::sync_once` with the stored token, a long-poll
-  timeout, presence offline, and a filter with lazy-loaded members and a
-  small timeline limit. It subscribes the SDK's event cache, which computes
+  timeout of 30 s (120 s until a sync token is stored, which gives the
+  initial sync its time budget), presence offline, and a filter with
+  lazy-loaded members, a timeline limit of 10, and neither presence nor
+  `m.typing`. It subscribes the SDK's event cache, which computes
   unread counts and latest events for every room. The set of rooms comes from
   `Client::rooms()` (joined rooms that are not spaces), updated from each sync
   response and from room info updates.
@@ -341,9 +343,10 @@ covered by unit tests.
   scope.
 - Mute: the SDK notification settings. Muting sets the room mode to mute.
   Unmuting a muted room removes the user-defined room rule, so the account
-  default applies again. `room.unmute` on a room that is not muted does
-  nothing, so a "mentions and keywords only" rule set in another client
-  stays.
+  default applies again. `room.unmute` on a room that is not muted sends
+  nothing and shows the error "<room> is not muted", so a "mentions and
+  keywords only" rule set in another client stays. Muting and unmuting show
+  "Muted <room>" and "Unmuted <room>".
 - Sending: the composer text is Markdown. The core's
   `render_mentions(text, mentions)` returns three things:
   - the plain body: the editor text unchanged, so mentions read as
@@ -372,7 +375,7 @@ covered by unit tests.
   request; mxt enables it again on every write and whenever the sync state
   becomes synced, so a message that failed for a transient reason goes out
   when the connection returns. A failed message or upload stays as a local
-  echo with a failed marker until `message.resend` or its deletion, and
+  echo with a failed marker until `message.resend` (`R`) or its deletion, and
   holds back the room's later requests until then. An edit or reaction that
   the server refuses for good would block the room's queue; mxt aborts it
   and reports the failure, and a refused edit of a sent message is answered
@@ -392,9 +395,12 @@ covered by unit tests.
   type (`m.read` or `m.read.private`) and moves the `m.fully_read` marker to
   the same event.
 - `room.mark_read` acts on the room under the cursor when the room list has
-  focus, and on the open room otherwise. It sends the same receipt for that
-  room's latest event as known to the room list (the exact SDK call is
-  settled in phase 1), and clears the room's manual unread mark.
+  focus, and on the open room otherwise. When the room's latest event as
+  known to the room list (`Room::latest_event()`) is a remote event, the
+  adapter sends the configured receipt and `m.fully_read` for it with
+  `Room::send_multiple_receipts`, which also clears the room's manual
+  unread mark (matrix-sdk 0.19.1). Otherwise it only clears the mark with
+  `Room::set_unread_flag(false)`.
 - Optimistic clearing: when the core requests a receipt or runs
   `room.mark_read`, it sets that room's `UnreadCounts` to zero immediately.
   The next SDK update overwrites it. This makes action sequences such as
@@ -438,12 +444,22 @@ covered by unit tests.
   `Effect::Ui(ClearComposer(room))`, and the room's draft returns to `New`.
   Failed sends are shown on the local echo, and a send that cannot be queued
   puts its draft back (see "Error handling").
-- Editing an existing message: `message.edit` requires an empty composer and
+- Editing an existing message: `message.edit` takes the user's own text
+  messages only ("Only text messages can be edited"; other messages cannot
+  become text without losing what they are), requires an empty composer and
   otherwise reports "Clear the composer first" in the status line. On success
   the core loads the message's plain body (without a reply fallback) with
   `Effect::Ui(LoadComposer { room, text })`, and rebuilds the room's
   `MentionRef`s from the mention spans in the message's `RichText` whose text
   appears in that body. Edits keep their pills and `m.mentions`.
+- Other refusals, reported in the status line: `message.reply` while an edit
+  draft is open ("Cancel the edit first", since the composer holds the
+  edit's text); `message.delete` and `message.react` on a deleted message
+  ("The message is deleted"); `message.view` on an image and `message.open`
+  on an attachment that are still local echoes ("Wait until the message is
+  sent", because the adapter fetches media by remote event); and
+  `message.resend` on anything but a failed local echo ("Nothing to
+  resend").
 - `composer.focus` puts edtui into insert mode by default. With
   `mode = "keep"` it keeps edtui's previous mode.
 - `composer.cancel`: a reply draft becomes `New` and keeps its text. An edit
@@ -496,36 +512,58 @@ covered by unit tests.
 Command line: `mxt [--config PATH]` and `mxt --version`.
 
 1. Load the configuration. If the file does not exist, print its path and a
-   minimal example, and exit with a non-zero status.
+   minimal example, and exit with a non-zero status. `HOME` must be an
+   absolute path. A cache directory that contains the data or state
+   directory is refused, because setting data aside deletes the cache
+   directory.
 2. Take an exclusive lock on `$XDG_DATA_HOME/mxt/lock` (`std::fs::File::try_lock`).
    If another mxt holds it, exit with a non-zero status. Two processes must
    never share the crypto store.
-3. If a session file exists, restore the session; a session whose user ID
-   differs from `account.user_id` stops the start with both IDs, and nothing
-   is moved (removing the session file switches accounts). Otherwise ask for
-   the password on the terminal without echo, log in (no refresh token is
-   requested, so the stored access token does not change), and save the
-   session.
-4. Right after a first login, ask for the recovery key. An empty input skips
-   it; `:recover` asks again later. If the account has no secret storage, mxt
-   prints that recovery has to be set up in another client and continues.
-5. Start the terminal UI and sync.
+3. If a session file exists, restore the session; the homeserver saved in it
+   wins over `account.homeserver`. A session whose user ID differs from
+   `account.user_id` stops the start with both IDs, and nothing is moved
+   (removing the session file switches accounts). A session file without
+   the store directory is set aside like an `M_UNKNOWN_TOKEN` session (see
+   below), because a new crypto store would give an existing device new
+   keys; the message adds that the old device stays in the account's device
+   list. Without a session file, a store left by an earlier session is moved
+   to `store.invalid-<unix seconds>` in the data directory and the cache
+   directory is emptied, so a new device never reuses another device's
+   crypto store or shows its decrypted events. Then mxt asks for the
+   password on the terminal without echo, logs in (no refresh token is
+   requested, so the stored access token does not change), and saves the
+   session. A first login that fails before the session is saved deletes
+   the new store and the cache, which belong to no device.
+4. Start the sync. After a first login, the sync uploads the device keys,
+   and mxt waits up to 90 s for this device's keys to reach the server,
+   because recovery signs the device and needs them. It prints that it
+   waits, and says so when the keys did not arrive in time or could not be
+   checked. Then it asks for the recovery key. An empty input skips it;
+   `:recover` asks again later. If the account has no secret storage, mxt
+   prints that recovery has to be set up in another client and continues
+   without asking.
+5. Start the terminal UI.
 
 If the homeserver answers `M_UNKNOWN_TOKEN` at any time, mxt restores the
 terminal, drops the SDK client so the stores are closed, renames the data
-directory to `mxt.invalid-<timestamp>`, deletes the cache directory, prints
+directory to `mxt.invalid-<unix seconds>`, deletes the cache directory, prints
 why, and exits. The next start logs in as a new device with fresh stores.
 
 ## User interface
 
 ### Layout
 
-- Left: the room list, which can be hidden.
-- Right: the timeline of the open room, with the composer below it.
-- Bottom line: status line showing the mode, the open room and the sync state.
-  Pressing `:` turns it into the command line.
-- Overlays: the fuzzy room picker, the emoji picker, the mention menu above
-  the composer, and the full-screen message view.
+- Left: the room list, which can be hidden. `focus.room_list` shows it again.
+- Right: the timeline of the open room, with the composer below it. The
+  composer's top rule is labelled "Reply to <name>" or "Edit" while the
+  room's draft is a reply or an edit.
+- Bottom line: status line showing the mode, the pending count and keys
+  (like nvim's showcmd), the open room, the status message or the `CONFIRM`
+  question, and the sync state. When they do not fit, the room name is cut
+  first. Pressing `:` turns it into the command line.
+- Overlays: the fuzzy room picker, whose items show their unread badges, the
+  emoji picker, the mention menu above the composer, and the full-screen
+  message view.
 
 ### Modes
 
@@ -601,10 +639,19 @@ instead, and it never takes more than half of the width.
 - State events (membership changes, name or topic changes) are not shown in
   the first release.
 - Date dividers and the user's read marker come from the SDK's virtual items.
-- Messages the SDK cannot decrypt yet show a placeholder. Redacted messages
-  show `(deleted)`.
-- Images show `[image: <name> <width>x<height>]` inline. Images are never
-  drawn inside the scrolling timeline; `message.view` shows them.
+- Each item starts with a header: the local time, the sender, and
+  `(edited)`, `sending…` or `failed` when they apply. A reply has a one-row
+  preview of the replied-to message under it, `> name: body` (dim, the first
+  line of the body). Reactions follow the body on a line of `key count`
+  chips, the user's own in bold.
+- Messages the SDK cannot decrypt yet show `(unable to decrypt)`. Redacted
+  messages show `(deleted)`, and messages of other kinds
+  `(unsupported: <kind>)`.
+- Images show `[image: <name> <width>x<height>]` inline, or
+  `[image: <name>]` without dimensions. Images are never drawn inside the
+  scrolling timeline; `message.view` shows them. Files (also video and
+  audio) show `[file: <name> <size>]`, without the size when the event has
+  none, and stickers `[sticker: <body>]`.
 - Messages taller than the pane show `[+N lines]`, and `message.view` shows
   them in full.
 
@@ -625,12 +672,13 @@ instead, and it never takes more than half of the width.
 | `timeline` | `i` / `a` | `composer.focus` (enters insert mode) | insert |
 | `timeline` | `<CR>` | `message.view` | |
 | `timeline` | `r` | `message.reply` | |
-| `timeline` | `e` | `message.edit` (own messages only) | |
+| `timeline` | `e` | `message.edit` (own text messages only) | |
 | `timeline` | `dd` | `message.delete` (own messages only, after confirmation) | delete line |
 | `timeline` | `yy` | `message.yank` | same |
 | `timeline` | `+` | `message.react` (opens the emoji picker) | |
 | `timeline` | `gx` | `message.open` (link or attachment) | `gx` |
 | `timeline` | `gd` | `message.goto_reply` (the replied-to message) | go to definition |
+| `timeline` | `R` | `message.resend` (a failed message) | |
 | `composer.insert` | `<CR>` | `composer.send` | |
 | `composer.insert` | `<C-j>` | `composer.newline` | |
 | `composer.insert`, `composer.normal` | `<C-x><C-e>` | `composer.external_editor` | shell edit-command-line |
@@ -650,9 +698,15 @@ normal mode and the draft is kept.
 `<C-j>` inserts a newline because many terminals cannot tell Shift+Enter apart
 from Enter.
 
+The emoji picker lists, for an empty query, the user's own reactions on the
+message first, then the most common reactions, then every other emoji; a
+query is matched against shortcodes and names.
+
 There is no default binding for "open the next unread room". The action exists
 and users bind it themselves, for example
 `"]u" = { action = "room.open", filter = "unread", pick = "next" }`.
+`room.mark_read` has no default binding either; the configuration example
+binds it to `<leader>x` together with opening the next unread room.
 
 ### Search and jumps
 
@@ -676,6 +730,12 @@ spaces work without quoting.
 | `:recover` | `account.recover` (asks for the recovery key in `SECRET` mode) |
 | `:q` | `app.quit` |
 
+`:mute`, `:unmute`, `:recover` and `:q` reject an argument, and `:open` and
+`:upload` without one show their usage (`usage: :open <room>`). The command
+line, the `/` search line and picker queries take typed characters, `<BS>`,
+`<C-u>` (clear) and `<C-w>` (delete the last word); `<BS>` on an empty
+command or search line closes it.
+
 ### Mentions
 
 `<leader>m` opens the room picker filtered to rooms whose `mentions > 0`.
@@ -687,7 +747,9 @@ list, so mxt does not offer an event-level mention list.
 
 - In the composer's insert mode, typing `@` at the start of the text or after
   whitespace opens the mention menu above the composer. Typing more characters
-  narrows it. Whitespace or `completion.cancel` closes it.
+  narrows it. Whitespace or `completion.cancel` closes it. The menu holds at
+  most 50 candidates, so a lone `@` in a room with thousands of members stays
+  cheap.
 - Accepting a candidate replaces `@<typed text>` with `@<display name>` and a
   space. If another member of the room has the same display name, it inserts
   the user ID (`@alice:example.org`) instead, so every inserted text names
@@ -708,7 +770,8 @@ list, so mxt does not offer an event-level mention list.
   (`mailto:`, `matrix:`) are not offered. The status line shows
   `Opening <url>`, because the link text may differ from its target.
 - `gx` on an attachment shows `Downloading <name>`, downloads it to
-  `files.download_dir` and runs `files.opener` with the file path appended.
+  `files.download_dir` (created when it is missing), shows `Saved <path>`,
+  and runs `files.opener` with the file path appended.
   The file name comes from the event, made safe (no path separators, control
   or bidirectional control characters, or leading dots) and kept within 255
   bytes with its extension. If a file with the same name exists, the
@@ -726,7 +789,7 @@ list, so mxt does not offer an event-level mention list.
   protocol (sixel, kitty, iTerm2) and falls back to half blocks. They appear
   only in the message view (`message.view`), which keeps the timeline's width
   fixed. The image comes from the thumbnail source when the event has one and
-  from the full file otherwise, up to 10 MB, scaled down locally. Decoding
+  from the full file otherwise, up to 10 MiB, scaled down locally. Decoding
   is limited to 128 MiB of memory, so an image that claims huge dimensions
   shows an error instead. `ui.image_preview = "off"` shows only the file name
   and size in the view, and mxt then never queries the terminal for its
@@ -743,7 +806,7 @@ tmux session's current window (mxt's own pane when mxt's window is in
 front), and the option stays on after mxt exits. When mxt runs over SSH from
 inside a local tmux, the local tmux needs `set -g allow-passthrough on` for
 sixel or kitty images; otherwise mxt falls back to half blocks. The user
-documentation says so.
+documentation, [Terminal setup](../../terminal.md), says so.
 
 ## Configuration
 
@@ -873,18 +936,26 @@ with the same values.
   core's neutral `ArgValue` (string, integer, boolean).
 - The core builds checked types with `Action::from_spec(name, args)`,
   `KeySeq::parse("<C-x><C-e>")` and `Keymap::new(..)`.
-- Errors are reported with the file, line and reason before the terminal UI
-  starts, and mxt exits with a non-zero status: unknown keys
+- Errors are reported with the file, line, column and reason before the
+  terminal UI starts, and mxt exits with a non-zero status: unknown keys
   (`deny_unknown_fields`), unknown actions, wrong or conflicting arguments,
-  invalid key notation. A typo is never silently ignored.
+  invalid key notation, two spellings of one key sequence in a table
+  (`<leader>x` and `<Space>x`, `<C-a>` and `<C-A>`), a malformed
+  `account.user_id`, an `account.homeserver` that is not an `http(s)` URL,
+  a `ui.room_list.width` outside 12 to 80, an empty or invalid
+  `ui.time_format`, a `files.download_dir` that is neither absolute nor
+  `~/…`, and an empty `files.opener`. A typo is never silently ignored.
 
 ## Storage
 
 | Path | Contents |
 |---|---|
-| `$XDG_DATA_HOME/mxt/` (mode 0700) | session file (mode 0600), the lock file, SDK state and crypto stores |
+| `$XDG_DATA_HOME/mxt/` | `session.json` (mode 0600, written atomically), the lock file `lock` (mode 0600), and `store/` with the SDK's state and crypto stores |
 | `$XDG_CACHE_HOME/mxt/` | the SDK's event cache and media cache (not user downloads, which go to `files.download_dir`) |
-| `$XDG_STATE_HOME/mxt/` | logs |
+| `$XDG_STATE_HOME/mxt/` | logs, `mxt.<date>.log` with dates in UTC |
+
+mxt creates the three directories with mode 0700 and tightens existing ones
+to 0700, the cache too, because it holds decrypted events and media.
 
 The usual defaults apply when the variables are unset (`~/.local/share`,
 `~/.cache`, `~/.local/state`), on macOS as well.
@@ -900,19 +971,22 @@ platforms.
 - Runtime failures of effects come back as `Msg::EffectFailed`. They are shown
   in the status line and logged. They never panic. The status line shows only
   the latest message, so the log is the place to look for earlier ones.
-- Sync state (synced, offline, retrying) is shown in the status line. The
-  client's request configuration retries a request that fails with a server
-  error (5xx) or a rate limit up to three times, and the state shows
-  `retrying` meanwhile; when a sync request still fails, the sync loop tries
-  again with backoff, and the state shows `offline` after network errors.
+- Sync state (`starting` until the first response, then `synced`,
+  `offline`, `retrying`) is shown in the status line. The client's request
+  configuration sends a request at most three times (`retry_limit(3)`), so
+  the SDK retries server errors (5xx), rate limits and network failures at
+  most twice within a request, which the state does not show. When a sync
+  request still fails, the state shows `offline` after a network error (no
+  answer arrived) and `retrying` after any other error, and the sync loop
+  tries again after a delay that starts at 1 s and doubles up to 60 s.
 - Events that cannot be decrypted yet show a placeholder. With
   `AfterDecryptionFailure` the SDK asks the key backup for the missing key,
   and the `Timeline` retries decryption when a key arrives.
-- Failed sends keep the local echo with a failed marker. `message.resend` sends
-  it again; a transient failure also goes out by itself when the sync is back.
-  Edits and reactions that the server refuses for good are dropped from the
-  send queue with an error in the status line (see "The send queue"); an
-  edit of a sent message gets its draft back as below.
+- Failed sends keep the local echo with a failed marker. `message.resend`
+  (`R`) sends it again; a transient failure also goes out by itself when the
+  sync is back. Edits and reactions that the server refuses for good are
+  dropped from the send queue with an error in the status line (see "The
+  send queue"); an edit of a sent message gets its draft back as below.
 - A message that cannot be queued (its room is not open, or the replied-to or
   edited event cannot be fetched) gets no local echo. `MatrixEffect::Send`
   carries a `SendId`, and the matrix adapter answers it with
@@ -967,21 +1041,38 @@ platforms.
     IDs are returned
   - rebuilding `MentionRef`s when editing a message
   - mention candidate ranking and the rule for duplicate display names
-- `mxt-matrix`: tests for converting SDK values into domain types and for HTML
-  rendering, with constructed inputs. The SDK is not mocked. The rest is
-  covered by phase 0 and by running mxt against a homeserver.
-- `mxt-tui`: no rendering snapshots, which would pin incidental layout. It is
-  verified by running mxt.
+- `mxt-matrix`: tests with constructed inputs for converting SDK values into
+  domain types, HTML rendering, download file names, the dimensions of
+  uploaded images and the session file. The send queue paths are tested
+  against matrix-sdk's `MatrixMockServer`, a mock homeserver on 127.0.0.1
+  (matrix-sdk's `testing` feature, `matrix-sdk-test`, and `mxt-core`'s
+  `testing` feature for `SendId::new`, all as dev-dependencies only):
+  `run_effects` and the send queue's failure handling run as `Matrix::start`
+  runs them, without the sync loop and the room list, and the tests check
+  that a refused edit of a sent message is answered with `SendFailed` and
+  leaves nothing in the send queue, that an accepted edit is answered with
+  `SendQueued`, that a refused upload is reported, stays in the send queue
+  and shows as a failed local echo, and that a refused reaction is reported
+  and then dropped from the timeline and the send queue. The rest is covered
+  by phase 0 and by running mxt against a homeserver.
+- `mxt-tui`: unit tests, for example of key conversion, the editor keys
+  `mxt-tui` handles itself, wrapping and the cursor by grapheme cluster, the
+  composers' reports to the core, and the layout; some assert rendered rows
+  and buffers drawn on ratatui's `TestBackend`. There are no rendering
+  snapshots, which would pin incidental layout. The rest is verified by
+  running mxt.
 - Continuous integration (GitHub Actions, Linux and macOS on Apple Silicon),
   with the flake's toolchain:
   - On every push and pull request, inside `nix develop` with the Cargo cache
     restored between runs: `cargo fmt --check`,
     `cargo clippy --all-targets -- -D warnings`, `cargo test`, and
     `cargo deny check licenses advisories sources`.
-  - The package build (`nix build`, which also runs the tests) runs when
-    `flake.nix`, `flake.lock`, `Cargo.lock` or a `Cargo.toml` changes, every
-    week, and on demand. This keeps the full Nix build of matrix-rust-sdk out
-    of every push.
+  - The package build (`nix build`) runs when `flake.nix`, `flake.lock`,
+    `Cargo.lock` or a `Cargo.toml` changes, every week, and on demand. This
+    keeps the full Nix build of matrix-rust-sdk out of every push. It also
+    runs the tests, except `mxt-matrix`'s (`cargoTestFlags`): their
+    dev-dependency features would build the SDK stack a second time, and
+    `cargo test` above runs them.
 - A prek pre-commit configuration runs `cargo fmt --check` and clippy.
 
 ## Build and distribution
@@ -989,10 +1080,11 @@ platforms.
 ### Toolchain
 
 The Rust toolchain comes from the flake's pinned nixpkgs (`nixos-unstable`).
-matrix-sdk 0.19 needs Rust 1.96 or later. `nix develop` provides cargo, rustc,
-clippy, rustfmt, rust-analyzer and cargo-deny, so every machine and CI use the
-same version. The version changes only with `nix flake update`. `Cargo.toml`
-declares `rust-version = "1.96"` for builds outside Nix.
+matrix-sdk 0.19 needs Rust 1.96 or later. `nix develop` provides cargo,
+rustc, clippy, rustfmt, rust-analyzer, cargo-deny and prek, so every machine
+and CI use the same version. The version changes only with
+`nix flake update`. `Cargo.toml` declares `rust-version = "1.96"` for builds
+outside Nix.
 
 `[profile.dev]` reduces debug information of dependencies to
 `line-tables-only`, which keeps the target directory smaller and linking
@@ -1027,8 +1119,19 @@ lighter.
 
 - Nix: `nix profile install github:kisepichu/mxt`, or use the flake as an
   input of a NixOS or home-manager configuration.
-- Without Nix: `cargo install --git https://github.com/kisepichu/mxt`, for
-  example through mise's cargo backend.
+- Without Nix: `cargo install --locked --git https://github.com/kisepichu/mxt mxt`,
+  for example through mise's cargo backend. `--locked` builds with the
+  committed `Cargo.lock`, which pins matrix-sdk's stack and
+  `libsqlite3-sys`. matrix-sdk is built with `sqlite` and without
+  `bundled-sqlite`, so such a build links the system SQLite, which must be
+  SQLite 3.54.0 or newer (RUSTSEC-2026-0459, see `deny.toml`). The build
+  looks for it with `pkg-config`; when pkg-config does not find it, the
+  build still links any `libsqlite3` the linker finds, without checking its
+  version.
+
+The [README](../../../README.md) describes both and the first start;
+[Configuration](../../configuration.md), [Keys](../../keys.md) and
+[Terminal setup](../../terminal.md) are the user's reference.
 
 Prebuilt binaries on GitHub Releases are out of scope for the first release.
 
