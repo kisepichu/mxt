@@ -235,6 +235,7 @@ fn gx_on_several_links_picks_one_of_their_urls() {
                 Block::Code {
                     language: None,
                     text: "https://example.org/not-a-link".into(),
+                    spoiler: false,
                 },
             ],
         )],

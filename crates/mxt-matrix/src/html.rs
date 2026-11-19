@@ -134,7 +134,9 @@ impl Blocks {
                 let start = list.start.and_then(|start| u64::try_from(start).ok());
                 self.list(node, true, start.unwrap_or(1), inherited, depth);
             }
-            MatrixElement::Pre => self.push_block(code_block(node, depth)),
+            MatrixElement::Pre => {
+                self.push_block(code_block(node, inherited.style.spoiler, depth));
+            }
             MatrixElement::Br => self.line.line_break(),
             // Rich text has no tables, rules or disclosures; their parts keep
             // their text on lines of their own, table cells separated by spaces.
@@ -370,8 +372,8 @@ impl Line {
 }
 
 /// A `<pre>` as a code block: its text as written, with the language of the
-/// `<code>` inside it.
-fn code_block(pre: &NodeRef, depth: usize) -> Block {
+/// `<code>` inside it; `spoiler` when the `<pre>` is in a spoiler.
+fn code_block(pre: &NodeRef, spoiler: bool, depth: usize) -> Block {
     let language = pre
         .children()
         .find_map(|child| match child.as_element()?.to_matrix().element {
@@ -385,7 +387,11 @@ fn code_block(pre: &NodeRef, depth: usize) -> Block {
     if text.ends_with('\n') {
         text.pop();
     }
-    Block::Code { language, text }
+    Block::Code {
+        language,
+        text,
+        spoiler,
+    }
 }
 
 /// The text in `node` as written, with `<br>` as a newline.
@@ -626,12 +632,42 @@ mod tests {
                 Block::Code {
                     language: Some("rust".into()),
                     text: "fn main() {\n    println!(\"hi\");\n}".into(),
+                    spoiler: false,
                 },
                 Block::Code {
                     language: None,
                     text: "a  b\n\nc".into(),
+                    spoiler: false,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn code_blocks_in_spoilers_are_spoilers() {
+        let rich = render_html(
+            "<span data-mx-spoiler>the answer: <pre><code class=\"language-py\">\
+             print(42)\n</code></pre></span><blockquote><span data-mx-spoiler>\
+             <pre>quoted</pre></span></blockquote><pre>shown</pre>",
+        );
+        let code = |language: Option<&str>, text: &str, spoiler| Block::Code {
+            language: language.map(str::to_owned),
+            text: text.into(),
+            spoiler,
+        };
+        assert_eq!(
+            rich.blocks,
+            vec![
+                paragraph(vec![styled("the answer:", |s| s.spoiler = true)]),
+                code(Some("py"), "print(42)", true),
+                Block::Quote(vec![code(None, "quoted", true)]),
+                code(None, "shown", false),
+            ]
+        );
+        // A reply preview shows none of their text.
+        assert_eq!(
+            rich.to_plain_hiding_spoilers(),
+            "[spoiler]\n[spoiler]\n> [spoiler]\nshown"
         );
     }
 

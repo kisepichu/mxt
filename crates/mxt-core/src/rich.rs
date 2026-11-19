@@ -55,10 +55,12 @@ pub enum Inline {
 pub enum Block {
     Paragraph(Vec<Inline>),
     /// `text` has no trailing newline: a renderer trims the one that HTML
-    /// `<pre><code>` content usually ends with.
+    /// `<pre><code>` content usually ends with. `spoiler` when the block is
+    /// in a spoiler.
     Code {
         language: Option<String>,
         text: String,
+        spoiler: bool,
     },
     Quote(Vec<Block>),
     /// `start` is the number of the first item of an ordered list.
@@ -105,8 +107,9 @@ impl RichText {
     }
 
     /// [`RichText::to_plain`] with every run of spoiler text, links,
-    /// mentions and emoticons as one `[spoiler]`: for a preview of the text
-    /// (the reply preview), which has no way to reveal them.
+    /// mentions and emoticons, and every code block in a spoiler, as one
+    /// `[spoiler]`: for a preview of the text (the reply preview), which has
+    /// no way to reveal them.
     pub fn to_plain_hiding_spoilers(&self) -> String {
         let mut plain = Plain {
             hide_spoilers: true,
@@ -258,9 +261,13 @@ impl Plain {
                     hidden = hide;
                 }
             }
-            Block::Code { text, .. } => {
+            Block::Code { text, spoiler, .. } => {
                 self.start_line();
-                self.text(text);
+                self.text(if *spoiler && self.hide_spoilers {
+                    SPOILER
+                } else {
+                    text
+                });
             }
             Block::Quote(blocks) => self.nested(Prefix::Quote, blocks),
             Block::List {
@@ -433,6 +440,7 @@ mod tests {
             Block::Code {
                 language: Some("sh".into()),
                 text: "cargo test\ncargo fmt".into(),
+                spoiler: false,
             },
         ]);
         assert_eq!(rich.to_plain(), "Run:\ncargo test\ncargo fmt");

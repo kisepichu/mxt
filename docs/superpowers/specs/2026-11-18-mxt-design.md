@@ -404,8 +404,9 @@ covered by unit tests.
   user's identity changes.
 - HTML bodies: `formatted_body` is parsed with `ruma::html` into `RichText`.
   `<mx-reply>` fallbacks are dropped, `<del>` becomes strikethrough,
-  `data-mx-spoiler` becomes spoiler style (mentions and emoticons inside it
-  are hidden too), and `<img data-mx-emoticon>` becomes its alt text.
+  `data-mx-spoiler` becomes spoiler style (mentions, emoticons and code
+  blocks inside it are hidden too), and `<img data-mx-emoticon>` becomes its
+  alt text. Reply previews show spoilers as `[spoiler]`.
 - Images: `FetchImage` uses the event's thumbnail source when there is one.
   In encrypted rooms there is often none, and the SDK cannot ask the server to
   scale encrypted media, so the adapter downloads the full file. Files larger

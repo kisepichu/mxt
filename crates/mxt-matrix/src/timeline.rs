@@ -627,10 +627,10 @@ fn reply_body(content: &TimelineItemContent) -> Option<String> {
     })
 }
 
-/// A replied-to message's text: its HTML body (or a caption's) as the
-/// timeline shows it, with every spoiler as `[spoiler]`, since the plain
-/// body has the spoiler text in the clear; the plain body without HTML.
-/// `body` is `Message::body()`, as for `message_content`.
+/// A replied-to message's text: its HTML body (or a caption's), rendered as
+/// the timeline renders HTML bodies, with every spoiler as `[spoiler]`,
+/// since the plain body has the spoiler text in the clear; the plain body
+/// without HTML. `body` is `Message::body()`, as for `message_content`.
 fn message_preview(msgtype: &MessageType, body: &str) -> String {
     let formatted = match msgtype {
         MessageType::Text(content) => content.formatted.as_ref(),
