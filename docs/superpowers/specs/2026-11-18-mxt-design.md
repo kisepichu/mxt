@@ -685,7 +685,8 @@ user_id = "@alice:example.org"
 [ui]
 leader = "<Space>"
 timeoutlen = 1000                                 # milliseconds
-room_list = { visible = true, sort = "recent", width = 30, network = "inline" }  # sort: "recent" | "name"; network: "inline" | "below"
+# sort: "recent" | "name"; width: 12 to 80; network: "inline" | "below"
+room_list = { visible = true, sort = "recent", width = 30, network = "inline" }
 time_format = "%H:%M"                             # strftime, in the local time zone
 image_preview = "auto"                            # "auto" | "off" (message view)
 read_receipts = "public"                          # "public" | "private"
