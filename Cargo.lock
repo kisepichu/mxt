@@ -2825,6 +2825,7 @@ dependencies = [
 name = "mxt"
 version = "0.1.0"
 dependencies = [
+ "matrix-sdk",
  "mxt-core",
  "mxt-matrix",
  "mxt-tui",
