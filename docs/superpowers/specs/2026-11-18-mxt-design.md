@@ -365,15 +365,17 @@ covered by unit tests.
   reply call; edits of sent messages are built with `Room::make_edit_event`
   and sent through the timeline (so they work after the target has left the
   loaded timeline), edits of local echoes use `Timeline::edit`.
-- The send queue: messages, edits and reactions go through the SDK's send
-  queue, fed by one sequential task, so they keep their order without
-  holding up other effects. The SDK disables a room's queue after a failed
+- The send queue: messages, edits, reactions and uploads go through the
+  SDK's send queue, fed by one sequential task, so they keep their order
+  without holding up other effects; a message sent right after `:upload`
+  waits for the upload. The SDK disables a room's queue after a failed
   request; mxt enables it again on every write and whenever the sync state
   becomes synced, so a message that failed for a transient reason goes out
-  when the connection returns. A failed message stays as a local echo with a
-  failed marker until `message.resend` or its deletion. An edit or reaction
-  that the server refuses for good would block the room's queue; mxt aborts
-  it (the timeline drops it) and reports the failure.
+  when the connection returns. A failed message or upload stays as a local
+  echo with a failed marker until `message.resend` or its deletion, and
+  holds back the room's later requests until then. An edit or reaction that
+  the server refuses for good would block the room's queue; mxt aborts it
+  (the timeline drops it) and reports the failure.
 - Reactions: `Timeline::toggle_reaction`. Choosing a reaction the user already
   sent removes it.
 - Redaction: a sent message is redacted with `Room::redact` directly, not
@@ -399,12 +401,13 @@ covered by unit tests.
   user's identity changes.
 - HTML bodies: `formatted_body` is parsed with `ruma::html` into `RichText`.
   `<mx-reply>` fallbacks are dropped, `<del>` becomes strikethrough,
-  `data-mx-spoiler` becomes spoiler style, and `<img data-mx-emoticon>`
-  becomes its alt text.
+  `data-mx-spoiler` becomes spoiler style (mentions and emoticons inside it
+  are hidden too), and `<img data-mx-emoticon>` becomes its alt text.
 - Images: `FetchImage` uses the event's thumbnail source when there is one.
   In encrypted rooms there is often none, and the SDK cannot ask the server to
   scale encrypted media, so the adapter downloads the full file. Files larger
-  than 10 MB are not fetched for previews.
+  than 10 MiB are not fetched for previews; an event that gives no size is
+  fetched, and refused after the download if it is larger.
 - Sync path: phase 0 decided on classic `/sync` for the target homeserver,
   and only that path is implemented (see "Phase 0 findings"). The core
   receives the same `Msg`s either way, so another path could be added in
@@ -695,14 +698,21 @@ list, so mxt does not offer an event-level mention list.
   full-width punctuation, are not part of the URL). Other schemes
   (`mailto:`, `matrix:`) are not offered. The status line shows
   `Opening <url>`, because the link text may differ from its target.
-- `gx` on an attachment downloads it to `files.download_dir` and runs
-  `files.opener` with the file path appended. If a file with the same name
-  exists, the download is saved as `name (1).ext`, `name (2).ext`, and so on.
-  The opener gets the path or URL as one argument and never runs through a
-  shell; mxt does not wait for it, and its output is discarded.
-- `:upload <path>` sends the file as an image or a file message, using the
-  MIME type guessed from the file. A leading `~/` is the home directory;
-  relative paths are relative to the directory mxt was started in.
+- `gx` on an attachment shows `Downloading <name>`, downloads it to
+  `files.download_dir` and runs `files.opener` with the file path appended.
+  The file name comes from the event, made safe (no path separators, control
+  or bidirectional control characters, or leading dots) and kept within 255
+  bytes with its extension. If a file with the same name exists, the
+  download is saved as `name (1).ext`, `name (2).ext`, and so on; an
+  existing file is never overwritten. The opener gets the path or URL as one
+  argument and never runs through a shell; mxt does not wait for it, and its
+  output is discarded.
+- `:upload <path>` sends the file as an image, video, audio or file message
+  by the MIME type guessed from the file (mxt shows video and audio as
+  files). A leading `~/` is the home directory; relative paths are relative
+  to the directory mxt was started in. Before reading the file, mxt refuses
+  anything that is not a regular file and files above the homeserver's
+  upload limit.
 - Image previews use ratatui-image, which detects the terminal's graphics
   protocol (sixel, kitty, iTerm2) and falls back to half blocks. They appear
   only in the message view (`message.view`), which keeps the timeline's width
