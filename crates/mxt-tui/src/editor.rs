@@ -11,9 +11,11 @@
 use std::cmp::Ordering;
 
 use crossterm::event::{KeyCode as C, KeyModifiers as M};
-use edtui::actions::{MoveBackward, MoveForward, ReplaceChar, SwitchMode};
+use edtui::actions::{
+    AppendCharToSearch, InsertChar, MoveBackward, MoveForward, ReplaceChar, SwitchMode,
+};
 use edtui::events::{KeyEventRegister, KeyInput};
-use edtui::{EditorEventHandler, EditorState, EditorTheme, EditorView, Lines, RowIndex};
+use edtui::{EditorEventHandler, EditorState, EditorTheme, EditorView, Index2, Lines, RowIndex};
 use mxt_core::keys::{Key, KeyCode, Modifiers};
 use mxt_core::msg::EditorMode;
 use ratatui::Frame;
@@ -187,6 +189,54 @@ impl Editor {
         }
     }
 
+    /// A paste (design, "Input routing"): `text`, with `\n` line breaks,
+    /// goes in as text, never as keys. Insert mode inserts it at the
+    /// cursor, and `.` repeats it with the rest of the insert, as with typed
+    /// text. Normal mode puts it after the cursor like `p` with a
+    /// characterwise register, and visual mode in place of the selection,
+    /// both as `a`, the text and `<Esc>` would: one undo step, back in
+    /// normal mode with the cursor on the last pasted character. Neither
+    /// touches the register. Search mode takes the text up to the first
+    /// line break. A key waiting for the next one is cancelled.
+    pub(crate) fn paste(&mut self, text: &str) {
+        self.cancel_pending();
+        match self.state.mode {
+            edtui::EditorMode::Insert => insert_text(&mut self.state, text),
+            edtui::EditorMode::Normal => {
+                // The switch from normal or visual mode saves the text for
+                // undo.
+                self.state.execute(SwitchMode(edtui::EditorMode::Insert));
+                let col = self.state.cursor.col;
+                if let Some(col) = self.line().map(|line| step(line, col, true, true)) {
+                    self.state.cursor.col = col;
+                }
+                insert_text(&mut self.state, text);
+                self.state.execute(SwitchMode(edtui::EditorMode::Normal));
+            }
+            edtui::EditorMode::Visual => {
+                let state = &mut self.state;
+                let selection = state.selection.take();
+                state.execute(SwitchMode(edtui::EditorMode::Insert));
+                if let Some(selection) = selection {
+                    let start = selection.start();
+                    let col = if selection.line_mode { 0 } else { start.col };
+                    // Unlike vim's `"-`, the replaced text goes to no
+                    // register: the register is the clipboard's.
+                    let _replaced = selection.extract_from(&mut state.lines);
+                    state.cursor = Index2::new(start.row, col);
+                }
+                insert_text(state, text);
+                state.execute(SwitchMode(edtui::EditorMode::Normal));
+            }
+            edtui::EditorMode::Search => {
+                let line = text.split('\n').next().unwrap_or_default();
+                for c in line.chars() {
+                    self.state.execute(AppendCharToSearch(c));
+                }
+            }
+        }
+    }
+
     fn run(&mut self, command: Command) {
         match command {
             Command::Find { backward, till } => {
@@ -295,6 +345,32 @@ impl Editor {
             frame.set_cursor_position(position);
         }
     }
+}
+
+/// Inserts `text` at the cursor, a `\n` starting a new line, with the
+/// cursor after it, as typing it in insert mode would: with edtui's
+/// `InsertChar`, which records the text for `.` in an insert session. The
+/// text after the cursor is set aside meanwhile, so each character goes at
+/// the end of the text instead of moving the rest along, which a paste of
+/// up to 256 KiB would do once per character.
+fn insert_text(state: &mut EditorState, text: &str) {
+    if text.is_empty() {
+        // `merge` would join the cursor's line to the line above.
+        return;
+    }
+    let row = state.cursor.row;
+    let col = state
+        .lines
+        .len_col(row)
+        .map_or(0, |len| state.cursor.col.min(len));
+    state.cursor = Index2::new(row, col);
+    // With `col` 0 the cursor's whole line goes, and the first character
+    // starts a new one.
+    let mut rest = state.lines.split_off(state.cursor);
+    for c in text.chars() {
+        state.execute(InsertChar(c));
+    }
+    state.lines.merge(&mut rest);
 }
 
 /// The keys mxt handles in place of edtui.
@@ -800,5 +876,103 @@ pub(crate) mod tests {
         // ends the word, and only the next `b` goes to the bracket.
         let mut editor = holding("「日本」");
         assert_eq!(cols(&mut editor, &["w", "w", "b", "b"]), [1, 3, 1, 0]);
+    }
+
+    #[test]
+    fn a_paste_in_normal_mode_goes_after_the_cursor_as_one_undo_step() {
+        let register = SharedRegister::default();
+        register.copy("yanked".to_owned());
+        register.take_unsent();
+        // The cursor on `👍🏽`: the text goes after the whole cluster.
+        let mut editor = Editor::new("a👍🏽b", register.clone());
+        feed(&mut editor, "l");
+        editor.paste("x\ny");
+        assert_eq!(text(&editor), "a👍🏽x\nyb");
+        assert_eq!(editor.mode(), EditorMode::Normal);
+        assert_eq!(editor.state.cursor, Index2::new(1, 0));
+        feed(&mut editor, "u");
+        assert_eq!(text(&editor), "a👍🏽b");
+        // The register still holds the yank, and nothing goes to the
+        // clipboard.
+        assert_eq!(register.take_unsent(), None);
+        feed(&mut editor, "0p");
+        assert_eq!(text(&editor), "ayanked👍🏽b");
+
+        // In an empty editor, and with a key waiting, which the paste
+        // cancels.
+        let mut editor = holding("");
+        feed(&mut editor, "f");
+        editor.paste("hi");
+        assert_eq!(
+            (text(&editor).as_str(), editor.key_mode()),
+            ("hi", EditorMode::Normal)
+        );
+    }
+
+    #[test]
+    fn a_paste_in_visual_mode_replaces_the_selection() {
+        let mut editor = holding("hello world");
+        feed(&mut editor, "ve");
+        editor.paste("bye\nall");
+        assert_eq!(text(&editor), "bye\nall world");
+        assert_eq!(editor.mode(), EditorMode::Normal);
+        assert!(editor.state.selection.is_none());
+        feed(&mut editor, "u");
+        assert_eq!(text(&editor), "hello world");
+    }
+
+    #[test]
+    fn a_paste_in_linewise_visual_mode_replaces_the_lines() {
+        // As in neovim, the text goes before the line after them.
+        let mut editor = holding("a\nb\nc");
+        feed(&mut editor, "jV");
+        editor.paste("X\nY");
+        assert_eq!(text(&editor), "a\nX\nYc");
+        assert_eq!(editor.mode(), EditorMode::Normal);
+        assert_eq!(editor.state.cursor, Index2::new(2, 0));
+        feed(&mut editor, "u");
+        assert_eq!(text(&editor), "a\nb\nc");
+        // On the last line there is no line after.
+        let mut editor = holding("a\nb");
+        feed(&mut editor, "jV");
+        editor.paste("X");
+        assert_eq!(text(&editor), "a\nX");
+    }
+
+    #[test]
+    fn a_paste_in_insert_mode_keeps_the_text_around_it() {
+        let mut editor = holding("one\ntwo\nthree");
+        feed(&mut editor, "jli");
+        editor.paste("A\nB");
+        assert_eq!(text(&editor), "one\ntA\nBwo\nthree");
+        assert_eq!(editor.state.cursor, Index2::new(2, 1));
+        // At the start of a line, and an empty paste, which joins nothing.
+        let mut editor = holding("one\ntwo");
+        feed(&mut editor, "ji");
+        editor.paste("");
+        editor.paste("A\n");
+        assert_eq!(text(&editor), "one\nA\ntwo");
+        assert_eq!(editor.state.cursor, Index2::new(2, 0));
+    }
+
+    #[test]
+    fn dot_repeats_an_insert_with_a_paste_in_it() {
+        // As neovim's paste does, line breaks included.
+        for (pasted, repeated) in [("XY", "aXYaXYbb"), ("X\nY", "aX\nYaX\nYbb")] {
+            let mut editor = holding("");
+            feed(&mut editor, "ia");
+            editor.paste(pasted);
+            feed(&mut editor, "b<Esc>.");
+            assert_eq!(text(&editor), repeated);
+        }
+    }
+
+    #[test]
+    fn a_paste_in_search_mode_searches_for_its_first_line() {
+        let mut editor = holding("one\ntwo");
+        feed(&mut editor, "/");
+        editor.paste("tw\nignored");
+        assert_eq!(editor.search().as_deref(), Some("tw"));
+        assert_eq!(text(&editor), "one\ntwo");
     }
 }

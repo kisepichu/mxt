@@ -120,6 +120,16 @@ impl App {
         open.completion = None;
     }
 
+    /// Pasted text without line breaks, added to the line's text.
+    pub(super) fn paste_into_line(&mut self, text: &str) {
+        if let Some(open) = &mut self.command_line
+            && !text.is_empty()
+        {
+            open.line.text.push_str(text);
+            open.completion = None;
+        }
+    }
+
     pub(super) fn cancel_line(&mut self) {
         self.command_line = None;
     }

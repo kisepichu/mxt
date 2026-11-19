@@ -1,4 +1,4 @@
-//! Terminal input: crossterm key events to core keys.
+//! Terminal input: crossterm key events to core keys, and pasted text.
 
 use crossterm::event::{KeyCode as C, KeyEvent, KeyEventKind, KeyModifiers as M};
 use mxt_core::keys::{Key, KeyCode, Modifiers};
@@ -40,6 +40,25 @@ pub fn key_from_crossterm(event: KeyEvent) -> Option<Key> {
         _ => return None,
     };
     Some(Key::new(code, mods))
+}
+
+/// Pasted text with its line breaks as `\n`: terminals and tmux send them
+/// as `\r`, some as `\r\n`.
+pub(crate) fn pasted_text(text: String) -> String {
+    if !text.contains('\r') {
+        return text;
+    }
+    let mut unified = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' {
+            chars.next_if_eq(&'\n');
+            unified.push('\n');
+        } else {
+            unified.push(c);
+        }
+    }
+    unified
 }
 
 #[cfg(test)]
@@ -113,5 +132,11 @@ mod tests {
         let mut e = press(C::Char('j'), M::NONE);
         e.kind = KeyEventKind::Release;
         assert_eq!(key_from_crossterm(e), None);
+    }
+
+    #[test]
+    fn pasted_line_breaks_become_newlines() {
+        // tmux's `paste-buffer` and most terminals send `\r`.
+        assert_eq!(pasted_text("a\rb\r\nc\nd\r".into()), "a\nb\nc\nd\n");
     }
 }

@@ -148,6 +148,15 @@ impl Composer {
         self.report(msgs);
     }
 
+    /// `Paste` (see [`Editor::paste`]), reported once. A paste never opens
+    /// the mention menu, not even with an `@` token at its end, and closes
+    /// an open one; the next key looks for the token again.
+    pub(crate) fn paste(&mut self, text: &str, msgs: &mut Vec<Msg>) {
+        self.editor.paste(text);
+        self.report_empty(msgs);
+        self.report_query(None, msgs);
+    }
+
     /// `LoadComposer`: `text` replaces the text, with the cursor at its end.
     /// The core set its emptiness already.
     pub(crate) fn load(&mut self, text: &str, msgs: &mut Vec<Msg>) {
@@ -233,6 +242,12 @@ impl Composer {
     /// Reports what changed for the core: whether the composer is empty,
     /// and the `@` token's query.
     fn report(&mut self, msgs: &mut Vec<Msg>) {
+        self.report_empty(msgs);
+        let query = self.token();
+        self.report_query(query, msgs);
+    }
+
+    fn report_empty(&mut self, msgs: &mut Vec<Msg>) {
         let empty = self.is_empty();
         if empty != self.empty {
             self.empty = empty;
@@ -241,7 +256,9 @@ impl Composer {
                 empty,
             });
         }
-        let query = self.token();
+    }
+
+    fn report_query(&mut self, query: Option<String>, msgs: &mut Vec<Msg>) {
         if query != self.query {
             self.query.clone_from(&query);
             msgs.push(Msg::MentionQuery {
@@ -333,6 +350,32 @@ mod tests {
         let mut msgs = Vec::new();
         composer.insert_newline(&mut msgs);
         // A line break is text.
+        assert_eq!(msgs, [edited(false)]);
+        assert_eq!(composer.text(), "\n");
+    }
+
+    #[test]
+    fn a_paste_in_insert_mode_inserts_its_lines_and_opens_no_menu() {
+        let mut composer = focused("hi<Space>!<Left>");
+        let mut msgs = Vec::new();
+        composer.paste("one\ntwo @al", &mut msgs);
+        // Reported once; the `@al` the paste ends with opens no menu.
+        assert_eq!(msgs, []);
+        assert_eq!(composer.text(), "hi one\ntwo @al!");
+        assert_eq!(composer.mode(), EditorMode::Insert);
+        // Typing goes on after the paste and finds the token again.
+        assert_eq!(type_keys(&mut composer, "i"), [query(Some("ali"))]);
+        assert_eq!(composer.text(), "hi one\ntwo @ali!");
+
+        // A paste closes an open menu, and an empty composer reports that
+        // it has text.
+        let mut composer = focused("@al");
+        let mut msgs = Vec::new();
+        composer.paste("ice", &mut msgs);
+        assert_eq!(msgs, [query(None)]);
+        let mut composer = focused("");
+        let mut msgs = Vec::new();
+        composer.paste("\n", &mut msgs);
         assert_eq!(msgs, [edited(false)]);
         assert_eq!(composer.text(), "\n");
     }

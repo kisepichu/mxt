@@ -169,6 +169,9 @@ pub enum UiEffect {
     },
     /// Keys for the focused editor (the composer's or the message view's), in order.
     ReplayKeys(Vec<Key>),
+    /// Pasted text for the focused editor (the composer's or the message
+    /// view's), inserted as text rather than keys; line breaks are `\n`.
+    Paste(String),
     /// Open the full-screen message view.
     OpenView(ViewContent),
     /// Close the message view; edits in its editor are discarded.

@@ -54,6 +54,14 @@ impl App {
         }
     }
 
+    /// Pasted text without line breaks, added to the key like typed text,
+    /// so it never submits.
+    pub(super) fn paste_into_secret(&mut self, text: &str) {
+        if let Some(secret) = &mut self.secret {
+            secret.text_mut().push_str(text);
+        }
+    }
+
     /// `Msg::Recovered`.
     pub(super) fn recovered(&mut self) {
         self.set_status(StatusKind::Info, "Recovery complete");

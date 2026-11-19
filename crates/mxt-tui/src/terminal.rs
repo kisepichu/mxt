@@ -6,7 +6,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{DisableFocusChange, EnableFocusChange, Event, EventStream};
+use crossterm::event::{
+    DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange, Event,
+    EventStream,
+};
 use crossterm::execute;
 use crossterm::terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use edtui::system_editor;
@@ -25,7 +28,7 @@ use ratatui::widgets::ListState;
 use crate::clipboard::SharedRegister;
 use crate::composer::{Composer, Composers};
 use crate::image_view::Images;
-use crate::input::key_from_crossterm;
+use crate::input::{key_from_crossterm, pasted_text};
 use crate::opener::Opener;
 use crate::overlay::Overlays;
 use crate::timeline_view::{TimeFormat, TimelinePane};
@@ -65,32 +68,38 @@ pub struct Tui {
 }
 
 impl Tui {
-    /// Raw mode, alternate screen, focus change reporting, hidden cursor,
-    /// and with `image_preview` `auto` the terminal's graphics protocol for
-    /// images. `opener` is `files.opener`.
+    /// Raw mode, alternate screen, focus change reporting, bracketed paste,
+    /// hidden cursor, and with `image_preview` `auto` the terminal's graphics
+    /// protocol for images. `opener` is `files.opener`.
     pub fn new(opener: Vec<String>, image_preview: ImagePreview) -> io::Result<Tui> {
         crossterm::terminal::enable_raw_mode()?;
         ACTIVE.store(true, Ordering::SeqCst);
-        let setup =
-            execute!(io::stdout(), EnterAlternateScreen, EnableFocusChange, Hide).and_then(|()| {
-                // The terminal answers the query on its input, which the
-                // event stream does not read yet. When the answers do not
-                // come in time, as in a tmux pane that is not visible,
-                // ratatui-image's thread may still take the next input (see
-                // `Images::query`), so nothing below asks the terminal:
-                // ratatui's `clear` would ask for the cursor position. The
-                // clear wipes what a terminal prints for a query it does not
-                // know, and the new terminal's buffers are as blank as the
-                // screen. Without previews there is no query, and
-                // ratatui-image does not turn on tmux's `allow-passthrough`.
-                let images = match image_preview {
-                    ImagePreview::Auto => Some(Images::query()?),
-                    ImagePreview::Off => None,
-                };
-                execute!(io::stdout(), Clear(ClearType::All))?;
-                let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-                Ok((terminal, images))
-            });
+        let setup = execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            EnableFocusChange,
+            EnableBracketedPaste,
+            Hide
+        )
+        .and_then(|()| {
+            // The terminal answers the query on its input, which the
+            // event stream does not read yet. When the answers do not
+            // come in time, as in a tmux pane that is not visible,
+            // ratatui-image's thread may still take the next input (see
+            // `Images::query`), so nothing below asks the terminal:
+            // ratatui's `clear` would ask for the cursor position. The
+            // clear wipes what a terminal prints for a query it does not
+            // know, and the new terminal's buffers are as blank as the
+            // screen. Without previews there is no query, and
+            // ratatui-image does not turn on tmux's `allow-passthrough`.
+            let images = match image_preview {
+                ImagePreview::Auto => Some(Images::query()?),
+                ImagePreview::Off => None,
+            };
+            execute!(io::stdout(), Clear(ClearType::All))?;
+            let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+            Ok((terminal, images))
+        });
         match setup {
             Ok((terminal, images)) => {
                 let register = SharedRegister::default();
@@ -202,20 +211,26 @@ impl Tui {
     }
 
     /// Converts one terminal event. Key presses and repeats become `Msg::Key`
-    /// with the key mode (see `Editor::key_mode`) of the editor that has the
-    /// keys: the message view's while it is open, otherwise the open room's
-    /// composer's while it has focus. Focus events become
-    /// `Msg::TerminalFocus`; resizes produce nothing (the loop redraws after
-    /// every event anyway). Mouse and paste events are not enabled.
+    /// and pastes `Msg::Paste` (with `\n` line breaks; an empty paste is
+    /// dropped), both with the key mode (see `Editor::key_mode`) of the
+    /// editor that has the keys: the message view's while it is open,
+    /// otherwise the open room's composer's while it has focus. Focus events
+    /// become `Msg::TerminalFocus`; resizes produce nothing (the loop redraws
+    /// after every event anyway). Mouse events are not enabled.
     pub fn handle_event(&mut self, app: &App, event: Event) -> Vec<Msg> {
         let msg = match event {
             Event::Key(event) => key_from_crossterm(event).map(|key| Msg::Key {
                 key,
                 editor: self.editor_mode(app),
             }),
+            Event::Paste(text) if text.is_empty() => None,
+            Event::Paste(text) => Some(Msg::Paste {
+                text: pasted_text(text),
+                editor: self.editor_mode(app),
+            }),
             Event::FocusGained => Some(Msg::TerminalFocus(true)),
             Event::FocusLost => Some(Msg::TerminalFocus(false)),
-            Event::Resize(..) | Event::Mouse(_) | Event::Paste(_) => None,
+            Event::Resize(..) | Event::Mouse(_) => None,
         };
         msg.into_iter().collect()
     }
@@ -234,8 +249,8 @@ impl Tui {
     /// Executes a UI effect and returns what it reports to the core.
     ///
     /// - `StartTimer` schedules a deadline.
-    /// - `ReplayKeys` goes to the message view's editor while it is open,
-    ///   otherwise to the composer that last got the focus.
+    /// - `ReplayKeys` and `Paste` go to the message view's editor while it
+    ///   is open, otherwise to the composer that last got the focus.
     /// - `OpenView` replaces the message view and `CloseView` drops it with
     ///   its edits. `ShowImage` decodes the image for the view (see
     ///   [`Images::insert`]); a failure becomes `Msg::EffectFailed`. Without
@@ -269,6 +284,13 @@ impl Tui {
                     keys.into_iter().for_each(|key| view.editor.feed(key));
                 } else if let Some(composer) = self.composers.focused_mut() {
                     composer.replay(&keys, &mut msgs);
+                }
+            }
+            UiEffect::Paste(text) => {
+                if let Some(view) = &mut self.view {
+                    view.editor.paste(&text);
+                } else if let Some(composer) = self.composers.focused_mut() {
+                    composer.paste(&text, &mut msgs);
                 }
             }
             UiEffect::OpenView(content) => {
@@ -340,7 +362,8 @@ impl Tui {
     ///   query's poll reports as its timeout), so the clear is skipped and
     ///   ratatui keeps the frame from before. [`repaint`] clears the screen
     ///   and forgets that frame, so the next draw writes every cell. The
-    ///   editor gets the cursor shown and no focus reports.
+    ///   editor gets the cursor shown, and neither focus reports nor
+    ///   bracketed paste unless it turns them on itself.
     /// - A panic in another task while the editor runs restores the
     ///   terminal under it, and edtui enters raw mode and the alternate
     ///   screen again afterwards, so they are left again. The next draw
@@ -353,11 +376,18 @@ impl Tui {
         let terminal = &mut self.terminal;
         // edtui's request is made right before its `open`, which takes it,
         // so a failure here does not leave it pending.
-        let edited = execute!(io::stdout(), DisableFocusChange, Show).and_then(|()| {
+        let edited = execute!(
+            io::stdout(),
+            DisableFocusChange,
+            DisableBracketedPaste,
+            Show
+        )
+        .and_then(|()| {
             let edited =
                 composer.edit_externally(msgs, |state| system_editor::open(state, terminal));
             let restored = if ACTIVE.load(Ordering::SeqCst) {
-                execute!(io::stdout(), EnableFocusChange, Hide).and_then(|()| repaint(terminal))
+                execute!(io::stdout(), EnableFocusChange, EnableBracketedPaste, Hide)
+                    .and_then(|()| repaint(terminal))
             } else {
                 crossterm::terminal::disable_raw_mode()
                     .and_then(|()| execute!(io::stdout(), LeaveAlternateScreen))
@@ -388,7 +418,8 @@ impl Tui {
             .collect()
     }
 
-    /// Leaves raw mode and the alternate screen. Also run by `Drop`.
+    /// Leaves raw mode, the alternate screen and the terminal modes
+    /// [`Tui::new`] turned on. Also run by `Drop`.
     pub fn restore(&mut self) -> io::Result<()> {
         restore_terminal()
     }
@@ -434,7 +465,13 @@ fn restore_terminal() -> io::Result<()> {
         return Ok(());
     }
     let raw = crossterm::terminal::disable_raw_mode();
-    let screen = execute!(io::stdout(), DisableFocusChange, LeaveAlternateScreen, Show);
+    let screen = execute!(
+        io::stdout(),
+        DisableFocusChange,
+        DisableBracketedPaste,
+        LeaveAlternateScreen,
+        Show
+    );
     raw.and(screen)
 }
 

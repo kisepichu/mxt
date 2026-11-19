@@ -117,7 +117,8 @@ flowchart LR
   timeline, mark a room as read) and reports results and SDK stream updates
   back as `Msg`s. The tui adapter executes UI effects (load text into the
   composer, start a timer, open a file) and reports terminal facts as `Msg`s
-  (submitted text, viewport sizes, terminal focus, timer expiry).
+  (submitted text, pasted text, viewport sizes, terminal focus, timer
+  expiry).
 - Every frame is rendered from the core state plus the widget state that
   `mxt-tui` owns (the edtui editors and the image cache).
 - Actions are resolved against the state, not against rendered widgets, so an
@@ -490,6 +491,43 @@ covered by unit tests.
     (after `f`, `F`, `t`, `T` or `r`, also after an operator, as in `df` or
     `yt`): the next key goes to edtui without the keymap (see "edtui
     differences from vim").
+- Pasted text, wherever the keys go: mxt turns on bracketed paste, so the
+  terminal reports a paste as one event, which the tui adapter sends as
+  `Msg::Paste` with its line breaks as `\n` (terminals and tmux send `\r`).
+  A paste is text, never keys: it runs no binding, so a pasted line break
+  never sends the message. Like a key, a paste goes to `CONFIRM` and then
+  `SECRET` mode before anything else. Otherwise the core ends the pending
+  keys first, as their timeout would, so they keep their order with the
+  text, and then sends the paste where a released key would go (see "Keymap
+  resolver"):
+  - an editor (the composer's or the message view's), with
+    `Effect::Ui(Paste(text))`: insert mode inserts the text at the cursor,
+    line breaks as new lines. Normal mode puts it after the cursor like `p`
+    with a characterwise register, and visual mode in place of the
+    selection, each as one undo step ending in normal mode with the cursor
+    on the last pasted character. This is what neovim's `vim.paste` does
+    (vim, too, except that it inserts before a cursor in the first column),
+    but the replaced selection goes to no register: a copy into mxt's
+    register also goes to the clipboard. edtui's search mode adds the first
+    line to the pattern, and a key waiting for its character is cancelled.
+    The composer reports the edit once and never opens the mention menu for
+    a paste, even one that ends in an `@` token; an open menu closes, and
+    the next key looks for the token again.
+  - the command line, the search line and the pickers, which hold one line:
+    the text up to the first line break; the rest is dropped.
+  - `SECRET` mode, also when a binding that the paste ends enters it, as
+    for the keys typed after that binding: the first line too, added to the
+    key and masked like typed text. The rest is dropped, with the line break
+    a copied key ends in. The paste never submits the key and returns no
+    effect: the key leaves the core only in the `Recover` effect of `<CR>`.
+  - the room list and the timeline: nowhere.
+  - `CONFIRM` mode: nowhere, and the question is cancelled, as by any key
+    but `y`.
+  - where the text would go, a paste larger than 256 KiB (four times the
+    64 KiB limit on a Matrix event): nowhere, and the status line says
+    "Paste too large (N KiB; the limit is 256 KiB)". The limit bounds the
+    memory a mistaken paste of a whole file takes: edtui keeps a copy of
+    the whole text for each undo step.
 - The external editor (`composer.external_editor`) uses edtui's
   `system-editor` feature, which opens `$VISUAL` or `$EDITOR`.
 - The tui adapter reports `Msg::Viewport { pane, first, last }` after a render

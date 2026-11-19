@@ -43,11 +43,30 @@ them off or ask first, so check its settings if yanks do not arrive. Inside
 tmux, OSC 52 reaches the outer terminal only with `set -g set-clipboard on`.
 
 mxt never reads the clipboard. `p` in the editors pastes mxt's own register,
-which holds the last yank. Pasting with the terminal types the text as keys,
-because mxt does not turn on bracketed paste: most terminals send a line
-break in pasted text as `<CR>`, which sends the message in insert mode.
-Paste text with several lines into the external editor (`<C-x><C-e>`)
-instead.
+which holds the last yank. Pasting with the terminal (its paste shortcut, or
+the middle mouse button) is different: mxt turns on bracketed paste, so the
+terminal hands it the pasted text as text rather than as keys. A pasted line
+break stays a line break and never sends the message.
+
+- In the composer and the message view, insert mode puts the text at the
+  cursor. Normal mode puts it after the cursor, like `p`, and visual mode in
+  place of the selection; `u` undoes it, and mxt's register keeps the last
+  yank.
+- The command line, `/` and the pickers hold one line, so they take the
+  text up to its first line break.
+- The recovery key prompt of `:recover` takes the text up to its first line
+  break too, masked as `*` like typed text, so a key copied with a line break
+  is not submitted yet; `<CR>` submits it. The text never reaches the
+  composer or another input.
+- The room list and the timeline ignore a paste.
+- A paste never opens the mention menu, even when it ends in `@name`.
+- A paste larger than 256 KiB goes nowhere, and the status line says
+  "Paste too large". Matrix limits a message to 64 KiB anyway.
+
+A terminal without bracketed paste (most have it) types a paste as keys
+instead: a line break in the text arrives as `<CR>`, which sends the
+message in insert mode. There, paste text with several lines into the
+external editor (`<C-x><C-e>`).
 
 ## Focus and read receipts
 

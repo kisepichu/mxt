@@ -33,6 +33,15 @@ use picker::OpenPicker;
 use search::Direction;
 use timeline::Timeline;
 
+/// The largest paste in bytes that goes where text would go: four times the
+/// 64 KiB limit on a Matrix event (design, "Input routing").
+const PASTE_LIMIT: usize = 256 * 1024;
+
+/// A paste up to its first line break, for the inputs that hold one line.
+fn first_line(text: &str) -> &str {
+    text.split_once('\n').map_or(text, |(line, _)| line)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
     RoomList,
@@ -180,6 +189,7 @@ impl App {
         let mut effects = Vec::new();
         match msg {
             Msg::Key { key, editor } => self.key(key, editor, &mut effects),
+            Msg::Paste { text, editor } => self.paste(text, editor, &mut effects),
             Msg::Timeout { id } => self.timeout(id, &mut effects),
             Msg::RoomUpserted(summary) => self.upsert_room(summary),
             Msg::RoomRemoved(id) => self.remove_room(id, &mut effects),
@@ -376,6 +386,86 @@ impl App {
             self.cancel_completion();
         }
         self.feed(key, effects);
+    }
+
+    /// A paste (design, "Input routing") goes where typed text would go,
+    /// without the keymap: to the editor that has the keys, the first line
+    /// to the command line, the picker query or, in `SECRET` mode, the
+    /// recovery key, and nowhere in the room list and the timeline. Where
+    /// the text would go, a paste larger than [`PASTE_LIMIT`] goes nowhere,
+    /// and the status line says so. Pending keys end first, as on their
+    /// timeout, so they keep their order with the text; keys pending in
+    /// another input context are dropped, as a key there would drop them.
+    /// Like any key but `y`, a paste cancels a question, and it never
+    /// answers one that a binding ending before it asks.
+    fn paste(&mut self, text: String, editor: Option<EditorMode>, effects: &mut Vec<Effect>) {
+        self.status = None;
+        self.editor = editor;
+        if editor != Some(EditorMode::Insert) {
+            self.cancel_completion();
+        }
+        if self.confirm.take().is_some() {
+            self.resolver.reset();
+            return;
+        }
+        // Keys resolved again after a binding can be pending once more, in
+        // the context the binding left; each round ends at least one key.
+        let context = loop {
+            // `SECRET` mode takes a paste before the keymap, as `feed` gives
+            // it keys, also when a binding ending here enters it, as it
+            // would take the keys typed after that binding.
+            if self.secret.is_some() {
+                if !self.paste_too_large(&text) {
+                    self.paste_into_secret(first_line(&text));
+                }
+                return;
+            }
+            let context = self.input_context(self.editor);
+            if context != self.key_context {
+                self.resolver.reset();
+                self.key_context = context;
+            }
+            let ended = self.resolver.interrupt(self.keymap.effective(context));
+            if ended.is_empty() {
+                break context;
+            }
+            for next in ended {
+                self.resolved(context.sink(), next, effects);
+            }
+            if self.confirm.is_some() {
+                return;
+            }
+        };
+        match context.sink() {
+            KeySink::Drop => {}
+            _ if self.paste_too_large(&text) => {}
+            KeySink::Editor => effects.push(Effect::Ui(UiEffect::Paste(text))),
+            KeySink::Text => {
+                let line = first_line(&text);
+                if self.command_line.is_some() {
+                    self.paste_into_line(line);
+                } else {
+                    self.paste_into_picker(line);
+                }
+            }
+        }
+    }
+
+    /// Whether a paste is larger than [`PASTE_LIMIT`], which the status
+    /// line then says.
+    fn paste_too_large(&mut self, text: &str) -> bool {
+        let too_large = text.len() > PASTE_LIMIT;
+        if too_large {
+            self.set_status(
+                StatusKind::Info,
+                format!(
+                    "Paste too large ({} KiB; the limit is {} KiB)",
+                    text.len().div_ceil(1024),
+                    PASTE_LIMIT / 1024
+                ),
+            );
+        }
+        too_large
     }
 
     /// Resolves `key` in the current input context. The keys the resolver

@@ -59,7 +59,7 @@ impl Resolver {
     /// prefix; `timeoutlen_ms` is how long a prefix of a longer binding waits.
     ///
     /// When `key` makes the pending sequence match nothing, the sequence ends
-    /// as described at [`Resolver::timeout`].
+    /// as described at [`Resolver::interrupt`].
     pub fn feed(
         &mut self,
         map: &EffectiveMap,
@@ -110,12 +110,29 @@ impl Resolver {
         }
     }
 
-    /// The timer `id` expired, so the pending sequence ends as in nvim: the
+    /// The timer `id` expired, so the pending sequence ends as described at
+    /// [`Resolver::interrupt`]. Stale or unknown ids return nothing.
+    pub fn timeout(&mut self, map: &EffectiveMap, id: TimerId) -> Vec<Resolved> {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.timer == id)
+        {
+            self.interrupt(map)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Ends the pending sequence as in nvim when its timer expires: the
     /// longest binding that is a prefix of it runs with the count, or the
     /// first key is released when there is none. The keys after it come
-    /// back as [`Resolved::Refeed`]. Stale or unknown ids return nothing.
-    pub fn timeout(&mut self, map: &EffectiveMap, id: TimerId) -> Vec<Resolved> {
-        let Some(Pending { keys, .. }) = self.pending.take_if(|pending| pending.timer == id) else {
+    /// back as [`Resolved::Refeed`]. Also for input that is not a key (a
+    /// paste), which ends the sequence the same way; a count typed without
+    /// keys is dropped then.
+    pub fn interrupt(&mut self, map: &EffectiveMap) -> Vec<Resolved> {
+        let Some(Pending { keys, .. }) = self.pending.take() else {
+            self.count = None;
             return Vec::new();
         };
         let longest = keys.len();
@@ -161,7 +178,7 @@ impl Resolver {
     }
 
     /// Ends the sequence `keys`, no longer pending and never empty (see
-    /// [`Resolver::timeout`]), trying bindings of at most `longest` keys.
+    /// [`Resolver::interrupt`]), trying bindings of at most `longest` keys.
     /// Clears the count.
     fn finish(&mut self, map: &EffectiveMap, mut keys: Vec<Key>, longest: usize) -> Vec<Resolved> {
         let count = self.count.take();
