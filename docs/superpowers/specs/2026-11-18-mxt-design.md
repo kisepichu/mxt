@@ -73,7 +73,6 @@ Not included in the first release:
 - Themes and colors beyond the terminal's 16-color palette.
 - Reloading the configuration at runtime.
 - User-defined command aliases and a generic `:<action>` command.
-- Prebuilt release binaries.
 
 ## Conventions
 
@@ -1153,11 +1152,56 @@ lighter.
 - `devShells.default`: the toolchain listed above.
 - `checks.package`: the package build.
 
+### Release binaries
+
+`.github/workflows/release.yml` publishes prebuilt binaries on GitHub
+Releases. How versions are chosen and a release is cut:
+[Releasing](../../releasing.md).
+
+- Triggers: a `v*` tag on `main` builds and checks the archives and publishes
+  the release. `workflow_dispatch` runs the same build and checks on any
+  branch and keeps the archives as workflow artifacts without publishing, so
+  the workflow can be tested without a tag. A run fails before building if
+  the tag is not `v` followed by the workspace version, or if `CHANGELOG.md`
+  has no section for the version; that section is the release notes.
+  `gh release create` publishes the release: with assets it creates a draft,
+  uploads them and then publishes it, so a release never appears without its
+  archives, and it needs no third-party action.
+- Targets: `x86_64-unknown-linux-gnu`, built on `ubuntu-22.04`, the oldest
+  GitHub runner whose glibc is 2.35 or older, so the binary runs on Ubuntu
+  22.04 and on any system with a newer glibc; the workflow prints the
+  highest `GLIBC_` symbol version the binary needs and fails above 2.35.
+  `aarch64-apple-darwin`, built on `macos-latest` for macOS 11, rustc's
+  minimum for the target, which `MACOSX_DEPLOYMENT_TARGET` also applies to
+  the C code. Other systems use the flake or `cargo install`.
+- Assets: `mxt-v<version>-<target>.tar.gz`, a directory with `mxt`,
+  `LICENSE`, `README.md` and `CHANGELOG.md`, and a `.sha256` file per
+  archive. The names carry the OS, architecture and C library as mise's
+  github backend detects them (the layout of ripgrep's releases), so
+  `mise use -g github:kisepichu/mxt` installs the right archive.
+- Toolchain: rustup's Rust at the flake's rustc version, pinned in the
+  workflow. Not Nix: a Nix-built binary needs the Nix store's glibc and
+  libraries.
+- SQLite: a prebuilt binary can rely neither on the flake's SQLite nor on a
+  system SQLite (Ubuntu 22.04's is older than 3.54.0), and libsqlite3-sys
+  0.38's bundled copy is the affected one (RUSTSEC-2026-0459). The workflow
+  downloads the official SQLite amalgamation (3.54.1), checks it against the
+  SHA3-256 that sqlite.org publishes, builds a static library with the
+  compile options of libsqlite3-sys's bundled build (the SQLite that
+  matrix-sdk's default `bundled-sqlite` feature gives), and has
+  libsqlite3-sys link it with `SQLITE3_LIB_DIR`, `SQLITE3_INCLUDE_DIR`,
+  `SQLITE3_STATIC=1` and `SQLITE3_NO_PKG_CONFIG=1` (otherwise pkg-config
+  would find the runner's system SQLite first). It then checks that `ldd`
+  or `otool -L` lists no SQLite and that the binary holds the source ID of
+  that SQLite and no other, and prints its version.
+
 ### Installing
 
+- Prebuilt binaries: `mise use -g github:kisepichu/mxt` (mise's github
+  backend), or an archive from GitHub Releases. They need no system SQLite.
 - Nix: `nix profile install github:kisepichu/mxt`, or use the flake as an
   input of a NixOS or home-manager configuration.
-- Without Nix: `cargo install --locked --git https://github.com/kisepichu/mxt mxt`,
+- From source without Nix: `cargo install --locked --git https://github.com/kisepichu/mxt mxt`,
   for example through mise's cargo backend. `--locked` builds with the
   committed `Cargo.lock`, which pins matrix-sdk's stack and
   `libsqlite3-sys`. matrix-sdk is built with `sqlite` and without
@@ -1167,11 +1211,9 @@ lighter.
   build still links any `libsqlite3` the linker finds, without checking its
   version.
 
-The [README](../../../README.md) describes both and the first start;
+The [README](../../../README.md) describes all three and the first start;
 [Configuration](../../configuration.md), [Keys](../../keys.md) and
 [Terminal setup](../../terminal.md) are the user's reference.
-
-Prebuilt binaries on GitHub Releases are out of scope for the first release.
 
 ## Development phases
 

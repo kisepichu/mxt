@@ -36,6 +36,29 @@ an account that has none (do that in another client first).
 
 ## Installing
 
+### Prebuilt binaries
+
+Each [release](https://github.com/kisepichu/mxt/releases) has archives for
+x86_64 Linux with glibc 2.35 or newer (Ubuntu 22.04 and later, for example)
+and for Apple Silicon macOS 11 or newer. They link SQLite statically, so they
+need no system SQLite. With [mise](https://mise.jdx.dev):
+
+```sh
+mise use -g github:kisepichu/mxt
+```
+
+Or download `mxt-v<version>-<target>.tar.gz` and its `.sha256` file from the
+release, check and unpack the archive, and put `mxt` on your `PATH`:
+
+```sh
+sha256sum -c mxt-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256  # macOS: shasum -a 256 -c
+tar -xzf mxt-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+cp mxt-v0.1.0-x86_64-unknown-linux-gnu/mxt ~/.local/bin/
+```
+
+If macOS refuses to run an `mxt` that a browser downloaded, remove the
+quarantine attribute with `xattr -d com.apple.quarantine mxt`.
+
 ### With Nix
 
 ```sh
@@ -66,7 +89,7 @@ through `specialArgs`):
 }
 ```
 
-### Without Nix
+### From source, without Nix
 
 Requirements:
 
@@ -203,8 +226,11 @@ data directory, empties the cache directory and logs in. The homeserver in
   editors differ from vim.
 - [Terminal setup](docs/terminal.md): tmux, the clipboard, images and input
   methods.
+- [Changelog](CHANGELOG.md): the changes in each release.
 - [Design](docs/superpowers/specs/2026-11-18-mxt-design.md): how mxt is
   built, for contributors.
+- [Releasing](docs/releasing.md): versions and how a release is cut, for
+  maintainers.
 
 ## Development
 
