@@ -63,9 +63,19 @@ impl Error {
                 | RecoveryError::SecretStorage(SecretStorageError::Sdk(error)),
             ) => sdk_response(error),
             Error::Sync(error) => sync_response(error),
+            // Only a shared pagination error is left (see `timeline_error`),
+            // and it keeps the URL of a failed request.
             Error::Timeline(timeline::Error::EventCacheError(
                 EventCacheError::PaginationError(error),
-            )) => sdk_response(error),
+            )) => {
+                if is_failed_request(error) {
+                    return Brief {
+                        error: &"the request failed",
+                        response: None,
+                    };
+                }
+                sdk_response(error)
+            }
             _ => None,
         };
         Brief {
@@ -103,8 +113,14 @@ pub(crate) fn without_url(error: matrix_sdk::Error) -> matrix_sdk::Error {
     }
 }
 
+/// The errors `without_url` removes the URL from.
+fn is_failed_request(error: &matrix_sdk::Error) -> bool {
+    matches!(error, matrix_sdk::Error::Http(error) if matches!(**error, HttpError::Reqwest(_)))
+}
+
 /// A timeline error, with the request URL removed where the SDK error is not
-/// shared (see `without_url`).
+/// shared (see `without_url`). `Error::brief` leaves out the URL a shared one
+/// keeps.
 pub(crate) fn timeline_error(error: timeline::Error) -> Error {
     match error {
         timeline::Error::Sdk(error) => without_url(error).into(),
@@ -361,5 +377,24 @@ mod tests {
         );
         let error = sync_service::Error::Supervisor;
         assert_eq!(brief_sync(&error).to_string(), error.to_string());
+    }
+
+    #[test]
+    fn brief_pagination_errors_have_no_url_also_when_shared() {
+        let url = "https://example.org/_matrix/client/v3/rooms/!room:example.org/messages";
+        let failed_request = || {
+            let error = matrix_sdk::reqwest::Proxy::all("http://[").unwrap_err();
+            let error = error.with_url(matrix_sdk::reqwest::Url::parse(url).unwrap());
+            Arc::new(matrix_sdk::Error::from(HttpError::Reqwest(error)))
+        };
+        let pagination =
+            |error| timeline::Error::EventCacheError(EventCacheError::PaginationError(error));
+        let alone = timeline_error(pagination(failed_request()));
+        assert!(!alone.brief().to_string().contains("!room"), "{alone}");
+        let shared = failed_request();
+        let _waiting = shared.clone();
+        let shared = timeline_error(pagination(shared));
+        assert!(shared.to_string().contains("!room"), "debug keeps the URL");
+        assert_eq!(shared.brief().to_string(), "the request failed");
     }
 }
