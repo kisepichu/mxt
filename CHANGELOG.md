@@ -18,14 +18,19 @@ The first release.
   later with `:recover`, which cross-signs the device and fetches room keys
   from the key backup.
 - A room list that names bridged rooms `<network> / <room>` and shows one
-  unread badge per room, with the settings `ui.room_list.sort`,
-  `ui.room_list.width` and `ui.room_list.network` (the network on the room's
-  row or on a second row).
+  unread badge per room (also for a room marked unread in another client),
+  with the settings `ui.room_list.sort`, `ui.room_list.width` and
+  `ui.room_list.network` (the network on the room's row or on a second row).
 - A fuzzy room picker, the same picker for rooms with unread mentions, and an
   action that opens the next unread room.
 - A timeline with HTML message bodies (spoilers hidden, in reply previews and
   code blocks too), replies, edits, reactions, read receipts and back
   pagination, and a full-screen message view for long messages and images.
+- `/` searches the room list or the loaded messages, `n`/`N` repeat the
+  search, and `yy` copies a message's text to the clipboard over OSC 52.
+- The settings `ui.read_receipts` (`"private"` sends private read receipts),
+  `ui.time_format` for message times, and `ui.image_preview` (`"off"` turns
+  image previews off).
 - Composers with vim modes, Markdown, `@` mention completion, replies, edits
   and an external editor. The editors use mxt's fork of edtui, which moves
   the cursor and wraps lines by grapheme cluster and uses vim's word classes
