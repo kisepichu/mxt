@@ -75,8 +75,7 @@ impl Blocks {
     }
 
     fn end_paragraph(&mut self) {
-        let inlines = std::mem::take(&mut self.line).finish();
-        if !inlines.is_empty() {
+        if let Some(inlines) = std::mem::take(&mut self.line).finish() {
             self.blocks.push(Block::Paragraph(inlines));
         }
     }
@@ -251,12 +250,18 @@ struct Line {
 }
 
 impl Line {
-    fn finish(mut self) -> Vec<Inline> {
-        // A `<br>` at the end of a paragraph adds no empty line in a browser.
+    /// The paragraph's inlines; `None` when there is no paragraph.
+    fn finish(mut self) -> Option<Vec<Inline>> {
+        // A `<br>` at the end of a paragraph adds no empty line in a browser,
+        // but a paragraph of only a `<br>` is a blank line: rich text
+        // composers separate paragraphs with `<p><br></p>`.
         if matches!(self.inlines.last(), Some(Inline::LineBreak)) {
             self.inlines.pop();
+            if self.inlines.is_empty() {
+                return Some(self.inlines);
+            }
         }
-        self.inlines
+        (!self.inlines.is_empty()).then_some(self.inlines)
     }
 
     fn text(&mut self, text: &str, inherited: &Inherited) {
@@ -296,12 +301,15 @@ impl Line {
 
     /// Writes the waiting space before content in `next_link`. A space in an
     /// `<a>` belongs to it only between two of its words, so a mention's text
-    /// never ends with a space.
+    /// neither starts nor ends with a space.
     fn flush_space(&mut self, next_link: Option<&Rc<Link>>) {
         if let Some(space) = self.space.take() {
+            let same = |link: &Rc<Link>, other: Option<&Rc<Link>>| {
+                other.is_some_and(|other| Rc::ptr_eq(link, other))
+            };
             let link = space
                 .link
-                .filter(|link| next_link.is_some_and(|next| Rc::ptr_eq(link, next)));
+                .filter(|link| same(link, next_link) && same(link, self.last_link.as_ref()));
             self.push(" ", space.style, link);
         }
     }
@@ -499,6 +507,14 @@ mod tests {
     }
 
     #[test]
+    fn a_paragraph_of_only_a_br_is_a_blank_line() {
+        assert_eq!(
+            blocks("<p>one</p><p><br></p><p>two<br></p>"),
+            vec![plain("one"), paragraph(Vec::new()), plain("two")]
+        );
+    }
+
+    #[test]
     fn strong_and_b_are_bold_em_and_i_italic() {
         let both = styled("both", |s| {
             s.bold = true;
@@ -629,7 +645,8 @@ mod tests {
             blocks(
                 "<a href=\"https://matrix.to/#/@alice:example.org\">Alice  Smith</a> in \
                  <a href=\"https://matrix.to/#/#room:example.org\">#room:example.org</a> and \
-                 <a href=\"https://matrix.to/#/%21abc%3Aexample.org\">a <b>room</b></a>"
+                 <a href=\"https://matrix.to/#/%21abc%3Aexample.org\">a <b>room</b></a>, cc\
+                 <a href=\"https://matrix.to/#/@bob:example.org\"> Bob</a>"
             ),
             vec![paragraph(vec![
                 mention("Alice Smith", user("@alice:example.org")),
@@ -640,6 +657,9 @@ mod tests {
                 ),
                 text(" and "),
                 mention("a room", MentionTarget::Room("!abc:example.org".into())),
+                // A space at the start of an `<a>` is not part of its text.
+                text(", cc "),
+                mention("Bob", user("@bob:example.org")),
             ])]
         );
     }
@@ -756,5 +776,16 @@ mod tests {
                 "unclosed", "bold", "block", "tail", "&", "more", "-", "item"
             ]
         );
+    }
+
+    #[test]
+    fn elements_nested_deeper_than_max_depth_are_dropped() {
+        // Far deeper than the limit, so the recursion would follow without it.
+        let html = format!(
+            "<b>top {}kept{}dropped",
+            "<b>".repeat(MAX_DEPTH - 1),
+            "<b>".repeat(1_000)
+        );
+        assert_eq!(blocks(&html), vec![paragraph(vec![bold("top kept")])]);
     }
 }
