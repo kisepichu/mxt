@@ -3204,3 +3204,44 @@ bridge precedence tests stay.
   the orchestrator runs mxt against the account (room count, network names,
   unread badges, sync state), commit
   ("Sync with classic /sync, because the target homeserver's sliding sync does not list bridged rooms").
+
+---
+
+### Task 14: nvim-compatible resolution of pending keys (owner decision)
+
+The owner chose nvim's behavior over the design's original rule. Design and
+code change together in one pull request.
+
+**Design change** ("Keymap resolver", the two bullets on `Msg::Timeout` and
+on a key that makes the sequence match nothing), replaced by:
+
+- On `Msg::Timeout`, and when the next key makes the pending sequence match
+  nothing: the longest binding that is a prefix of the pending keys (with the
+  new key, in the second case) runs, and the keys after it are resolved
+  afresh, one by one. When no prefix is a binding, only the first pending key
+  is released, and the keys after it are resolved afresh. This is nvim's
+  behavior.
+
+**Code** (`crates/mxt-core/src/resolver.rs`, `crates/mxt-core/src/app.rs`):
+- `Resolver::timeout(&mut self, map: &EffectiveMap, timeoutlen_ms: u64, id: TimerId) -> Vec<Resolved>`
+  again: resolving the rest can start a new timer.
+- A count applies to the binding that runs; the keys resolved afresh carry no
+  count.
+- `App` keeps the rule that keys resolved after a `Run` that changed the
+  input context are resolved in the new context (#12), on the timeout path as
+  well.
+
+**Tests** (resolver and app; the first two were checked with nvim 0.12.4,
+`]` and `]gq` bound):
+- `]gj` in the timeline: `]` runs, then `g` is a prefix, then `gj` matches
+  nothing and `g` is no binding, so `g` is released and `j` runs
+  `cursor.down`.
+- `]g` then the timeout: `]` runs, then `g` is resolved afresh and starts a
+  new timer.
+- A full miss over three keys: `<C-x><C-y>` pending as a prefix of
+  `<C-x><C-y><C-z>` in `composer.insert`, then `a`: only `<C-x>` is released,
+  then `<C-y>` and `a` are resolved afresh (both released, in order).
+- `2]` then the timeout runs `]` with count 2; the rest carries no count.
+- The existing tests that encoded the old rule are updated, and the tests
+  for the old rule's special case (`a_pending_sequence_runs_only_when_it_is_a_binding_itself`)
+  are replaced by the cases above.
