@@ -138,12 +138,29 @@ impl RichText {
     }
 }
 
+/// Whether `url` is an `http://` or `https://` URL (the scheme in any case),
+/// the only ones `message.open` opens: a link's target is chosen by its
+/// sender, and other schemes reach other programs.
+pub fn is_web_url(url: &str) -> bool {
+    let scheme = |prefix: &str| {
+        url.get(..prefix.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+    };
+    scheme("http://") || scheme("https://")
+}
+
 /// The `http://` or `https://` URL in `word`, without the brackets and quotes
-/// around it and the punctuation of the sentence after it.
+/// around it and the punctuation of the sentence after it, ASCII or
+/// full-width, as in `（https://example.org/x）。`.
 fn bare_url(word: &str) -> Option<&str> {
     let url = word
-        .trim_start_matches(['(', '[', '{', '<', '"', '\''])
-        .trim_end_matches(['.', ',', ';', ':', '!', '?', '\'', '"', ')', ']', '}', '>']);
+        .trim_start_matches([
+            '(', '[', '{', '<', '"', '\'', '（', '「', '『', '【', '〈', '《',
+        ])
+        .trim_end_matches([
+            '.', ',', ';', ':', '!', '?', '\'', '"', ')', ']', '}', '>', '。', '、', '，', '．',
+            '！', '？', '）', '」', '』', '】', '〉', '》',
+        ]);
     let rest = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))?;
@@ -417,5 +434,40 @@ mod tests {
                 ("Bob", &user("@bob:example.org")),
             ]
         );
+    }
+
+    #[test]
+    fn links_leave_out_full_width_punctuation_around_bare_urls() {
+        let rich = RichText::plain(
+            "見て （https://example.org/a）。 https://example.org/b。\n\
+             「https://example.org/c」、 『https://example.org/d』！ \
+             【https://example.org/e】？ 〈https://example.org/f〉， 《https://example.org/g》．",
+        );
+        let urls: Vec<String> = "abcdefg"
+            .chars()
+            .map(|c| format!("https://example.org/{c}"))
+            .collect();
+        assert_eq!(rich.links(), urls);
+    }
+
+    #[test]
+    fn only_http_and_https_urls_are_web_urls() {
+        for url in [
+            "https://example.org/x",
+            "http://example.org",
+            "HTTPS://example.org",
+        ] {
+            assert!(is_web_url(url), "{url}");
+        }
+        for url in [
+            "file:///etc/passwd",
+            "mailto:alice@example.org",
+            "javascript:alert(1)",
+            "--help",
+            "https:",
+            "",
+        ] {
+            assert!(!is_web_url(url), "{url}");
+        }
     }
 }

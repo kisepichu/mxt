@@ -543,7 +543,7 @@ fn reactions(groups: &[ReactionGroup]) -> Vec<Piece<'_>> {
 }
 
 /// `512 B`, `1.5 KiB`, `3.2 MiB`.
-fn file_size(bytes: u64) -> String {
+pub(crate) fn file_size(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["KiB", "MiB", "GiB", "TiB"];
     if bytes < 1024 {
         return format!("{bytes} B");

@@ -5,6 +5,7 @@ use super::{App, Confirm, Focus, Motion, StatusKind};
 use crate::effect::{Effect, MatrixEffect, UiEffect, ViewContent};
 use crate::ids::{EventId, RoomId};
 use crate::msg::Pane;
+use crate::rich::is_web_url;
 use crate::settings::ImagePreview;
 use crate::timeline::{
     ItemRef, MediaBytes, MessageContent, OwnEvent, SendState, TimelineDiff, TimelineEntry,
@@ -335,9 +336,10 @@ impl App {
         }
     }
 
-    /// `message.open`: downloads an attachment, opens the only link, or picks
-    /// one of several links. An attachment that is still a local echo is
-    /// refused: the adapter downloads by remote event.
+    /// `message.open`: downloads an attachment, opens the only `http://` or
+    /// `https://` link, or picks one of several. Links with other schemes are
+    /// left out (see [`is_web_url`]). An attachment that is still a local
+    /// echo is refused: the adapter downloads by remote event.
     pub(super) fn open_message(&mut self, effects: &mut Vec<Effect>) {
         let (Some(room), Some(item)) = (&self.open_room, self.timeline.cursor_item()) else {
             return;
@@ -354,7 +356,12 @@ impl App {
             }
             MessageContent::Text { rich, .. }
             | MessageContent::Notice(rich)
-            | MessageContent::Emote(rich) => rich.links().into_iter().map(str::to_owned).collect(),
+            | MessageContent::Emote(rich) => rich
+                .links()
+                .into_iter()
+                .filter(|url| is_web_url(url))
+                .map(str::to_owned)
+                .collect(),
             MessageContent::Sticker { .. }
             | MessageContent::Redacted
             | MessageContent::Undecryptable

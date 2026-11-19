@@ -4,7 +4,9 @@
 mod clipboard;
 mod composer;
 mod editor;
+mod image_view;
 mod input;
+mod opener;
 mod overlay;
 mod terminal;
 mod timeline_view;
