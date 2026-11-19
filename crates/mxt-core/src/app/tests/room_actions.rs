@@ -1,5 +1,6 @@
 use super::timeline::status;
 use super::*;
+use crate::room::Badge;
 use crate::rooms::RoomFilter;
 
 const C: &str = "!c:example.org";
@@ -22,14 +23,20 @@ fn named(rid: &str, name: &str, at: u64, mentions: u64) -> RoomSummary {
         ..room(rid, at, 0)
     }
 }
-/// The picker's items as (label, key).
-fn items(app: &App) -> Vec<(&str, &str)> {
+/// The room picker's items as (label, badge, room ID).
+fn items(app: &App) -> Vec<(&str, Option<Badge>, &str)> {
     app.picker()
         .unwrap()
         .items
         .iter()
-        .map(|item| (item.label.as_str(), item.key.as_str()))
+        .map(|item| match &item.key {
+            PickerKey::Room(room) => (item.label.as_str(), item.badge, room.as_str()),
+            key => panic!("not a room: {key:?}"),
+        })
         .collect()
+}
+fn with_mode(summary: RoomSummary, mode: NotificationMode) -> RoomSummary {
+    RoomSummary { mode, ..summary }
 }
 fn subscribe(room: &str) -> Effect {
     Effect::Matrix(MatrixEffect::SubscribeTimeline(id(room)))
@@ -65,11 +72,11 @@ fn the_room_picker_lists_rooms_in_order_with_badges_and_ranks_by_name() {
     assert_eq!(
         items(&app),
         [
-            ("Work / devops", "!devops:example.org"),
-            ("Work / dev", "!dev:example.org"),
-            ("c:example.org  2", C),
-            ("b:example.org", B),
-            ("a:example.org  1", A),
+            ("Work / devops", None, "!devops:example.org"),
+            ("Work / dev", None, "!dev:example.org"),
+            ("c:example.org", Some(Badge::Messages(2)), C),
+            ("b:example.org", None, B),
+            ("a:example.org", Some(Badge::Messages(1)), A),
         ]
     );
     // Ranked on the displayed name: the exact name before the longer one.
@@ -77,8 +84,8 @@ fn the_room_picker_lists_rooms_in_order_with_badges_and_ranks_by_name() {
     assert_eq!(
         items(&app),
         [
-            ("Work / dev", "!dev:example.org"),
-            ("Work / devops", "!devops:example.org"),
+            ("Work / dev", None, "!dev:example.org"),
+            ("Work / devops", None, "!devops:example.org"),
         ]
     );
     assert_eq!(
@@ -109,8 +116,8 @@ fn two_rooms_with_the_same_name_are_both_reachable_in_the_room_picker() {
     assert_eq!(
         items(&app),
         [
-            ("Work / general", "!one:example.org"),
-            ("Work / general", "!two:example.org"),
+            ("Work / general", None, "!one:example.org"),
+            ("Work / general", None, "!two:example.org"),
         ]
     );
     assert_eq!(
@@ -146,7 +153,10 @@ fn the_mentions_filter_lists_only_rooms_with_mentions() {
 
     app.update(Msg::RoomUpserted(named("!ping:example.org", "ping", 5, 3)));
     keys(&mut app, "<Space>m");
-    assert_eq!(items(&app), [("Work / ping  @3", "!ping:example.org")]);
+    assert_eq!(
+        items(&app),
+        [("Work / ping", Some(Badge::Mentions(3)), "!ping:example.org")]
+    );
     // The room went away while the picker was open.
     app.update(Msg::RoomRemoved(id("!ping:example.org")));
     assert_eq!(no_timers(keys(&mut app, "<CR>")), vec![]);
@@ -158,6 +168,8 @@ fn the_mentions_filter_lists_only_rooms_with_mentions() {
 #[test]
 fn mute_and_unmute_act_on_the_room_under_the_cursor_or_the_open_room() {
     let mut app = app();
+    let muted = with_mode(room(C, 30, 2), NotificationMode::Mute);
+    app.update(Msg::RoomUpserted(muted));
     keys(&mut app, "<CR><C-w>hj"); // open !c, the cursor on !b in the room list
     assert_eq!(
         no_timers(keys(&mut app, ":mute<CR>")),
@@ -176,6 +188,20 @@ fn mute_and_unmute_act_on_the_room_under_the_cursor_or_the_open_room() {
         vec![set_mute(C, false)]
     );
     assert_eq!(status(&app), Some("Unmuted c:example.org"));
+}
+
+#[test]
+fn unmute_leaves_a_room_that_is_not_muted_alone() {
+    let mut app = app();
+    // Set in another client; unmuting would remove the room's rule.
+    let mentions_only = with_mode(room(C, 30, 2), NotificationMode::MentionsAndKeywords);
+    app.update(Msg::RoomUpserted(mentions_only));
+    assert_eq!(no_timers(keys(&mut app, ":unmute<CR>")), vec![]);
+    assert_eq!(app.status().unwrap().kind, StatusKind::Error);
+    assert_eq!(status(&app), Some("c:example.org is not muted"));
+    keys(&mut app, "j");
+    assert_eq!(no_timers(keys(&mut app, ":unmute<CR>")), vec![]);
+    assert_eq!(status(&app), Some("b:example.org is not muted"));
 }
 
 #[test]

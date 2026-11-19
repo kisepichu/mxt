@@ -6,7 +6,7 @@ use super::{App, Focus, Motion, StatusKind};
 use crate::effect::{Effect, MatrixEffect};
 use crate::ids::RoomId;
 use crate::msg::Pane;
-use crate::room::RoomSummary;
+use crate::room::{NotificationMode, RoomSummary};
 use crate::rooms::{RoomTarget, resolve_room};
 
 /// When no room matches a target or the picker's query.
@@ -118,11 +118,17 @@ impl App {
     }
 
     /// `room.mute` / `room.unmute`. The room's mode label changes when the
-    /// SDK reports the new mode.
+    /// SDK reports the new mode. Unmuting removes the room's rule, so
+    /// `room.unmute` on a room that is not muted does nothing: a "Mentions
+    /// only" rule set elsewhere stays.
     pub(super) fn set_mute(&mut self, muted: bool, effects: &mut Vec<Effect>) {
         let Some(room) = self.target_room() else {
             return self.set_status(StatusKind::Error, "No room");
         };
+        if !muted && room.mode != NotificationMode::Mute {
+            let status = format!("{} is not muted", room.name);
+            return self.set_status(StatusKind::Error, status);
+        }
         let verb = if muted { "Muted" } else { "Unmuted" };
         let status = format!("{verb} {}", room.name);
         effects.push(Effect::Matrix(MatrixEffect::SetMute {

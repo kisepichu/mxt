@@ -1,4 +1,4 @@
-use super::timeline::{msg, opened, remote, reset, status};
+use super::timeline::{item, local, msg, opened, remote, reset, status};
 use super::*;
 use crate::effect::ViewContent;
 use crate::rich::{Block, Inline, MentionTarget, RichText, Style};
@@ -18,6 +18,13 @@ fn with_content(n: u32, content: MessageContent) -> TimelineEntry {
     let mut entry = msg(n);
     if let TimelineEntry::Item(item) = &mut entry {
         item.content = content;
+    }
+    entry
+}
+/// `entry` as a local echo that is still being sent.
+fn unsent(mut entry: TimelineEntry, txn: &str) -> TimelineEntry {
+    if let TimelineEntry::Item(item) = &mut entry {
+        item.id = local(txn);
     }
     entry
 }
@@ -68,6 +75,21 @@ fn download(item: ItemRef) -> Effect {
 }
 fn open_url(url: &str) -> Effect {
     ui(UiEffect::OpenUrl(url.into()))
+}
+fn link_item(url: &str) -> PickerItem {
+    PickerItem {
+        label: url.into(),
+        badge: None,
+        key: PickerKey::Url(url.into()),
+    }
+}
+/// The status, which must be Info.
+fn info(app: &App) -> Option<&str> {
+    assert_eq!(
+        app.status().map(|status| status.kind),
+        Some(StatusKind::Info)
+    );
+    status(app)
 }
 fn image_view(n: u32) -> Effect {
     ui(UiEffect::OpenView(ViewContent::Image {
@@ -127,6 +149,67 @@ fn gx_opens_the_only_link_of_a_message() {
     );
     assert_eq!(gx(&mut app), vec![open_url(docs)]);
     assert!(app.picker().is_none());
+    // The timeline shows the link text only.
+    assert_eq!(info(&app), Some("Opening https://example.org/docs"));
+}
+
+#[test]
+fn gx_opens_a_bare_url_in_a_message_without_html() {
+    let mut app = opened();
+    reset(
+        &mut app,
+        vec![item(remote(1), "see https://example.org/docs")],
+    );
+    assert_eq!(gx(&mut app), vec![open_url("https://example.org/docs")]);
+}
+
+#[test]
+fn gx_leaves_out_the_punctuation_around_bare_urls() {
+    let docs = "https://example.org/docs";
+    let blog = "http://example.com/blog?page=2";
+    let mut app = opened();
+    reset(
+        &mut app,
+        vec![rich(
+            1,
+            vec![Block::Paragraph(vec![
+                text("Read https://example.org/docs, then "),
+                link("the blog", blog),
+                text(" (http://example.com/blog?page=2). Or \"https://example.org/docs\"!"),
+                text(" Not a URL: https://"),
+            ])],
+        )],
+    );
+    assert_eq!(gx(&mut app), vec![]);
+    // In order, each URL once, whether bare or a link.
+    assert_eq!(
+        app.picker().unwrap().items,
+        [link_item(docs), link_item(blog)]
+    );
+}
+
+#[test]
+fn gx_does_not_open_a_url_in_inline_code() {
+    let code = Style {
+        code: true,
+        ..Style::default()
+    };
+    let mut app = opened();
+    reset(
+        &mut app,
+        vec![rich(
+            1,
+            vec![Block::Paragraph(vec![
+                text("run "),
+                Inline::Text {
+                    text: "curl https://example.org/api".into(),
+                    style: code,
+                },
+            ])],
+        )],
+    );
+    assert_eq!(gx(&mut app), vec![]);
+    assert_eq!(status(&app), Some("Nothing to open"));
 }
 
 #[test]
@@ -159,16 +242,15 @@ fn gx_on_several_links_picks_one_of_their_urls() {
     assert_eq!(picker.kind, PickerKind::Links);
     assert_eq!(app.mode_label(None), "PICKER");
     // In order, each URL once.
-    let urls: Vec<(&str, &str)> = picker
-        .items
-        .iter()
-        .map(|item| (item.label.as_str(), item.key.as_str()))
-        .collect();
-    assert_eq!(urls, [(docs, docs), (blog, blog), (code, code)]);
+    assert_eq!(
+        picker.items,
+        [link_item(docs), link_item(blog), link_item(code)]
+    );
     keys(&mut app, "blog");
     assert_eq!(app.picker().unwrap().items.len(), 1);
     assert_eq!(no_timers(keys(&mut app, "<CR>")), vec![open_url(blog)]);
     assert!(app.picker().is_none());
+    assert_eq!(info(&app), Some("Opening https://example.org/blog"));
 }
 
 #[test]
@@ -177,7 +259,14 @@ fn gx_without_a_link_or_an_attachment_has_nothing_to_open() {
         text: "@Alice".into(),
         target: MentionTarget::User(UserId::new("@alice:example.org")),
     };
+    // No open room, then no item under the cursor.
+    let mut app = app();
+    keys(&mut app, "<C-w>l");
+    assert_eq!(gx(&mut app), vec![]);
+    assert_eq!(app.status(), None);
     let mut app = opened();
+    assert_eq!(gx(&mut app), vec![]);
+    assert_eq!(app.status(), None);
     reset(
         &mut app,
         vec![
@@ -191,6 +280,30 @@ fn gx_without_a_link_or_an_attachment_has_nothing_to_open() {
     assert_eq!(gx(&mut app), vec![]);
     assert_eq!(status(&app), Some("Nothing to open"));
     assert!(app.picker().is_none());
+}
+
+#[test]
+fn gx_and_the_view_refuse_an_attachment_that_is_not_sent_yet() {
+    let mut app = opened();
+    reset(
+        &mut app,
+        vec![
+            unsent(image(1), "t1"),
+            unsent(file(2), "t2"),
+            item(local("t3"), "see https://example.org/docs"),
+        ],
+    );
+    // A link needs no remote event.
+    assert_eq!(gx(&mut app), vec![open_url("https://example.org/docs")]);
+    keys(&mut app, "k");
+    assert_eq!(gx(&mut app), vec![]);
+    assert_eq!(status(&app), Some("Wait until the message is sent"));
+    keys(&mut app, "k");
+    assert_eq!(gx(&mut app), vec![]);
+    assert_eq!(status(&app), Some("Wait until the message is sent"));
+    assert_eq!(keys(&mut app, "<CR>"), vec![]);
+    assert_eq!(status(&app), Some("Wait until the message is sent"));
+    assert!(!app.view_open());
 }
 
 #[test]
@@ -229,7 +342,7 @@ fn the_image_view_fetches_the_image_and_shows_the_one_for_its_item() {
     keys_in(&mut app, "qk", Some(EditorMode::Normal));
     assert_eq!(keys(&mut app, "<CR>"), vec![image_view(1), fetch(1)]);
     assert_eq!(unavailable(&mut app, 1, "too large to preview"), vec![]);
-    assert_eq!(status(&app), Some("No image preview: too large to preview"));
+    assert_eq!(info(&app), Some("No image preview: too large to preview"));
 }
 
 #[test]

@@ -629,7 +629,7 @@ fn the_emoji_picker_lists_reacted_and_common_emoji_first_and_toggles_one() {
         }
     );
     assert_eq!(app.mode_label(None), "PICKER");
-    let first: Vec<&str> = picker.items[..9].iter().map(|i| i.key.as_str()).collect();
+    let first: Vec<PickerKey> = picker.items[..9].iter().map(|i| i.key.clone()).collect();
     // The common reactions, then every other emoji in `emojis` order.
     let first_other = emoji::all().next().unwrap().as_str();
     assert_eq!(
@@ -645,6 +645,7 @@ fn the_emoji_picker_lists_reacted_and_common_emoji_first_and_toggles_one() {
             "🙏",
             first_other
         ]
+        .map(|key| PickerKey::Reaction(key.into()))
     );
     assert_eq!(picker.items[1].label, ":heart: ❤️");
     assert_eq!(picker.items.len(), emoji::all().count());
@@ -660,7 +661,8 @@ fn the_emoji_picker_lists_reacted_and_common_emoji_first_and_toggles_one() {
         picker.items[0],
         PickerItem {
             label: ":heart: ❤️".into(),
-            key: "\u{2764}".into(),
+            badge: None,
+            key: PickerKey::Reaction("\u{2764}".into()),
         }
     );
     keys(&mut app, "<C-n><C-n><C-p>");

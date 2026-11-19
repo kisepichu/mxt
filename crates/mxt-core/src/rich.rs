@@ -110,20 +110,44 @@ impl RichText {
         mentions
     }
 
-    /// The URLs of link spans, in order, each once (`message.open`).
+    /// The URLs of link spans and the bare `http://` / `https://` URLs in
+    /// text that is not inline code, in order, each once (`message.open`).
+    /// Messages without HTML have no link spans, so their URLs are only
+    /// bare ones.
     pub fn links(&self) -> Vec<&str> {
         let mut links: Vec<&str> = Vec::new();
+        let mut push = |url| {
+            if !links.contains(&url) {
+                links.push(url);
+            }
+        };
         for_each_paragraph(&self.blocks, &mut |inlines| {
             for inline in inlines {
-                if let Inline::Link { url, .. } = inline
-                    && !links.contains(&url.as_str())
-                {
-                    links.push(url);
+                match inline {
+                    Inline::Link { url, .. } => push(url.as_str()),
+                    Inline::Text { text, style } if !style.code => {
+                        text.split_whitespace()
+                            .filter_map(bare_url)
+                            .for_each(&mut push);
+                    }
+                    _ => {}
                 }
             }
         });
         links
     }
+}
+
+/// The `http://` or `https://` URL in `word`, without the brackets and quotes
+/// around it and the punctuation of the sentence after it.
+fn bare_url(word: &str) -> Option<&str> {
+    let url = word
+        .trim_start_matches(['(', '[', '{', '<', '"', '\''])
+        .trim_end_matches(['.', ',', ';', ':', '!', '?', '\'', '"', ')', ']', '}', '>']);
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    (!rest.is_empty()).then_some(url)
 }
 
 /// Calls `f` with the inlines of every paragraph, in order, also inside

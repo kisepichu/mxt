@@ -179,23 +179,8 @@ fn draw_room_list(
 /// right part never takes more than the row.
 fn room_row(room: &RoomSummary, is_open: bool, width: usize) -> Line<'_> {
     let mut right = Vec::with_capacity(3);
-    let mut right_width = 0;
-    if let Some(badge) = Badge::from_counts(&room.unread) {
-        let text = badge.text();
-        let style = badge_style(badge);
-        right_width = text_width(&text);
-        if right_width <= width {
-            right.push(Span::styled(text, style));
-        } else {
-            // Only a row narrower than the badge gets here.
-            let (spans, used) = fit(&[(text.as_str(), style)], width);
-            let owned = spans
-                .into_iter()
-                .map(|s| Span::styled(s.content.into_owned(), s.style));
-            right.extend(owned);
-            right_width = used;
-        }
-    }
+    let mut right_width =
+        Badge::from_counts(&room.unread).map_or(0, |badge| push_badge(&mut right, badge, width));
     if let Some(label) = room.mode.label() {
         let space = usize::from(!right.is_empty());
         let with_label = right_width + space + text_width(label);
@@ -220,6 +205,25 @@ fn room_row(room: &RoomSummary, is_open: bool, width: usize) -> Line<'_> {
     ));
     spans.extend(right);
     Line::from(spans)
+}
+
+/// Pushes the badge in its style (design, "Unread badges") onto `spans` and
+/// returns its columns. It is cut only when `width` is narrower than the
+/// badge.
+pub(crate) fn push_badge(spans: &mut Vec<Span<'_>>, badge: Badge, width: usize) -> usize {
+    let text = badge.text();
+    let style = badge_style(badge);
+    let badge_width = text_width(&text);
+    if badge_width <= width {
+        spans.push(Span::styled(text, style));
+        return badge_width;
+    }
+    let (cut, used) = fit(&[(text.as_str(), style)], width);
+    spans.extend(
+        cut.into_iter()
+            .map(|span| Span::styled(span.content.into_owned(), span.style)),
+    );
+    used
 }
 
 fn badge_style(badge: Badge) -> Style {

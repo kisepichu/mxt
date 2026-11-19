@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use super::command_line::Edit;
 use super::rooms::NO_MATCHING_ROOM;
 use super::{App, StatusKind};
-use crate::effect::{Effect, MatrixEffect, UiEffect};
+use crate::effect::{Effect, MatrixEffect};
 use crate::emoji::{self, Emoji};
 use crate::fuzzy;
 use crate::ids::RoomId;
@@ -52,9 +52,19 @@ pub enum PickerKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PickerItem {
     pub label: String,
-    /// What accepting the item uses: the reaction key for emoji, the room ID
-    /// for rooms, the URL for links.
-    pub key: String,
+    /// The room's unread badge, drawn in its own style; `None` for read rooms
+    /// and for other pickers' items.
+    pub badge: Option<Badge>,
+    pub key: PickerKey,
+}
+
+/// What accepting an item uses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PickerKey {
+    /// The reaction key, for the emoji picker.
+    Reaction(String),
+    Room(RoomId),
+    Url(String),
 }
 
 /// The picker and what its items are ranked from.
@@ -168,16 +178,19 @@ impl App {
             return;
         };
         let key = open.picker.items.swap_remove(open.picker.selected).key;
-        match open.picker.kind {
-            PickerKind::Emoji { room, item } => {
-                effects.push(Effect::Matrix(MatrixEffect::ToggleReaction {
-                    room,
-                    item,
-                    key,
-                }));
+        match key {
+            PickerKey::Reaction(key) => {
+                // Only the emoji picker has reaction items.
+                if let PickerKind::Emoji { room, item } = open.picker.kind {
+                    effects.push(Effect::Matrix(MatrixEffect::ToggleReaction {
+                        room,
+                        item,
+                        key,
+                    }));
+                }
             }
-            PickerKind::Rooms { .. } => self.open_id(&RoomId::new(key), effects),
-            PickerKind::Links => effects.push(Effect::Ui(UiEffect::OpenUrl(key))),
+            PickerKey::Room(id) => self.open_id(&id, effects),
+            PickerKey::Url(url) => self.open_url(url, effects),
         }
     }
 
@@ -187,8 +200,8 @@ impl App {
     }
 }
 
-/// The rooms that pass `filter`, labelled with the displayed name and the
-/// badge: in room list order for an empty query, otherwise ranked on the
+/// The rooms that pass `filter`, labelled with the displayed name, with their
+/// badges: in room list order for an empty query, otherwise ranked on the
 /// displayed name.
 fn room_items(rooms: &RoomList, filter: RoomFilter, query: &str) -> Vec<PickerItem> {
     let passing: Vec<&RoomSummary> = rooms
@@ -202,14 +215,10 @@ fn room_items(rooms: &RoomList, filter: RoomFilter, query: &str) -> Vec<PickerIt
         .map(|index| {
             let room = passing[index];
             // Each index comes once.
-            let mut label = std::mem::take(&mut names[index]);
-            if let Some(badge) = Badge::from_counts(&room.unread) {
-                label.push_str("  ");
-                label.push_str(&badge.text());
-            }
             PickerItem {
-                label,
-                key: room.id.to_string(),
+                label: std::mem::take(&mut names[index]),
+                badge: Badge::from_counts(&room.unread),
+                key: PickerKey::Room(room.id.clone()),
             }
         })
         .collect()
@@ -222,7 +231,8 @@ fn link_items(urls: &[String], query: &str) -> Vec<PickerItem> {
         .into_iter()
         .map(|index| PickerItem {
             label: urls[index].clone(),
-            key: urls[index].clone(),
+            badge: None,
+            key: PickerKey::Url(urls[index].clone()),
         })
         .collect()
 }
@@ -241,7 +251,8 @@ fn emoji_items(query: &str, reacted: &[String]) -> Vec<PickerItem> {
     };
     let item = |emoji: Emoji| PickerItem {
         label: emoji.label(),
-        key: key(emoji),
+        badge: None,
+        key: PickerKey::Reaction(key(emoji)),
     };
     if !query.trim().is_empty() {
         return emoji::search(query).into_iter().map(item).collect();
@@ -256,7 +267,8 @@ fn emoji_items(query: &str, reacted: &[String]) -> Vec<PickerItem> {
             }
             PickerItem {
                 label: emoji.map_or_else(|| key.clone(), Emoji::label),
-                key: key.clone(),
+                badge: None,
+                key: PickerKey::Reaction(key.clone()),
             }
         })
         .collect();

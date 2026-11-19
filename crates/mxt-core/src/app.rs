@@ -24,7 +24,7 @@ use crate::settings::Settings;
 use crate::timeline::{ItemRef, TimelineEntry};
 
 pub use command_line::{CommandLine, LineKind};
-pub use picker::{Picker, PickerItem, PickerKind};
+pub use picker::{Picker, PickerItem, PickerKey, PickerKind};
 
 use command_line::OpenLine;
 use composer::{Composer, MentionMenu};

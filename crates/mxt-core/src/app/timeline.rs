@@ -15,6 +15,9 @@ use crate::timeline::{
 /// (design, "Matrix adapter").
 const PAGINATE_WITHIN: usize = 10;
 
+/// Why an action that needs the item's remote event refuses a local echo.
+pub(super) const NOT_SENT: &str = "Wait until the message is sent";
+
 /// The open room's timeline state; opening a room starts a new one.
 #[derive(Default)]
 pub(super) struct Timeline {
@@ -269,12 +272,16 @@ impl App {
 
     /// `message.view`: the item in the full-screen view. An image shows its
     /// details, and its image is fetched unless previews are off; other
-    /// items show their text.
+    /// items show their text. An image that is still a local echo is
+    /// refused: the adapter fetches media by remote event.
     pub(super) fn view_message(&mut self, effects: &mut Vec<Effect>) {
         let (Some(room), Some(item)) = (&self.open_room, self.timeline.cursor_item()) else {
             return;
         };
         let content = match &item.content {
+            MessageContent::Image { .. } if matches!(item.id, ItemRef::Local(_)) => {
+                return self.set_status(StatusKind::Error, NOT_SENT);
+            }
             MessageContent::Image {
                 name,
                 size,
@@ -320,20 +327,26 @@ impl App {
     }
 
     /// `Msg::ImageUnavailable`: the reason, while the view shows the item.
+    /// Info, because the reason is expected (the file is too large to
+    /// preview); a failed fetch comes as `Msg::EffectFailed`.
     pub(super) fn image_unavailable(&mut self, item: &ItemRef, reason: &str) {
         if self.view.as_ref() == Some(item) {
-            self.set_status(StatusKind::Error, format!("No image preview: {reason}"));
+            self.set_status(StatusKind::Info, format!("No image preview: {reason}"));
         }
     }
 
     /// `message.open`: downloads an attachment, opens the only link, or picks
-    /// one of several links.
+    /// one of several links. An attachment that is still a local echo is
+    /// refused: the adapter downloads by remote event.
     pub(super) fn open_message(&mut self, effects: &mut Vec<Effect>) {
         let (Some(room), Some(item)) = (&self.open_room, self.timeline.cursor_item()) else {
             return;
         };
         let mut links: Vec<String> = match &item.content {
             MessageContent::Image { .. } | MessageContent::File { .. } => {
+                if let ItemRef::Local(_) = item.id {
+                    return self.set_status(StatusKind::Error, NOT_SENT);
+                }
                 return effects.push(Effect::Matrix(MatrixEffect::Download {
                     room: room.clone(),
                     item: item.id.clone(),
@@ -351,9 +364,16 @@ impl App {
             return self.pick_link(links);
         }
         match links.pop() {
-            Some(url) => effects.push(Effect::Ui(UiEffect::OpenUrl(url))),
+            Some(url) => self.open_url(url, effects),
             None => self.set_status(StatusKind::Error, "Nothing to open"),
         }
+    }
+
+    /// Opens `url`, which the timeline may show only as link text, so the
+    /// status line shows where it goes.
+    pub(super) fn open_url(&mut self, url: String, effects: &mut Vec<Effect>) {
+        self.set_status(StatusKind::Info, format!("Opening {url}"));
+        effects.push(Effect::Ui(UiEffect::OpenUrl(url)));
     }
 
     /// `Msg::Downloaded`: opens the saved file.
