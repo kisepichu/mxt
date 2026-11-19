@@ -6,6 +6,7 @@ use matrix_sdk::{
     ClientBuildError, HttpError, StoreError,
     encryption::{recovery::RecoveryError, secret_storage::SecretStorageError},
     event_cache::EventCacheError,
+    room::{edit::EditError, reply::ReplyError},
     ruma::api::error::{Error as ServerError, ErrorKind},
 };
 use matrix_sdk_ui::timeline;
@@ -36,12 +37,15 @@ pub enum Error {
     PasswordLoginUnsupported { offered: Vec<String> },
     /// The homeserver no longer accepts the access token (`M_UNKNOWN_TOKEN`).
     UnknownToken,
-    /// Building a room's timeline, or paginating it.
+    /// Building a room's timeline, paginating it, or acting on its items
+    /// (sending, reacting, deleting).
     Timeline(timeline::Error),
     /// An effect names a room this client does not know.
     UnknownRoom,
     /// An effect names an event with an ID that is not a Matrix event ID.
     InvalidEventId,
+    /// An effect acts on the items of a room whose timeline is not open.
+    TimelineNotOpen,
 }
 
 impl Error {
@@ -81,8 +85,17 @@ impl Error {
     }
 }
 
-/// An SDK error for the status line and `warn` logs, see `Brief`.
+/// An SDK error for the status line and `warn` logs, see `Brief`. The send
+/// queue shares its errors, so `without_url` cannot take a failed request's
+/// URL out; such a request shows no more than that it failed, as in
+/// `Error::brief`.
 pub(crate) fn brief_sdk(error: &matrix_sdk::Error) -> Brief<'_> {
+    if is_unreachable(error) {
+        return Brief {
+            error: &"the request failed",
+            response: None,
+        };
+    }
     Brief {
         error,
         response: sdk_response(error),
@@ -122,6 +135,17 @@ pub(crate) fn timeline_error(error: timeline::Error) -> Error {
                 Ok(error) => without_url(error).into(),
                 Err(error) => Error::Timeline(EventCacheError::PaginationError(error).into()),
             }
+        }
+        // Replies and edits fetch their target event when the event cache
+        // lacks it, and removing a reaction redacts it at once; as an SDK
+        // error, `Error::brief` shortens the homeserver's answer like any
+        // other.
+        timeline::Error::ReplyError(ReplyError::Fetch(error))
+        | timeline::Error::EditError(timeline::EditError::RoomError(EditError::Fetch(error))) => {
+            without_url(*error).into()
+        }
+        timeline::Error::RedactError(timeline::RedactError::HttpError(error)) => {
+            without_url(error.into()).into()
         }
         error => Error::Timeline(error),
     }
@@ -173,6 +197,7 @@ impl fmt::Display for Error {
             Error::Timeline(error) => error.fmt(f),
             Error::UnknownRoom => f.write_str("the room is not known to this client"),
             Error::InvalidEventId => f.write_str("the event ID is not valid"),
+            Error::TimelineNotOpen => f.write_str("the room's timeline is not open"),
         }
     }
 }
@@ -189,7 +214,8 @@ impl std::error::Error for Error {
             Error::PasswordLoginUnsupported { .. }
             | Error::UnknownToken
             | Error::UnknownRoom
-            | Error::InvalidEventId => None,
+            | Error::InvalidEventId
+            | Error::TimelineNotOpen => None,
         }
     }
 }
@@ -359,5 +385,54 @@ mod tests {
         let shared = timeline_error(pagination(shared));
         assert!(shared.to_string().contains("!room"), "debug keeps the URL");
         assert_eq!(shared.brief().to_string(), "the request failed");
+    }
+
+    /// A request that failed in the network layer, with a URL that names
+    /// `!room:example.org`.
+    fn failed_request() -> HttpError {
+        let url = "https://example.org/_matrix/client/v3/rooms/!room:example.org/event/$event";
+        let error = matrix_sdk::reqwest::Proxy::all("http://[").unwrap_err();
+        HttpError::Reqwest(error.with_url(matrix_sdk::reqwest::Url::parse(url).unwrap()))
+    }
+
+    #[test]
+    fn brief_errors_of_fetching_targets_and_removing_reactions_name_no_room() {
+        let reply = |error: HttpError| {
+            timeline::Error::ReplyError(ReplyError::Fetch(Box::new(error.into())))
+        };
+        let edit = |error: HttpError| {
+            let fetch = EditError::Fetch(Box::new(error.into()));
+            timeline::Error::EditError(timeline::EditError::RoomError(fetch))
+        };
+        let unreact = |error| timeline::Error::RedactError(timeline::RedactError::HttpError(error));
+        for error in [
+            reply(failed_request()),
+            edit(failed_request()),
+            unreact(failed_request()),
+        ] {
+            let error = timeline_error(error);
+            assert!(!error.brief().to_string().contains("!room"), "{error}");
+        }
+        for refused in [
+            reply(server_error("M_FORBIDDEN")),
+            unreact(server_error("M_FORBIDDEN")),
+        ] {
+            assert_eq!(
+                timeline_error(refused).brief().to_string(),
+                "the homeserver answered 403 M_FORBIDDEN"
+            );
+        }
+    }
+
+    #[test]
+    fn brief_send_queue_errors_name_no_room() {
+        // The send queue's errors are shared, so the URL stays in them.
+        let failed = matrix_sdk::Error::from(failed_request());
+        assert_eq!(brief_sdk(&failed).to_string(), "the request failed");
+        let refused = matrix_sdk::Error::from(server_error("M_FORBIDDEN"));
+        assert_eq!(
+            brief_sdk(&refused).to_string(),
+            "the homeserver answered 403 M_FORBIDDEN"
+        );
     }
 }

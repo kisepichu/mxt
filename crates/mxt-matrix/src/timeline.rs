@@ -6,9 +6,16 @@ use std::{collections::HashSet, pin::pin, sync::Arc};
 use futures_util::{Stream, StreamExt as _};
 use matrix_sdk::{
     Room,
+    room::edit::EditedContent,
     ruma::{
         self, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedUserId,
-        events::room::message::{FormattedBody, MessageFormat, MessageType},
+        events::{
+            Mentions,
+            room::message::{
+                FormattedBody, MessageFormat, MessageType, RoomMessageEventContent,
+                RoomMessageEventContentWithoutRelation,
+            },
+        },
     },
 };
 use matrix_sdk_ui::{
@@ -21,7 +28,9 @@ use matrix_sdk_ui::{
     },
 };
 use mxt_core::{
+    effect::{Outgoing, OutgoingKind},
     ids::{EventId, RoomId, Timestamp, TxnId, UserId},
+    mention::RenderedBody,
     msg::Msg,
     rich::{Block, Inline, RichText},
     timeline::{
@@ -37,7 +46,7 @@ use tracing::{debug, warn};
 
 use crate::{
     Error,
-    error::{brief_sdk, timeline_error},
+    error::{brief_sdk, timeline_error, without_url},
     html::render_html,
 };
 
@@ -105,6 +114,12 @@ impl Subscription {
 
     pub(crate) fn room(&self) -> &RoomId {
         &self.room
+    }
+
+    /// The timeline, for the effects that act on its items. They run outside
+    /// the subscription's tasks, so closing the room does not abort a send.
+    pub(crate) fn timeline(&self) -> Arc<Timeline> {
+        self.timeline.clone()
     }
 
     /// Loads older events in the background, answered with
@@ -246,6 +261,130 @@ async fn fetch_reply_details(timeline: Arc<Timeline>, mut ids: UnboundedReceiver
             debug!("Loading a replied-to message failed: {error}");
         }
     }
+}
+
+/// Queues `message` in the room's send queue: a new message, a reply, or an
+/// edit, which keeps its mentions in the new content. The local echo shows
+/// the send state, so only a failure to queue is an error here.
+pub(crate) async fn send_message(timeline: &Timeline, message: Outgoing) -> Result<(), Error> {
+    enable_sending(timeline);
+    let content = outgoing_content(&message.body);
+    let queued = match message.kind {
+        OutgoingKind::New => timeline
+            .send(RoomMessageEventContent::from(content).into())
+            .await
+            .map(drop),
+        OutgoingKind::Reply { to } => timeline.send_reply(content, event_id(&to)?).await.map(drop),
+        // What `Timeline::edit` does for a sent message, without looking for
+        // it in the timeline's items, which may no longer hold it.
+        OutgoingKind::Edit {
+            target: ItemRef::Remote(target),
+        } => {
+            let edit = timeline
+                .room()
+                .make_edit_event(&event_id(&target)?, EditedContent::RoomMessage(content))
+                .await
+                .map_err(|error| timeline_error(sdk::EditError::RoomError(error).into()))?;
+            timeline.send(edit).await.map(drop)
+        }
+        // A local echo is replaced in the send queue.
+        OutgoingKind::Edit {
+            target: target @ ItemRef::Local(_),
+        } => {
+            let content = EditedContent::RoomMessage(content);
+            timeline.edit(&item_id(&target)?, content).await
+        }
+    };
+    queued.map_err(timeline_error)
+}
+
+/// Adds the user's reaction with `key` to `item`, or removes it if they
+/// reacted with it.
+pub(crate) async fn toggle_reaction(
+    timeline: &Timeline,
+    item: &ItemRef,
+    key: &str,
+) -> Result<(), Error> {
+    enable_sending(timeline);
+    timeline
+        .toggle_reaction(&item_id(item)?, key)
+        .await
+        .map(drop)
+        .map_err(timeline_error)
+}
+
+/// Redacts the user's own sent `item`, or stops sending it while it is a
+/// local echo. A sent item is redacted at once, not through the room's send
+/// queue as `Timeline::redact` does: the SDK would show it deleted before
+/// the homeserver accepts the redaction, and a refused redaction would hold
+/// back the room's later requests. The item changes when the redaction
+/// arrives with the sync.
+pub(crate) async fn redact(timeline: &Timeline, item: &ItemRef) -> Result<(), Error> {
+    match item {
+        ItemRef::Remote(event) => timeline
+            .room()
+            .redact(&event_id(event)?, None, None)
+            .await
+            .map(drop)
+            .map_err(|error| without_url(error.into()).into()),
+        ItemRef::Local(_) => {
+            enable_sending(timeline);
+            timeline
+                .redact(&item_id(item)?, None)
+                .await
+                .map_err(timeline_error)
+        }
+    }
+}
+
+/// Sends the failed local echo `txn` again, from its place in the room's
+/// send queue.
+pub(crate) async fn resend(timeline: &Timeline, txn: &TxnId) -> Result<(), Error> {
+    let id = TimelineEventItemId::TransactionId(txn.as_str().into());
+    let handle = timeline.items().await.iter().rev().find_map(|item| {
+        item.as_event()
+            .filter(|event| event.identifier() == id)?
+            .local_echo_send_handle()
+    });
+    let handle = handle.ok_or_else(|| Error::Timeline(sdk::Error::EventNotInTimeline(id)))?;
+    handle
+        .unwedge()
+        .await
+        .map_err(|error| Error::Timeline(error.into()))?;
+    enable_sending(timeline);
+    Ok(())
+}
+
+/// The SDK disables a room's send queue after any failed request, and only
+/// `Client::resume` enables it again, so every request the user queues or
+/// deletes enables it (the adapter also enables every queue when the sync
+/// connects); otherwise later messages, reactions and redactions would wait
+/// for good. A request that failed with a recoverable error (the network,
+/// for example) stays queued and goes out first, which keeps the order; one
+/// that failed otherwise holds back the ones after it until it is resent or
+/// deleted, or, for an edit or a reaction, dropped (see `send_queue`).
+fn enable_sending(timeline: &Timeline) {
+    timeline.room().send_queue().set_enabled(true);
+}
+
+/// The content of a message from the composer (design, "Matrix adapter",
+/// Sending): an HTML body from the Markdown when it has any formatting, the
+/// plain body alone otherwise, and `m.mentions` with the users still
+/// mentioned. `m.mentions` is there also when it is empty: the push rules
+/// from before it apply only to events without it, and would notify the
+/// members whose display name the message contains, or the whole room for
+/// `@room`.
+fn outgoing_content(body: &RenderedBody) -> RoomMessageEventContentWithoutRelation {
+    let content = match FormattedBody::markdown(&body.markdown) {
+        Some(html) => RoomMessageEventContentWithoutRelation::text_html(&body.plain, html.body),
+        None => RoomMessageEventContentWithoutRelation::text_plain(&body.plain),
+    };
+    // The core's user IDs come from the SDK's members, so they parse.
+    let users = body
+        .user_ids
+        .iter()
+        .filter_map(|user| ruma::UserId::parse(user.as_str()).ok());
+    content.add_mentions(Mentions::with_user_ids(users))
 }
 
 fn timeline_diff(diff: VectorDiff<Arc<sdk::TimelineItem>>, me: &ruma::UserId) -> TimelineDiff {
@@ -475,6 +614,18 @@ fn item_ref(id: TimelineEventItemId) -> ItemRef {
     }
 }
 
+/// The SDK's identifier of `item`, as `item_ref` made it.
+fn item_id(item: &ItemRef) -> Result<TimelineEventItemId, Error> {
+    Ok(match item {
+        ItemRef::Local(txn) => TimelineEventItemId::TransactionId(txn.as_str().into()),
+        ItemRef::Remote(event) => TimelineEventItemId::EventId(event_id(event)?),
+    })
+}
+
+pub(crate) fn event_id(event: &EventId) -> Result<OwnedEventId, Error> {
+    ruma::EventId::parse(event.as_str()).map_err(|_| Error::InvalidEventId)
+}
+
 fn send_state(state: &EventSendState) -> SendState {
     match state {
         EventSendState::NotSentYet { .. } => SendState::Sending,
@@ -507,7 +658,11 @@ mod tests {
         owned_event_id, owned_user_id,
     };
     use matrix_sdk_ui::timeline::{EmbeddedEvent, MsgLikeContent, ReactionInfo};
-    use mxt_core::rich::Style;
+    use mxt_core::{
+        mention::{MentionRef, render_mentions},
+        rich::Style,
+    };
+    use serde_json::json;
 
     use super::*;
 
@@ -760,5 +915,50 @@ mod tests {
         ))));
         let failed = TimelineDetails::Error(Arc::new(matrix_sdk::Error::InsufficientData));
         assert!(!needs_details(&reply(failed)));
+    }
+
+    fn sent(text: &str, mentions: &[MentionRef]) -> serde_json::Value {
+        serde_json::to_value(outgoing_content(&render_mentions(text, mentions))).unwrap()
+    }
+
+    #[test]
+    fn text_without_formatting_is_sent_plain_and_markdown_with_an_html_body() {
+        // Line breaks alone are no formatting. Without mentions, `m.mentions`
+        // is empty, which keeps the legacy push rules from notifying anyone.
+        assert_eq!(
+            sent("hello\nworld", &[]),
+            json!({ "msgtype": "m.text", "body": "hello\nworld", "m.mentions": {} })
+        );
+        // The plain body stays as typed, and line breaks stay in the HTML.
+        assert_eq!(
+            sent("**hi**\nthere", &[]),
+            json!({
+                "msgtype": "m.text",
+                "body": "**hi**\nthere",
+                "format": "org.matrix.custom.html",
+                "formatted_body": "<strong>hi</strong><br />\nthere",
+                "m.mentions": {},
+            })
+        );
+    }
+
+    #[test]
+    fn mentions_are_links_in_the_html_body_and_listed_in_m_mentions() {
+        let alice = MentionRef {
+            user: UserId::new("@alice:example.org"),
+            text: "@A*b*_c".into(),
+        };
+        // The escaped Markdown in the name comes out as the name.
+        assert_eq!(
+            sent("hi @A*b*_c and @A*b*_c", &[alice]),
+            json!({
+                "msgtype": "m.text",
+                "body": "hi @A*b*_c and @A*b*_c",
+                "format": "org.matrix.custom.html",
+                "formatted_body": "hi <a href=\"https://matrix.to/#/@alice:example.org\">@A*b*_c</a> \
+                    and <a href=\"https://matrix.to/#/@alice:example.org\">@A*b*_c</a>",
+                "m.mentions": { "user_ids": ["@alice:example.org"] },
+            })
+        );
     }
 }
