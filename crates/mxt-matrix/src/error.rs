@@ -1,13 +1,14 @@
 //! The error type of the adapter.
 
-use std::{fmt, path::PathBuf};
+use std::{fmt, path::PathBuf, sync::Arc};
 
 use matrix_sdk::{
     ClientBuildError, HttpError, StoreError,
     encryption::{recovery::RecoveryError, secret_storage::SecretStorageError},
+    event_cache::EventCacheError,
     ruma::api::error::{Error as ServerError, ErrorKind},
 };
-use matrix_sdk_ui::{encryption_sync_service, room_list_service, sync_service};
+use matrix_sdk_ui::{encryption_sync_service, room_list_service, sync_service, timeline};
 
 /// Every variant that wraps another error displays its message (the session
 /// file errors after the path) and forwards its source, so printing the
@@ -38,6 +39,8 @@ pub enum Error {
     UnknownToken,
     /// Building the sync service, or its room list.
     Sync(sync_service::Error),
+    /// Building a room's timeline, or paginating it.
+    Timeline(timeline::Error),
     /// An effect names a room this client does not know.
     UnknownRoom,
     /// An effect names an event with an ID that is not a Matrix event ID.
@@ -60,6 +63,9 @@ impl Error {
                 | RecoveryError::SecretStorage(SecretStorageError::Sdk(error)),
             ) => sdk_response(error),
             Error::Sync(error) => sync_response(error),
+            Error::Timeline(timeline::Error::EventCacheError(
+                EventCacheError::PaginationError(error),
+            )) => sdk_response(error),
             _ => None,
         };
         Brief {
@@ -74,6 +80,43 @@ pub(crate) fn brief_sync(error: &sync_service::Error) -> Brief<'_> {
     Brief {
         error,
         response: sync_response(error),
+    }
+}
+
+/// An SDK error for the status line and `warn` logs, see `Brief`.
+pub(crate) fn brief_sdk(error: &matrix_sdk::Error) -> Brief<'_> {
+    Brief {
+        error,
+        response: sdk_response(error),
+    }
+}
+
+/// A failed request names its URL, which holds the room ID; the status line
+/// and the `warn` log get the error without it.
+pub(crate) fn without_url(error: matrix_sdk::Error) -> matrix_sdk::Error {
+    match error {
+        matrix_sdk::Error::Http(error) => match *error {
+            HttpError::Reqwest(error) => HttpError::Reqwest(error.without_url()).into(),
+            error => error.into(),
+        },
+        error => error,
+    }
+}
+
+/// A timeline error, with the request URL removed where the SDK error is not
+/// shared (see `without_url`).
+pub(crate) fn timeline_error(error: timeline::Error) -> Error {
+    match error {
+        timeline::Error::Sdk(error) => without_url(error).into(),
+        // The event cache hands one pagination's error to every caller that
+        // waited for it; a shared one keeps its URL.
+        timeline::Error::EventCacheError(EventCacheError::PaginationError(error)) => {
+            match Arc::try_unwrap(error) {
+                Ok(error) => without_url(error).into(),
+                Err(error) => Error::Timeline(EventCacheError::PaginationError(error).into()),
+            }
+        }
+        error => Error::Timeline(error),
     }
 }
 
@@ -121,6 +164,7 @@ impl fmt::Display for Error {
                 f.write_str("the homeserver no longer accepts this session (M_UNKNOWN_TOKEN)")
             }
             Error::Sync(error) => error.fmt(f),
+            Error::Timeline(error) => error.fmt(f),
             Error::UnknownRoom => f.write_str("the room is not known to this client"),
             Error::InvalidEventId => f.write_str("the event ID is not valid"),
         }
@@ -136,6 +180,7 @@ impl std::error::Error for Error {
             Error::Io { error, .. } => error.source(),
             Error::Json { error, .. } => error.source(),
             Error::Sync(error) => error.source(),
+            Error::Timeline(error) => error.source(),
             Error::PasswordLoginUnsupported { .. }
             | Error::UnknownToken
             | Error::UnknownRoom

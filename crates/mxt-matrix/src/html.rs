@@ -21,13 +21,6 @@ const MAX_DEPTH: usize = 100;
 
 /// Renders a `formatted_body` (`org.matrix.custom.html`) into `RichText`.
 /// Malformed HTML is read the way a browser reads it, so its text is kept.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the timeline conversion calls it in the next commit"
-    )
-)]
 pub fn render_html(html: &str) -> RichText {
     let html = Html::parse(html);
     let mut blocks = Blocks::default();

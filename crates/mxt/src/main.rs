@@ -1,5 +1,10 @@
 //! The mxt binary: command line, startup flow and the composition root.
 
+// The future of matrix-sdk-ui's `Room::timeline()` is deeper than the default
+// limit allows when it is compiled into this crate; matrix-sdk and
+// matrix-sdk-ui raise their own limit to the same value.
+#![recursion_limit = "256"]
+
 mod config;
 mod event_loop;
 mod invalidate;
