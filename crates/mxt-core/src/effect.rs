@@ -1,8 +1,11 @@
 //! Effects: what `App::update` asks the adapters to do, as plain data.
 
-use crate::ids::{EventId, RoomId};
+use crate::action::FocusMode;
+use crate::ids::{EventId, RoomId, TxnId};
 use crate::keys::Key;
+use crate::mention::RenderedBody;
 use crate::resolver::TimerId;
+use crate::timeline::ItemRef;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
@@ -10,6 +13,27 @@ pub enum Effect {
     Matrix(MatrixEffect),
     /// Executed by the tui adapter.
     Ui(UiEffect),
+}
+
+/// A message to send from the composer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Outgoing {
+    pub body: RenderedBody,
+    pub kind: OutgoingKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OutgoingKind {
+    New,
+    /// A reply needs the replied-to event's ID, so a local echo cannot be
+    /// replied to until it is sent.
+    Reply {
+        to: EventId,
+    },
+    /// Replaces the content of the user's own `target`.
+    Edit {
+        target: ItemRef,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,6 +50,30 @@ pub enum MatrixEffect {
     SendReceipt {
         room: RoomId,
         event: EventId,
+    },
+    /// Send through the room's timeline; the local echo shows the send
+    /// state, and a failure to queue it arrives as `Msg::EffectFailed`.
+    Send {
+        room: RoomId,
+        message: Outgoing,
+    },
+    /// The room's joined members; answered with `Msg::MembersLoaded`.
+    LoadMembers(RoomId),
+    /// Delete (redact) the user's own item.
+    Redact {
+        room: RoomId,
+        item: ItemRef,
+    },
+    /// Add the user's reaction with `key`, or remove it if they sent it.
+    ToggleReaction {
+        room: RoomId,
+        item: ItemRef,
+        key: String,
+    },
+    /// Send a failed local echo again.
+    Resend {
+        room: RoomId,
+        txn: TxnId,
     },
 }
 
@@ -51,5 +99,28 @@ pub enum UiEffect {
     CloseView,
     /// Copy to the clipboard (OSC 52) and the shared register.
     Yank(String),
+    /// The room's composer gets the keys, in insert mode unless `mode` is `Keep`.
+    FocusComposer {
+        room: RoomId,
+        mode: FocusMode,
+    },
+    /// Read the room's composer text and answer `Msg::Submit`.
+    RequestSubmit(RoomId),
+    /// Insert a line break at the composer's cursor.
+    InsertNewline(RoomId),
+    /// Replace the composer's text (the message being edited).
+    LoadComposer {
+        room: RoomId,
+        text: String,
+    },
+    /// Empty the composer.
+    ClearComposer(RoomId),
+    /// Replace the `@` token at the composer's cursor with `text` and a space.
+    ReplaceMentionToken {
+        room: RoomId,
+        text: String,
+    },
+    /// Edit the composer's text in `$VISUAL` or `$EDITOR`.
+    ExternalEditor(RoomId),
     Quit,
 }

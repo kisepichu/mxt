@@ -98,7 +98,7 @@ impl RichText {
         plain.out
     }
 
-    /// Mention spans, in order (used in phase 3 to rebuild mentions for edits).
+    /// Mention spans, in order (used to rebuild the mentions of an edit).
     pub fn mentions(&self) -> Vec<(&str, &MentionTarget)> {
         let mut mentions = Vec::new();
         collect_mentions(&self.blocks, &mut mentions);

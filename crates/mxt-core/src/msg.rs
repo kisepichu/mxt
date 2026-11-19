@@ -2,6 +2,7 @@
 
 use crate::ids::RoomId;
 use crate::keys::Key;
+use crate::mention::Member;
 use crate::resolver::TimerId;
 use crate::room::RoomSummary;
 use crate::timeline::TimelineDiff;
@@ -70,5 +71,26 @@ pub enum Msg {
     TerminalFocus(bool),
     EffectFailed {
         error: String,
+    },
+    /// The composer's text, answering `UiEffect::RequestSubmit`.
+    Submit {
+        room: RoomId,
+        body: String,
+    },
+    /// The room's composer became empty or non-empty.
+    ComposerEdited {
+        room: RoomId,
+        empty: bool,
+    },
+    /// The `@` token at the composer's cursor in insert mode changed;
+    /// `query` is the text after `@`, `None` without a token.
+    MentionQuery {
+        room: RoomId,
+        query: Option<String>,
+    },
+    /// The room's members, answering `MatrixEffect::LoadMembers`.
+    MembersLoaded {
+        room: RoomId,
+        members: Vec<Member>,
     },
 }

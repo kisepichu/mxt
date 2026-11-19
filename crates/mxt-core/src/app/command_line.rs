@@ -40,10 +40,10 @@ struct Completion {
     shown: usize,
 }
 
-/// An edit of the line text.
-enum Edit {
+/// An edit of a text the core owns: the line text or the picker query.
+pub(super) enum Edit {
     Insert(char),
-    /// `<BS>`: delete the last character, or close an empty line.
+    /// `<BS>`: delete the last character.
     Backspace,
     /// `<C-u>`
     Clear,
@@ -52,7 +52,7 @@ enum Edit {
 }
 
 impl Edit {
-    fn of(key: Key) -> Option<Edit> {
+    pub(super) fn of(key: Key) -> Option<Edit> {
         if let Some(c) = key.text() {
             return Some(Edit::Insert(c));
         }
@@ -73,6 +73,22 @@ impl Edit {
             _ => None,
         }
     }
+
+    /// Applies the edit; `false` when a backspace finds `text` empty.
+    pub(super) fn apply(self, text: &mut String) -> bool {
+        match self {
+            Edit::Insert(c) => text.push(c),
+            Edit::Backspace => return text.pop().is_some(),
+            Edit::Clear => text.clear(),
+            // Trailing whitespace, then the word before it.
+            Edit::DeleteWord => {
+                let word_end = text.trim_end().len();
+                let kept = text[..word_end].trim_end_matches(|c: char| !c.is_whitespace());
+                text.truncate(kept.len());
+            }
+        }
+        true
+    }
 }
 
 impl App {
@@ -91,27 +107,15 @@ impl App {
         });
     }
 
-    /// A key released to the line: edits the text; other keys are ignored.
+    /// A key released to the line: edits the text, and a backspace on an
+    /// empty line closes it; other keys are ignored.
     pub(super) fn type_into_line(&mut self, key: Key) {
         let (Some(open), Some(edit)) = (&mut self.command_line, Edit::of(key)) else {
             return;
         };
-        let text = &mut open.line.text;
-        match edit {
-            Edit::Insert(c) => text.push(c),
-            Edit::Backspace => {
-                if text.pop().is_none() {
-                    self.command_line = None;
-                    return;
-                }
-            }
-            Edit::Clear => text.clear(),
-            // Trailing whitespace, then the word before it.
-            Edit::DeleteWord => {
-                let word_end = text.trim_end().len();
-                let kept = text[..word_end].trim_end_matches(|c: char| !c.is_whitespace());
-                text.truncate(kept.len());
-            }
+        if !edit.apply(&mut open.line.text) {
+            self.command_line = None;
+            return;
         }
         open.completion = None;
     }

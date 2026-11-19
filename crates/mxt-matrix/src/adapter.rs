@@ -153,6 +153,15 @@ async fn run_effects(
                         error: "older messages cannot be loaded yet: mxt keeps no timeline".to_owned(),
                     });
                 }
+                // Sending, reactions, redactions and members arrive in
+                // phase 3 Task 3.
+                Some(
+                    MatrixEffect::Send { .. }
+                    | MatrixEffect::LoadMembers(_)
+                    | MatrixEffect::Redact { .. }
+                    | MatrixEffect::ToggleReaction { .. }
+                    | MatrixEffect::Resend { .. },
+                ) => {}
                 None => break,
             },
             Some(finished) = running.join_next(), if !running.is_empty() => match finished {

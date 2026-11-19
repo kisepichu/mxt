@@ -15,6 +15,16 @@ use nucleo_matcher::{Config, Matcher, Utf32Str};
 /// of an atom. Every atom is fuzzy: fzf operators (`!`, `^`, `'`, `$`) are
 /// plain characters, so a displayed name used as the query finds that name.
 pub fn rank<S: AsRef<str>>(query: &str, candidates: &[S]) -> Vec<usize> {
+    rank_by(query, candidates, |candidate| [candidate.as_ref()])
+}
+
+/// [`rank`] for candidates with several names, such as a display name and a
+/// user ID: a candidate matches when one of its names does, and its best
+/// name counts for its score and length.
+pub fn rank_by<'a, T, N>(query: &str, candidates: &'a [T], names: impl Fn(&'a T) -> N) -> Vec<usize>
+where
+    N: IntoIterator<Item = &'a str>,
+{
     let pattern = Pattern::new(
         query,
         CaseMatching::Smart,
@@ -30,9 +40,14 @@ pub fn rank<S: AsRef<str>>(query: &str, candidates: &[S]) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter_map(|(index, candidate)| {
-            let haystack = Utf32Str::new(candidate.as_ref(), &mut buf);
-            let len = haystack.len();
-            let score = pattern.score(haystack, &mut matcher)?;
+            let (score, len) = names(candidate)
+                .into_iter()
+                .filter_map(|name| {
+                    let haystack = Utf32Str::new(name, &mut buf);
+                    let len = haystack.len();
+                    Some((pattern.score(haystack, &mut matcher)?, len))
+                })
+                .min_by_key(|&(score, len)| (Reverse(score), len))?;
             Some((index, score, len))
         })
         .collect();

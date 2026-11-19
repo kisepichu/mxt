@@ -402,7 +402,7 @@ impl<'a> Render<'a> {
         }
         let mut body = Body::new(self.width, rows);
         match &item.content {
-            MessageContent::Text(text) => body.rich(text),
+            MessageContent::Text { rich, .. } => body.rich(rich),
             MessageContent::Notice(text) => {
                 body.base = DIM;
                 body.rich(text);
@@ -884,12 +884,16 @@ mod tests {
 
     /// A message of a header and `lines` rows of text.
     fn message(id: ItemRef, lines: usize) -> TimelineEntry {
+        let text = vec!["text"; lines].join("\n");
         TimelineEntry::Item(TimelineItem {
             id,
             sender: UserId::new("@alice:example.org"),
             sender_name: "alice".to_owned(),
             timestamp: Timestamp::from_millis(0),
-            content: MessageContent::Text(RichText::plain(&vec!["text"; lines].join("\n"))),
+            content: MessageContent::Text {
+                body: text.clone(),
+                rich: RichText::plain(&text),
+            },
             reply: None,
             reactions: Vec::new(),
             edited: false,

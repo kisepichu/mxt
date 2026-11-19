@@ -1,11 +1,14 @@
 //! The open room's timeline: its diffs, the cursor, back pagination, read
 //! receipts, and the message actions on the item under the cursor.
 
-use super::{App, Motion, StatusKind};
+use super::{App, Confirm, Focus, Motion, StatusKind};
 use crate::effect::{Effect, MatrixEffect, UiEffect, ViewContent};
 use crate::ids::{EventId, RoomId};
 use crate::msg::Pane;
-use crate::timeline::{ItemRef, TimelineDiff, TimelineEntry, TimelineItem, apply_diff};
+use crate::timeline::{
+    ItemRef, MessageContent, OwnEvent, SendState, TimelineDiff, TimelineEntry, TimelineItem,
+    apply_diff,
+};
 
 /// Back pagination starts when the cursor has at most this many older items
 /// (design, "Matrix adapter").
@@ -55,7 +58,7 @@ impl Timeline {
         self.anchor.is_none()
     }
 
-    fn cursor_item(&self) -> Option<&TimelineItem> {
+    pub(super) fn cursor_item(&self) -> Option<&TimelineItem> {
         self.cursor()
             .and_then(|index| as_item(&self.entries[index]))
     }
@@ -280,10 +283,17 @@ impl App {
     }
 
     /// Starts a new timeline when another room or no room is open, and closes
-    /// the message view, which shows an item of the previous one.
+    /// what belongs to the previous one: the message view, the picker, a
+    /// confirmation, and the focus and mention menu of its composer.
     pub(super) fn reset_timeline(&mut self, effects: &mut Vec<Effect>) {
         self.timeline = Timeline::default();
         self.close_view(effects);
+        self.picker = None;
+        self.confirm = None;
+        self.mention_menu = None;
+        if self.focus == Focus::Composer {
+            self.focus = Focus::Timeline;
+        }
     }
 
     /// `message.yank`: the item's plain text.
@@ -309,6 +319,44 @@ impl App {
                 self.set_status(StatusKind::Error, "The replied-to message is not loaded");
             }
             None => self.set_status(StatusKind::Error, "The message is not a reply"),
+        }
+    }
+
+    /// `message.delete`: the user's own item under the cursor, after `y` in
+    /// `CONFIRM` mode, because a redaction cannot be undone. A deleted item
+    /// is refused.
+    pub(super) fn delete_message(&mut self) {
+        let (Some(room), Some(item)) = (&self.open_room, self.timeline.cursor_item()) else {
+            return;
+        };
+        if item.content == MessageContent::Redacted {
+            return self.set_status(StatusKind::Error, "The message is deleted");
+        }
+        let Some(own) = OwnEvent::new(item, &self.me) else {
+            return self.set_status(StatusKind::Error, "You can only delete your own messages");
+        };
+        self.confirm = Some(Confirm::Redact {
+            room: room.clone(),
+            item: own.item().clone(),
+        });
+    }
+
+    /// `message.resend`: the failed local echo under the cursor.
+    pub(super) fn resend_message(&mut self, effects: &mut Vec<Effect>) {
+        let failed = match (&self.open_room, self.timeline.cursor_item()) {
+            (
+                Some(room),
+                Some(TimelineItem {
+                    id: ItemRef::Local(txn),
+                    send_state: Some(SendState::Failed { .. }),
+                    ..
+                }),
+            ) => Some((room.clone(), txn.clone())),
+            _ => None,
+        };
+        match failed {
+            Some((room, txn)) => effects.push(Effect::Matrix(MatrixEffect::Resend { room, txn })),
+            None => self.set_status(StatusKind::Error, "Nothing to resend"),
         }
     }
 }

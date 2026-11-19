@@ -1,14 +1,18 @@
 use super::*;
 use crate::action::{Action, Binding};
 use crate::effect::{Effect, MatrixEffect, UiEffect};
-use crate::ids::{RoomId, Timestamp};
+use crate::ids::{RoomId, Timestamp, UserId};
 use crate::keymap::{Keymap, TableId};
 use crate::keys::KeySeq;
 use crate::msg::{EditorMode, Msg, Pane};
 use crate::room::{NotificationMode, RoomKind, RoomName, RoomSummary, UnreadCounts};
 use crate::settings::Settings;
 
+mod composer;
 mod timeline;
+
+/// The user's own ID.
+const ME: &str = "@me:example.org";
 
 fn space() -> KeySeq {
     KeySeq::parse("<Space>", &KeySeq::default()).unwrap()
@@ -36,7 +40,11 @@ fn room(rid: &str, at: u64, messages: u64) -> RoomSummary {
     }
 }
 fn app_with(user: Vec<(TableId, KeySeq, Binding)>) -> App {
-    let mut app = App::new(Keymap::new(&space(), user), Settings::default());
+    let mut app = App::new(
+        Keymap::new(&space(), user),
+        Settings::default(),
+        UserId::new(ME),
+    );
     // Order (newest first): !c, !b, !a. !b is read.
     for r in [
         room("!a:example.org", 10, 1),
@@ -283,7 +291,7 @@ fn removing_the_open_room_unsubscribes_and_keeps_a_cursor() {
 fn an_empty_room_list_ignores_cursor_and_room_keys() {
     let mark = Binding::single(Action::RoomMarkRead);
     let keymap = Keymap::new(&space(), vec![(TableId::RoomList, seq("m"), mark)]);
-    let mut app = App::new(keymap, Settings::default());
+    let mut app = App::new(keymap, Settings::default(), UserId::new(ME));
     assert_eq!(keys(&mut app, "jkG<C-d><C-u><CR>"), vec![]);
     assert_eq!(app.room_cursor(), None);
     assert_eq!(app.open_room(), None);
@@ -346,16 +354,13 @@ fn timeout_drops_a_pending_prefix_in_the_room_list() {
 #[test]
 fn a_key_that_ends_a_binding_which_changes_the_context_goes_to_the_new_context() {
     // `g` is also a prefix of `gg`, so `j` ends it and `g` runs first.
-    let open = Binding::new(vec![Action::MessageReply, Action::CommandLineOpen]).unwrap();
+    let open = Binding::new(vec![Action::RoomMute, Action::CommandLineOpen]).unwrap();
     let mut app = app_with(vec![(TableId::RoomList, seq("g"), open)]);
     keys(&mut app, "gj");
     assert_eq!(line(&app), Some((LineKind::Command, "j")));
     assert_eq!(cursor_id(&app), "!c:example.org");
     // The status the binding set survives the key that ended it.
-    assert_eq!(
-        app.status().unwrap().text,
-        "message.reply is not available yet"
-    );
+    assert_eq!(app.status().unwrap().text, "room.mute is not available yet");
 }
 
 #[test]
@@ -376,8 +381,7 @@ fn a_count_or_prefix_after_a_binding_which_changes_the_context_goes_to_the_new_c
 #[test]
 fn editor_contexts_release_keys_to_the_editor() {
     let mut app = app();
-    keys(&mut app, "<CR>");
-    app.focus_composer_for_test();
+    keys(&mut app, "<CR>i");
     // Insert mode: unbound keys go to edtui; releases from one key are merged.
     let fx = no_timers(keys_in(&mut app, "<C-x>a", Some(EditorMode::Insert)));
     assert_eq!(

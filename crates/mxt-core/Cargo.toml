@@ -9,7 +9,10 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+emojis.workspace = true
 nucleo-matcher.workspace = true
+pulldown-cmark.workspace = true
+unicode-segmentation.workspace = true
 
 [lints]
 workspace = true

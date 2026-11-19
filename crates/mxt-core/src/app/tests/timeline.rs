@@ -6,22 +6,25 @@ use crate::timeline::{
     ItemRef, MessageContent, ReplyPreview, TimelineDiff, TimelineEntry, TimelineItem,
 };
 
-fn event(n: u32) -> EventId {
+pub(super) fn event(n: u32) -> EventId {
     EventId::new(format!("${n}:example.org"))
 }
-fn remote(n: u32) -> ItemRef {
+pub(super) fn remote(n: u32) -> ItemRef {
     ItemRef::Remote(event(n))
 }
-fn local(txn: &str) -> ItemRef {
+pub(super) fn local(txn: &str) -> ItemRef {
     ItemRef::Local(TxnId::new(txn))
 }
-fn item(id: ItemRef, body: &str) -> TimelineEntry {
+pub(super) fn item(id: ItemRef, body: &str) -> TimelineEntry {
     TimelineEntry::Item(TimelineItem {
         id,
         sender: UserId::new("@alice:example.org"),
         sender_name: "Alice".into(),
         timestamp: Timestamp::from_millis(0),
-        content: MessageContent::Text(RichText::plain(body)),
+        content: MessageContent::Text {
+            body: body.into(),
+            rich: RichText::plain(body),
+        },
         reply: None,
         reactions: Vec::new(),
         edited: false,
@@ -29,7 +32,7 @@ fn item(id: ItemRef, body: &str) -> TimelineEntry {
     })
 }
 /// A remote message with the body `message <n>`.
-fn msg(n: u32) -> TimelineEntry {
+pub(super) fn msg(n: u32) -> TimelineEntry {
     item(remote(n), &format!("message {n}"))
 }
 fn msgs(ns: std::ops::Range<u32>) -> Vec<TimelineEntry> {
@@ -39,7 +42,7 @@ fn divider() -> TimelineEntry {
     TimelineEntry::DateDivider(Timestamp::from_millis(0))
 }
 /// The app with `!c` open and the timeline focused.
-fn opened() -> App {
+pub(super) fn opened() -> App {
     let mut app = app();
     keys(&mut app, "<CR>");
     app
@@ -50,7 +53,7 @@ fn diffs(app: &mut App, diffs: Vec<TimelineDiff>) -> Vec<Effect> {
         diffs,
     })
 }
-fn reset(app: &mut App, entries: Vec<TimelineEntry>) -> Vec<Effect> {
+pub(super) fn reset(app: &mut App, entries: Vec<TimelineEntry>) -> Vec<Effect> {
     diffs(app, vec![TimelineDiff::Reset(entries)])
 }
 fn viewport(app: &mut App, first: usize, last: usize) -> Vec<Effect> {
@@ -81,7 +84,7 @@ fn receipt(room: &str, n: u32) -> Effect {
         event: event(n),
     })
 }
-fn status(app: &App) -> Option<&str> {
+pub(super) fn status(app: &App) -> Option<&str> {
     app.status().map(|status| status.text.as_str())
 }
 
@@ -429,18 +432,21 @@ fn yy_yields_the_plain_text() {
     };
     let mut entry = msg(1);
     if let TimelineEntry::Item(item) = &mut entry {
-        item.content = MessageContent::Text(RichText {
-            blocks: vec![Block::Paragraph(vec![
-                Inline::Text {
-                    text: "hello ".into(),
-                    style: Style::default(),
-                },
-                Inline::Text {
-                    text: "world".into(),
-                    style: bold,
-                },
-            ])],
-        });
+        item.content = MessageContent::Text {
+            body: "hello **world**".into(),
+            rich: RichText {
+                blocks: vec![Block::Paragraph(vec![
+                    Inline::Text {
+                        text: "hello ".into(),
+                        style: Style::default(),
+                    },
+                    Inline::Text {
+                        text: "world".into(),
+                        style: bold,
+                    },
+                ])],
+            },
+        };
     }
     reset(&mut app, vec![entry]);
     assert_eq!(

@@ -67,7 +67,7 @@ pub async fn run(config: Config, paths: &Paths) -> Outcome {
     } = config;
     match connect(&user_id, homeserver.as_deref(), paths).await {
         Ok((client, sync, mut session)) => {
-            run_ui(client, sync, &mut session, keymap, settings).await
+            run_ui(client, sync, &mut session, keymap, settings, user_id).await
         }
         Err(outcome) => outcome,
     }
@@ -239,9 +239,10 @@ async fn run_ui(
     session: &mut SessionWatch,
     keymap: Keymap,
     settings: Settings,
+    me: UserId,
 ) -> Outcome {
     let receipts = settings.read_receipts;
-    let mut app = App::new(keymap, settings);
+    let mut app = App::new(keymap, settings, me);
     let (to_core, from_matrix) = mpsc::unbounded_channel();
     let (to_matrix, effects) = mpsc::unbounded_channel();
     // Before the UI, so its failure is printed like the others.
