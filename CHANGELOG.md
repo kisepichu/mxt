@@ -19,9 +19,12 @@ marked **Breaking:**.
 - With `ui.image_preview = "auto"`, mxt asks the terminal for its name, or
   inside tmux asks tmux for the outer terminal's name, and draws images in
   iTerm2 graphics in WezTerm and iTerm2, and in kitty graphics in kitty and
-  Ghostty; other terminals keep ratatui-image's detection. WezTerm over SSH
-  showed boxes instead of images. Inside WSL without SSH, images are half
-  blocks.
+  Ghostty; other terminals keep ratatui-image's detection. Inside WSL
+  without SSH, images are half blocks.
+
+### Fixed
+
+- Images in WezTerm over SSH appear instead of boxes.
 
 ## [0.1.0] - 2026-11-19
 

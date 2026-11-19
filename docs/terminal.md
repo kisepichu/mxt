@@ -127,7 +127,11 @@ When the choice is wrong for your terminal, `ui.image_preview = "iterm2"`,
 `"sixel"`, `"kitty"` or `"halfblocks"` uses that protocol, also in WSL.
 mxt then skips the name, and ratatui-image's query still runs for the cell
 size; when it gets none, ratatui-image assumes 10 by 20 pixels, and images
-in a graphics protocol may be drawn larger or smaller than their area.
+in a graphics protocol may be drawn larger or smaller than their area. In
+WSL, any of these values, `"halfblocks"` too, brings back the query that
+`"auto"` skips there: when ConPTY does not pass the answers on, mxt starts
+2 seconds later, and ratatui-image's reader stays waiting on the terminal,
+where it may take your first key press.
 
 - mxt fetches the event's thumbnail when it has one, and the full file
   otherwise (encrypted rooms usually have no thumbnail). Files larger than

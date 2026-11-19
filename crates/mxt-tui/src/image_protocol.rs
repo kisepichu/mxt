@@ -9,8 +9,10 @@
 
 use std::env;
 use std::ffi::OsString;
-use std::io::{self, Stdin, Write as _};
+use std::io::{self, Write};
+use std::os::fd::{AsFd as _, BorrowedFd};
 use std::process::{Command, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use mxt_core::settings::ImageProtocol;
@@ -28,6 +30,9 @@ const QUERY: &[u8] = b"\x1b[>q\x1b[c";
 /// query, which runs next and reads up to its own last answer, so it never
 /// reaches the key reader.
 const WAIT: Duration = Duration::from_secs(1);
+/// How long [`read_name`] waits before it reads a terminal in non-blocking
+/// mode again.
+const RETRY: Duration = Duration::from_millis(10);
 /// The longest DCS string read; tmux keeps 127 bytes of the XTVERSION text.
 const MAX_DCS: usize = 256;
 
@@ -85,30 +90,31 @@ impl Env {
 
 /// The choice for `forced`, the protocol `ui.image_preview` names (`None`
 /// for `auto`), in `env`. With `auto`, `name` gets the terminal's name from
-/// the source unless the environment decides alone.
+/// the source, `None` when it has none, unless the environment decides
+/// alone.
 pub(crate) fn choose(
     forced: Option<ImageProtocol>,
     env: &Env,
-    name: impl FnOnce(NameSource) -> io::Result<Option<String>>,
-) -> io::Result<Choice> {
+    name: impl FnOnce(NameSource) -> Option<String>,
+) -> Choice {
     if let Some(protocol) = forced {
-        return Ok(Choice::Forced(protocol_type(protocol)));
+        return Choice::Forced(protocol_type(protocol));
     }
     // ConPTY stands between WSL and the Windows terminal, unless mxt runs
     // over SSH. Half blocks need no cell size, and ConPTY does not reliably
     // pass the answers to a query on.
     if env.wsl && !env.ssh {
-        return Ok(Choice::Halfblocks);
+        return Choice::Halfblocks;
     }
     let source = if env.tmux {
         NameSource::Tmux
     } else {
         NameSource::Terminal
     };
-    Ok(name(source)?
+    name(source)
         .as_deref()
         .and_then(protocol_for)
-        .map_or(Choice::Detected, Choice::ForTerminal))
+        .map_or(Choice::Detected, Choice::ForTerminal)
 }
 
 fn protocol_type(protocol: ImageProtocol) -> ProtocolType {
@@ -143,22 +149,30 @@ fn protocol_for(name: &str) -> Option<ProtocolType> {
 /// answers up to the end of the DA1 reply and no further: whatever follows
 /// stays in the terminal's input for the next reader. The terminal must be
 /// in raw mode, and nothing else may read its input. `None` when no
-/// XTVERSION reply came before the DA1 reply, or within [`WAIT`].
-pub(crate) fn query_terminal() -> io::Result<Option<String>> {
-    let stdin = io::stdin();
-    let raw = termios::tcgetattr(&stdin)?;
-    let mut stdout = io::stdout();
-    stdout.write_all(QUERY)?;
-    stdout.flush()?;
-    let mut tty = Tty {
-        stdin: &stdin,
+/// XTVERSION reply came before the DA1 reply or within [`WAIT`], and when
+/// the terminal cannot be asked or read: the name only refines the choice,
+/// so it never keeps mxt from starting.
+pub(crate) fn query_terminal() -> Option<String> {
+    ask_name(io::stdin().as_fd(), &mut io::stdout(), WAIT)
+}
+
+/// [`query_terminal`] with `tty`, the terminal's input, `out`, its output,
+/// and `wait` in place of [`WAIT`].
+fn ask_name(tty: BorrowedFd<'_>, out: &mut impl Write, wait: Duration) -> Option<String> {
+    // Not a terminal (`mxt </dev/null`, where crossterm uses `/dev/tty`):
+    // ask nothing, so that no answer arrives in the shell after mxt.
+    let raw = termios::tcgetattr(tty).ok()?;
+    out.write_all(QUERY).and_then(|()| out.flush()).ok()?;
+    let mut input = Tty {
+        fd: tty,
         termios: raw.clone(),
         tenths: None,
-        deadline: Instant::now() + WAIT,
+        deadline: Instant::now() + wait,
     };
-    let name = read_name(&mut tty);
-    // ratatui-image's query, next, waits in a blocking read.
-    termios::tcsetattr(&stdin, OptionalActions::Now, &raw)?;
+    let name = read_name(&mut input);
+    // ratatui-image's query, next, waits in a blocking read. If even this
+    // fails, mxt still starts, as after any other failure here.
+    let _ = termios::tcsetattr(tty, OptionalActions::Now, &raw);
     name
 }
 
@@ -180,28 +194,41 @@ pub(crate) fn tmux_client_termtype() -> Option<String> {
 /// The terminal's input, one byte at a time, until a deadline.
 trait Input {
     /// The next byte, or `None` once the deadline has passed without one.
-    fn next_byte(&mut self) -> io::Result<Option<u8>>;
+    fn next_byte(&mut self) -> rustix::io::Result<Option<u8>>;
 }
 
 /// The XTVERSION text from `input`, read up to the end of the DA1 reply, or
-/// as far as it came by the deadline.
-fn read_name(input: &mut impl Input) -> io::Result<Option<String>> {
+/// as far as it came by the deadline. `None` also when a read fails.
+fn read_name(input: &mut impl Input) -> Option<String> {
     let mut replies = Replies::default();
-    while let Some(byte) = input.next_byte()? {
-        if replies.push(byte) {
-            break;
+    loop {
+        match input.next_byte() {
+            Ok(Some(byte)) => {
+                if replies.push(byte) {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            // A signal came.
+            Err(Errno::INTR) => {}
+            // The terminal is in non-blocking mode (`O_NONBLOCK`, which a
+            // program before mxt can leave on), where a read returns at
+            // once instead of after `VTIME`. Read on until the deadline, so
+            // that this reader still takes the answers up to the DA1 reply.
+            Err(Errno::AGAIN) => thread::sleep(RETRY),
+            Err(_) => return None,
         }
     }
-    Ok(replies.name)
+    replies.name
 }
 
-/// Stdin in raw mode, read with `VMIN` 0 and `VTIME` up to the deadline: a
-/// read returns after `VTIME` without input, so no thread is left waiting
-/// in a blocking read. This works on every terminal device, while macOS's
-/// `poll` does not support devices. One byte per read leaves the bytes after
-/// the DA1 reply unread, and bypasses std's buffer of stdin.
+/// The terminal's input in raw mode, read with `VMIN` 0 and `VTIME` up to
+/// the deadline: a read returns after `VTIME` without input, so no thread is
+/// left waiting in a blocking read. This works on every terminal device,
+/// while macOS's `poll` does not support devices. One byte per read leaves
+/// the bytes after the DA1 reply unread, and bypasses std's buffer of stdin.
 struct Tty<'a> {
-    stdin: &'a Stdin,
+    fd: BorrowedFd<'a>,
     /// The raw mode's settings, with `VMIN` and `VTIME` changed once read.
     termios: Termios,
     /// The `VTIME` set last, in tenths of a second.
@@ -210,7 +237,7 @@ struct Tty<'a> {
 }
 
 impl Input for Tty<'_> {
-    fn next_byte(&mut self) -> io::Result<Option<u8>> {
+    fn next_byte(&mut self) -> rustix::io::Result<Option<u8>> {
         loop {
             let left = self.deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -222,16 +249,14 @@ impl Input for Tty<'_> {
             if self.tenths != Some(tenths) {
                 self.termios.special_codes[SpecialCodeIndex::VMIN] = 0;
                 self.termios.special_codes[SpecialCodeIndex::VTIME] = tenths;
-                termios::tcsetattr(self.stdin, OptionalActions::Now, &self.termios)?;
+                termios::tcsetattr(self.fd, OptionalActions::Now, &self.termios)?;
                 self.tenths = Some(tenths);
             }
             let mut byte = [0];
-            match rustix::io::read(self.stdin, &mut byte) {
-                Ok(1) => return Ok(Some(byte[0])),
-                // `VTIME` passed, or a signal came: try again until the
-                // deadline.
-                Ok(_) | Err(Errno::INTR) => {}
-                Err(error) => return Err(error.into()),
+            // Nothing once `VTIME` passed without input: wait on until the
+            // deadline.
+            if rustix::io::read(self.fd, &mut byte)? == 1 {
+                return Ok(Some(byte[0]));
             }
         }
     }
@@ -328,6 +353,10 @@ impl Replies {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::fs::File;
+
+    use rustix::fs::{Mode, OFlags};
+    use rustix::pty::OpenptFlags;
 
     use super::*;
 
@@ -349,23 +378,29 @@ mod tests {
     /// XTVERSION (microsoft/terminal#18382, closed as not planned).
     const WINDOWS_TERMINAL: &[u8] = b"\x1b[?61;4;6;7;14;21;22;23;24;28;32;42;52c";
 
-    /// Input that has `bytes` and then nothing until the deadline.
-    struct Script(VecDeque<u8>);
+    /// Input that has `items`, bytes or errors, and then nothing until the
+    /// deadline.
+    struct Script(VecDeque<rustix::io::Result<u8>>);
 
     impl Script {
         fn new(bytes: &[u8]) -> Script {
-            Script(bytes.iter().copied().collect())
+            Script(bytes.iter().copied().map(Ok).collect())
+        }
+
+        /// The bytes not read; no error may be left.
+        fn unread(&self) -> Vec<u8> {
+            self.0.iter().map(|item| item.unwrap()).collect()
         }
     }
 
     impl Input for Script {
-        fn next_byte(&mut self) -> io::Result<Option<u8>> {
-            Ok(self.0.pop_front())
+        fn next_byte(&mut self) -> rustix::io::Result<Option<u8>> {
+            self.0.pop_front().transpose()
         }
     }
 
     fn name_in(bytes: &[u8]) -> Option<String> {
-        read_name(&mut Script::new(bytes)).unwrap()
+        read_name(&mut Script::new(bytes))
     }
 
     #[test]
@@ -384,8 +419,8 @@ mod tests {
     #[test]
     fn the_da1_reply_alone_ends_the_answers_without_a_name() {
         let mut input = Script::new(&[WINDOWS_TERMINAL, b"j".as_slice()].concat());
-        assert_eq!(read_name(&mut input).unwrap(), None);
-        assert_eq!(input.0, b"j");
+        assert_eq!(read_name(&mut input), None);
+        assert_eq!(input.unread(), b"j");
     }
 
     #[test]
@@ -394,10 +429,49 @@ mod tests {
         let after: &[u8] = b"jk\x1b[A\x1b[0n";
         let mut input = Script::new(&[WEZTERM, after].concat());
         assert_eq!(
-            read_name(&mut input).unwrap().as_deref(),
+            read_name(&mut input).as_deref(),
             Some("WezTerm 20240203-110809-5046fc22")
         );
-        assert_eq!(input.0, after);
+        assert_eq!(input.unread(), after);
+    }
+
+    #[test]
+    fn reading_goes_on_after_a_signal_and_in_non_blocking_mode() {
+        // A read of a terminal in non-blocking mode fails with `EAGAIN`
+        // until input comes, here also between pieces of the answers.
+        let (first, rest) = WEZTERM.split_at(10);
+        let mut items = VecDeque::from([Err(Errno::AGAIN), Err(Errno::INTR), Err(Errno::AGAIN)]);
+        items.extend(first.iter().copied().map(Ok));
+        items.push_back(Err(Errno::AGAIN));
+        items.extend(rest.iter().copied().map(Ok));
+        items.push_back(Ok(b'j'));
+        let mut input = Script(items);
+        assert_eq!(
+            read_name(&mut input).as_deref(),
+            Some("WezTerm 20240203-110809-5046fc22")
+        );
+        assert_eq!(input.unread(), b"j");
+    }
+
+    #[test]
+    fn a_failed_read_ends_the_answers_without_a_name() {
+        // The read after the XTVERSION reply fails.
+        let da1 = KITTY.iter().rposition(|&byte| byte == 0x1b).unwrap();
+        let mut input = Script::new(KITTY);
+        input.0.insert(da1, Err(Errno::IO));
+        assert_eq!(read_name(&mut input), None);
+        assert_eq!(input.unread(), &KITTY[da1..]);
+    }
+
+    #[test]
+    fn input_that_is_no_terminal_is_not_asked() {
+        let null = File::open("/dev/null").unwrap();
+        let mut out = Vec::new();
+        assert_eq!(
+            ask_name(null.as_fd(), &mut out, Duration::from_secs(5)),
+            None
+        );
+        assert!(out.is_empty());
     }
 
     #[test]
@@ -472,11 +546,12 @@ mod tests {
             ("iTerm2 3.7.7", Some(ProtocolType::Iterm2)),
             ("ghostty 1.4.1-main+2fc8d02c2", Some(ProtocolType::Kitty)),
             ("kitty(0.50.0)", Some(ProtocolType::Kitty)),
-            // Others, also from ucs-detect: ratatui-image decides.
+            // Others, from ucs-detect's `xterm.yaml`, `foot.yaml` and
+            // `gnometerminal.yaml` (VTE): ratatui-image decides.
             ("tmux 3.4", None),
-            ("XTerm(388)", None),
-            ("foot(1.16.2)", None),
-            ("VTE(7600)", None),
+            ("XTerm(411)", None),
+            ("foot(1.28.0)", None),
+            ("VTE(8400)", None),
             ("WezTermX 1", None),
             ("", None),
         ] {
@@ -498,9 +573,8 @@ mod tests {
         let mut asked = None;
         let choice = choose(None, env, |source| {
             asked = Some(source);
-            Ok(name.map(str::to_owned))
-        })
-        .unwrap();
+            name.map(str::to_owned)
+        });
         (choice, asked)
     }
 
@@ -592,9 +666,130 @@ mod tests {
             (ImageProtocol::Halfblocks, ProtocolType::Halfblocks),
         ] {
             for env in [&wsl, &elsewhere] {
-                let choice = choose(Some(forced), env, |_| panic!("asked for the name")).unwrap();
+                let choice = choose(Some(forced), env, |_| panic!("asked for the name"));
                 assert_eq!(choice, Choice::Forced(protocol));
             }
         }
+    }
+
+    /// A pseudo-terminal: its master end, and its slave end in raw mode as
+    /// crossterm sets it up (`VMIN` 1, `VTIME` 0). `None`, with a message,
+    /// where no pseudo-terminal can be opened.
+    fn open_pty() -> Option<(File, File)> {
+        let opened = (|| -> rustix::io::Result<(File, File)> {
+            let master = rustix::pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)?;
+            rustix::pty::grantpt(&master)?;
+            rustix::pty::unlockpt(&master)?;
+            let name = rustix::pty::ptsname(&master, Vec::new())?;
+            let slave = rustix::fs::open(
+                name.as_c_str(),
+                OFlags::RDWR | OFlags::NOCTTY,
+                Mode::empty(),
+            )?;
+            Ok((File::from(master), File::from(slave)))
+        })();
+        let (master, slave) = match opened {
+            Ok(pty) => pty,
+            Err(error) => {
+                eprintln!("skipped: no pseudo-terminal can be opened here: {error}");
+                return None;
+            }
+        };
+        let mut raw = termios::tcgetattr(&slave).unwrap();
+        raw.make_raw();
+        raw.special_codes[SpecialCodeIndex::VMIN] = 1;
+        raw.special_codes[SpecialCodeIndex::VTIME] = 0;
+        termios::tcsetattr(&slave, OptionalActions::Now, &raw).unwrap();
+        Some((master, slave))
+    }
+
+    /// All of `tty`'s settings: `Termios` has no `PartialEq`, and its `Debug`
+    /// shows every field.
+    fn settings(tty: &File) -> String {
+        format!("{:?}", termios::tcgetattr(tty).unwrap())
+    }
+
+    /// Up to `len` bytes that `tty` has to read, waiting up to a second for
+    /// each read.
+    fn read_up_to(tty: &File, len: usize) -> Vec<u8> {
+        let mut timed = termios::tcgetattr(tty).unwrap();
+        timed.special_codes[SpecialCodeIndex::VMIN] = 0;
+        timed.special_codes[SpecialCodeIndex::VTIME] = 10;
+        termios::tcsetattr(tty, OptionalActions::Now, &timed).unwrap();
+        let mut bytes = vec![0; len];
+        let mut filled = 0;
+        while filled < len {
+            match rustix::io::read(tty, &mut bytes[filled..]).unwrap() {
+                0 => break,
+                read => filled += read,
+            }
+        }
+        bytes.truncate(filled);
+        bytes
+    }
+
+    #[test]
+    fn on_a_terminal_reading_stops_after_the_da1_reply() {
+        let Some((master, slave)) = open_pty() else {
+            return;
+        };
+        let before = settings(&slave);
+        let after: &[u8] = b"jk\x1b[0n";
+        let mut out = Vec::new();
+        let name = thread::scope(|scope| {
+            // The answers come in two pieces while the reader waits, and
+            // keys and another answer follow them at once.
+            scope.spawn(|| {
+                let (first, rest) = WEZTERM.split_at(10);
+                thread::sleep(Duration::from_millis(50));
+                (&master).write_all(first).unwrap();
+                thread::sleep(Duration::from_millis(50));
+                (&master).write_all(&[rest, after].concat()).unwrap();
+            });
+            ask_name(slave.as_fd(), &mut out, Duration::from_secs(5))
+        });
+        assert_eq!(out, QUERY);
+        assert_eq!(name.as_deref(), Some("WezTerm 20240203-110809-5046fc22"));
+        // `VMIN` and `VTIME` too.
+        assert_eq!(settings(&slave), before);
+        assert_eq!(read_up_to(&slave, after.len()), after);
+    }
+
+    #[test]
+    fn on_a_terminal_that_does_not_answer_reading_ends_at_the_deadline() {
+        let Some((_master, slave)) = open_pty() else {
+            return;
+        };
+        let before = settings(&slave);
+        let wait = Duration::from_millis(200);
+        let started = Instant::now();
+        assert_eq!(ask_name(slave.as_fd(), &mut io::sink(), wait), None);
+        let took = started.elapsed();
+        assert!(
+            took >= wait && took < wait + Duration::from_secs(2),
+            "took {took:?}"
+        );
+        assert_eq!(settings(&slave), before);
+    }
+
+    #[test]
+    fn on_a_terminal_in_non_blocking_mode_the_answers_are_still_read() {
+        let Some((master, slave)) = open_pty() else {
+            return;
+        };
+        // Reads fail with `EAGAIN` until the answers come.
+        rustix::io::ioctl_fionbio(&slave, true).unwrap();
+        let name = thread::scope(|scope| {
+            scope.spawn(|| {
+                thread::sleep(Duration::from_millis(50));
+                (&master)
+                    .write_all(&[KITTY, b"j".as_slice()].concat())
+                    .unwrap();
+            });
+            ask_name(slave.as_fd(), &mut io::sink(), Duration::from_secs(5))
+        });
+        assert_eq!(name.as_deref(), Some("kitty(0.50.0)"));
+        rustix::io::ioctl_fionbio(&slave, false).unwrap();
+        assert_eq!(read_up_to(&slave, 1), b"j");
     }
 }

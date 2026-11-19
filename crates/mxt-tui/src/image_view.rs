@@ -55,8 +55,8 @@ impl Images {
     pub(crate) fn query(forced: Option<ImageProtocol>) -> io::Result<Images> {
         let choice = image_protocol::choose(forced, &Env::read(), |source| match source {
             NameSource::Terminal => image_protocol::query_terminal(),
-            NameSource::Tmux => Ok(image_protocol::tmux_client_termtype()),
-        })?;
+            NameSource::Tmux => image_protocol::tmux_client_termtype(),
+        });
         let picker = match choice {
             Choice::Halfblocks => Picker::halfblocks(),
             Choice::Detected => detect()?,
@@ -189,18 +189,29 @@ fn detect() -> io::Result<Picker> {
 
 /// Whether `picker`'s cell size was measured: answered by the terminal, or
 /// taken from the window's size in pixels, as ratatui-image does when the
-/// terminal does not answer. Otherwise it is ratatui-image's guess, and
-/// ratatui-image itself then uses only half blocks: the other protocols
-/// draw the image in pixels, which must fill the cells it is laid out in.
+/// terminal does not answer. Otherwise it is a guess, ratatui-image's or
+/// that of the half blocks [`detect`] falls back to, and ratatui-image
+/// itself then uses only half blocks: the other protocols draw the image in
+/// pixels, which must fill the cells it is laid out in.
 fn cell_size_measured(picker: &Picker) -> bool {
-    let answered = picker
-        .capabilities()
-        .iter()
-        .any(|capability| matches!(capability, Capability::CellSize(Some(_))));
-    answered
-        || termios::tcgetwinsize(io::stdout()).is_ok_and(|size| {
+    let window = termios::tcgetwinsize(io::stdout())
+        .ok()
+        .filter(|size| {
             size.ws_xpixel > 0 && size.ws_ypixel > 0 && size.ws_col > 0 && size.ws_row > 0
         })
+        .map(|size| (size.ws_xpixel / size.ws_col, size.ws_ypixel / size.ws_row));
+    let font = picker.font_size();
+    measured(picker.capabilities(), (font.width, font.height), window)
+}
+
+/// Whether the cell size `font` (width, height) was measured, given the
+/// `capabilities` ratatui-image's query found and `window`, the cell size
+/// from the window's size in pixels, computed as ratatui-image does.
+fn measured(capabilities: &[Capability], font: (u16, u16), window: Option<(u16, u16)>) -> bool {
+    capabilities
+        .iter()
+        .any(|capability| matches!(capability, Capability::CellSize(Some(_))))
+        || window == Some(font)
 }
 
 /// A workaround for ratatui-image's query thread, which reads stdin without
@@ -287,6 +298,20 @@ mod tests {
         recent.insert(1, "A");
         assert_eq!(keys(&recent), [2, 1]);
         assert_eq!(recent.get_mut(&1), Some(&mut "A"));
+    }
+
+    #[test]
+    fn only_a_measured_cell_size_counts() {
+        let window = Some((8, 16));
+        // The half blocks `detect` falls back to after a failed query guess
+        // 10 by 20, whatever the window says.
+        assert!(!measured(&[], (10, 20), window));
+        // ratatui-image's own fallback takes the window's cell size.
+        assert!(measured(&[], (8, 16), window));
+        assert!(!measured(&[], (10, 20), None));
+        let answered = [Capability::CellSize(Some((9, 18)))];
+        assert!(measured(&answered, (9, 18), None));
+        assert!(!measured(&[Capability::CellSize(None)], (10, 20), None));
     }
 
     /// Appends a PNG chunk: its length, type, data and CRC-32.

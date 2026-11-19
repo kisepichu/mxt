@@ -867,7 +867,9 @@ list, so mxt does not offer an event-level mention list.
     size.
   - `"iterm2"`, `"sixel"`, `"kitty"` and `"halfblocks"` force that
     protocol, also in WSL: no name, and ratatui-image's query still runs
-    for the cell size.
+    for the cell size. In WSL that brings back what `auto` avoids there:
+    when ConPTY drops the answers, the query waits for its 2 s timeout, and
+    its thread stays blocked on stdin and takes the first key.
   - `"off"` shows only the file name and size in the view, and mxt then
     never queries the terminal for its graphics protocol.
   - Under tmux with several clients attached, the cell size comes from

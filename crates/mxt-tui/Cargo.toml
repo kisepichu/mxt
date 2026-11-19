@@ -21,5 +21,9 @@ ratatui-image.workspace = true
 rustix.workspace = true
 unicode-segmentation.workspace = true
 
+[dev-dependencies]
+# The query tests open a pseudo-terminal.
+rustix = { workspace = true, features = ["pty"] }
+
 [lints]
 workspace = true
