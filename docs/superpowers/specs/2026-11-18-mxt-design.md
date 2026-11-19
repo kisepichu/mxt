@@ -1083,6 +1083,12 @@ asking for the recovery key ("Startup").
   verified.
 - **SDK API churn.** matrix-rust-sdk is pre-1.0, and upgrades can break its
   API. The adapter boundary keeps that work inside `mxt-matrix`.
+- **Deeply nested HTML.** mxt polls every future, the SDK's included, on
+  runtime threads with 16 MiB stacks, because ruma-html drops its HTML tree
+  recursively and the SDK's sanitizer drops the tree of every message body,
+  so one event of about 21,800 nested tags would overflow tokio's default
+  2 MiB stack and abort the process; an iterative `Drop` in ruma-html would
+  make this unnecessary.
 
 ## Third-party licenses
 
