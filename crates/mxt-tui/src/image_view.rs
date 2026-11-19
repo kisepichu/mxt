@@ -7,7 +7,8 @@ use std::io::{self, Cursor, Write as _};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use image::{DynamicImage, ImageReader, ImageResult, Limits};
+use image::metadata::Orientation;
+use image::{DynamicImage, ImageDecoder as _, ImageFormat, ImageReader, ImageResult, Limits};
 use mxt_core::timeline::ItemRef;
 use ratatui::Frame;
 use ratatui::layout::{Rect, Size};
@@ -69,15 +70,10 @@ impl Images {
         if self.kept.get_mut(&item).is_some() {
             return Ok(());
         }
-        let image = decode(bytes)?;
         let font = self.picker.font_size();
         let width = u32::from(screen.width) * u32::from(font.width);
         let height = u32::from(screen.height) * u32::from(font.height);
-        let image = if image.width() > width || image.height() > height {
-            image.thumbnail(width, height)
-        } else {
-            image
-        };
+        let image = decode(bytes, width, height)?;
         let kept = Kept {
             image: self.picker.new_resize_protocol(image),
             failed: false,
@@ -110,13 +106,53 @@ impl Images {
 }
 
 /// `bytes` in the format they start with, decoded within
-/// [`MAX_DECODE_ALLOC`].
-fn decode(bytes: &[u8]) -> ImageResult<DynamicImage> {
+/// [`MAX_DECODE_ALLOC`], scaled down to fit `width` x `height` pixels as
+/// shown, and then turned by their Exif orientation (phone cameras store
+/// portrait photos as landscape ones with orientation 6 or 8), so that a
+/// turn by 90 degrees copies the small image. Only JPEG and PNG are turned;
+/// other formats, and an orientation that cannot be read, stay as stored.
+fn decode(bytes: &[u8], width: u32, height: u32) -> ImageResult<DynamicImage> {
     let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    let format = reader.format();
     let mut limits = Limits::default();
     limits.max_alloc = Some(MAX_DECODE_ALLOC);
-    reader.limits(limits);
-    reader.decode()
+    reader.limits(limits.clone());
+    let mut decoder = reader.into_decoder()?;
+    // What `ImageReader::decode` does, which gives no access to the
+    // decoder: the image's own buffer counts against the limit too.
+    limits.reserve(decoder.total_bytes())?;
+    decoder.set_limits(limits)?;
+    // Only where reading the Exif data allocates no more than the file
+    // holds: a JPEG's APP1 segment is at most 64 KiB, and png read `eXIf`
+    // within its limits already. image-webp allocates the size an `EXIF`
+    // chunk claims, outside the limit, so a 66-byte WebP could make mxt
+    // abort wherever a 4 GiB allocation is refused.
+    let orientation = if matches!(format, Some(ImageFormat::Jpeg | ImageFormat::Png)) {
+        decoder.orientation().unwrap_or(Orientation::NoTransforms)
+    } else {
+        Orientation::NoTransforms
+    };
+    let image = DynamicImage::from_decoder(decoder)?;
+    let sideways = matches!(
+        orientation,
+        Orientation::Rotate90
+            | Orientation::Rotate270
+            | Orientation::Rotate90FlipH
+            | Orientation::Rotate270FlipH
+    );
+    // The bounds for the image as stored.
+    let (width, height) = if sideways {
+        (height, width)
+    } else {
+        (width, height)
+    };
+    let mut image = if image.width() > width || image.height() > height {
+        image.thumbnail(width, height)
+    } else {
+        image
+    };
+    image.apply_orientation(orientation);
+    Ok(image)
 }
 
 /// A workaround for ratatui-image's query thread, which reads stdin without
@@ -176,7 +212,8 @@ impl<K: PartialEq, V> Recent<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{ImageError, ImageFormat};
+    use image::codecs::webp::WebPEncoder;
+    use image::{ImageEncoder as _, ImageError, ImageFormat};
 
     fn keys(recent: &Recent<u32, &str>) -> Vec<u32> {
         recent.entries.iter().map(|(key, _)| *key).collect()
@@ -223,13 +260,18 @@ mod tests {
         png.extend((!crc).to_be_bytes());
     }
 
+    /// `bytes` decoded for a terminal larger than any image.
+    fn decode_unscaled(bytes: &[u8]) -> ImageResult<DynamicImage> {
+        decode(bytes, u32::MAX, u32::MAX)
+    }
+
     #[test]
     fn decoding_is_bounded_by_the_pixels_not_the_file_size() {
         let mut small = Vec::new();
         DynamicImage::new_rgb8(3, 2)
             .write_to(&mut Cursor::new(&mut small), ImageFormat::Png)
             .unwrap();
-        let image = decode(&small).unwrap();
+        let image = decode_unscaled(&small).unwrap();
         assert_eq!((image.width(), image.height()), (3, 2));
 
         // 57 bytes for 8192x8192 in RGBA: 256 MiB decoded, under `image`'s
@@ -244,7 +286,54 @@ mod tests {
         chunk(&mut huge, b"IHDR", &header);
         chunk(&mut huge, b"IDAT", &[]);
         chunk(&mut huge, b"IEND", &[]);
-        let error = decode(&huge).unwrap_err();
+        let error = decode_unscaled(&huge).unwrap_err();
         assert!(matches!(error, ImageError::Limits(_)), "{error:?}");
+    }
+
+    /// An Exif TIFF block with orientation 6, which turns the image by 90
+    /// degrees: as phone cameras store a portrait photo, landscape.
+    const TURNED_BY_90: &[u8] = &[
+        b'M', b'M', 0, 42, 0, 0, 0, 8, // big-endian TIFF header, IFD at 8
+        0, 1, // one entry
+        0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, // orientation, one short: 6
+        0, 0, 0, 0, // no next IFD
+    ];
+
+    #[test]
+    fn a_photo_is_turned_by_its_exif_orientation_after_scaling() {
+        let mut stored = Vec::new();
+        DynamicImage::new_rgb8(30, 20)
+            .write_to(&mut Cursor::new(&mut stored), ImageFormat::Jpeg)
+            .unwrap();
+        let image = decode_unscaled(&stored).unwrap();
+        assert_eq!((image.width(), image.height()), (30, 20));
+
+        let app1 = [&[0xFF, 0xE1, 0, 34][..], b"Exif\0\0", TURNED_BY_90].concat();
+        let turned = [&stored[..2], &app1, &stored[2..]].concat();
+        let image = decode_unscaled(&turned).unwrap();
+        assert_eq!((image.width(), image.height()), (20, 30));
+        // Fitted as shown: 20x30 into 10 pixels wide.
+        let image = decode(&turned, 10, 100).unwrap();
+        assert_eq!((image.width(), image.height()), (10, 15));
+    }
+
+    #[test]
+    fn a_webp_is_decoded_as_stored_without_reading_its_exif() {
+        let mut webp = Vec::new();
+        let mut encoder = WebPEncoder::new_lossless(&mut webp);
+        encoder.set_exif_metadata(TURNED_BY_90.to_vec()).unwrap();
+        DynamicImage::new_rgb8(3, 2)
+            .write_with_encoder(encoder)
+            .unwrap();
+        let image = decode_unscaled(&webp).unwrap();
+        assert_eq!((image.width(), image.height()), (3, 2));
+
+        // An `EXIF` chunk that claims almost 4 GiB, which image-webp would
+        // allocate before finding the file too short. Nothing here can see
+        // that allocation; the comment in `decode` guards it.
+        let exif = webp.windows(4).position(|tag| tag == b"EXIF").unwrap();
+        webp[exif + 4..exif + 8].copy_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
+        let image = decode_unscaled(&webp).unwrap();
+        assert_eq!((image.width(), image.height()), (3, 2));
     }
 }
