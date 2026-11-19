@@ -392,7 +392,8 @@ impl App {
     /// the text; keys pending in another input context are dropped, as a
     /// key there would drop them. Like any key but `y`, a paste cancels a
     /// question, and it never answers one that a binding ending before it
-    /// asks.
+    /// asks. In `SECRET` mode, also when such a binding enters it, a paste
+    /// goes nowhere, so a pasted recovery key never shows in another input.
     fn paste(&mut self, text: String, editor: Option<EditorMode>, effects: &mut Vec<Effect>) {
         self.status = None;
         self.editor = editor;
@@ -401,6 +402,9 @@ impl App {
         }
         if self.confirm.take().is_some() {
             self.resolver.reset();
+            return;
+        }
+        if self.secret.is_some() {
             return;
         }
         // Keys resolved again after a binding can be pending once more, in
@@ -418,7 +422,7 @@ impl App {
             for next in ended {
                 self.resolved(context.sink(), next, effects);
             }
-            if self.confirm.is_some() {
+            if self.confirm.is_some() || self.secret.is_some() {
                 return;
             }
         };

@@ -407,6 +407,27 @@ fn keys_typed_in_secret_mode_never_reach_the_composer() {
 }
 
 #[test]
+fn a_paste_in_secret_mode_never_reaches_the_composer() {
+    let recover = Binding::single(Action::AccountRecover);
+    let mut app = app_with(vec![
+        (TableId::ComposerInsert, seq("<C-r>"), recover),
+        (
+            TableId::ComposerInsert,
+            seq("<C-r>x"),
+            Binding::single(Action::Nop),
+        ),
+    ]);
+    keys(&mut app, "<CR>i");
+    keys_in(&mut app, "<C-r>", Some(EditorMode::Insert));
+    // The paste ends `<C-r>`, which enters `SECRET` mode, and then goes
+    // nowhere; so does the next paste.
+    for _ in 0..2 {
+        assert_eq!(paste(&mut app, "key", Some(EditorMode::Insert)), vec![]);
+        assert_eq!(app.mode_label(Some(EditorMode::Insert)), "SECRET");
+    }
+}
+
+#[test]
 fn status_clears_on_the_next_key() {
     let mut app = app();
     app.update(Msg::EffectFailed {
