@@ -1,13 +1,13 @@
 //! The open room's timeline: the matrix-sdk-ui `Timeline` subscription, its
 //! back pagination, and the conversion of its items into core entries.
 
-use std::{pin::pin, sync::Arc};
+use std::{collections::HashSet, pin::pin, sync::Arc};
 
 use futures_util::{Stream, StreamExt as _};
 use matrix_sdk::{
     Room,
     ruma::{
-        self, MilliSecondsSinceUnixEpoch, OwnedUserId,
+        self, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedUserId,
         events::room::message::{FormattedBody, MessageFormat, MessageType},
     },
 };
@@ -23,14 +23,14 @@ use matrix_sdk_ui::{
 use mxt_core::{
     ids::{EventId, RoomId, Timestamp, TxnId, UserId},
     msg::Msg,
-    rich::RichText,
+    rich::{Block, Inline, RichText},
     timeline::{
         ItemRef, MessageContent, ReactionGroup, ReplyPreview, SendState, TimelineDiff,
         TimelineEntry, TimelineItem,
     },
 };
 use tokio::{
-    sync::mpsc::UnboundedSender,
+    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task::{JoinError, JoinSet},
 };
 use tracing::{debug, warn};
@@ -45,7 +45,7 @@ use crate::{
 const PAGE: u16 = 20;
 
 /// The open room's timeline, and its tasks: the one that forwards its diffs,
-/// and a back pagination in flight.
+/// the one that fetches reply details, and a back pagination in flight.
 pub(crate) struct Subscription {
     room: RoomId,
     timeline: Arc<Timeline>,
@@ -65,6 +65,12 @@ impl Subscription {
         let timeline = Arc::new(sdk_room.timeline().await.map_err(timeline_error)?);
         let me = sdk_room.own_user_id().to_owned();
         let (items, diffs) = timeline.subscribe().await;
+        let (to_fetch, fetches) = mpsc::unbounded_channel();
+        let mut replies = ReplyDetails {
+            asked: HashSet::new(),
+            to_fetch,
+        };
+        items.iter().for_each(|item| replies.see(item));
         let entries = items.iter().map(|item| entry(item, &me)).collect();
         let reset = vec![TimelineDiff::Reset(entries)];
         let _ = to_core.send(Msg::Timeline {
@@ -72,7 +78,8 @@ impl Subscription {
             diffs: reset,
         });
         let mut tasks = JoinSet::new();
-        tasks.spawn(forward(room.clone(), me, diffs, to_core));
+        tasks.spawn(forward(room.clone(), me, diffs, replies, to_core));
+        tasks.spawn(fetch_reply_details(timeline.clone(), fetches));
         Ok(Subscription {
             room,
             timeline,
@@ -132,13 +139,17 @@ async fn forward(
     room: RoomId,
     me: OwnedUserId,
     diffs: impl Stream<Item = Vec<VectorDiff<Arc<sdk::TimelineItem>>>>,
+    mut replies: ReplyDetails,
     to_core: UnboundedSender<Msg>,
 ) {
     let mut diffs = pin!(diffs);
     while let Some(batch) = diffs.next().await {
         let diffs = batch
             .into_iter()
-            .map(|diff| timeline_diff(diff, &me))
+            .map(|diff| {
+                replies.see_diff(&diff);
+                timeline_diff(diff, &me)
+            })
             .collect();
         let changed = Msg::Timeline {
             room: room.clone(),
@@ -146,6 +157,77 @@ async fn forward(
         };
         if to_core.send(changed).is_err() {
             return;
+        }
+    }
+}
+
+/// The SDK resolves a reply only against the items loaded when the reply
+/// arrives, and does not look again when the replied-to event is loaded
+/// later (by back pagination, for example). So every reply in the loaded
+/// timeline whose replied-to event the SDK has not looked up is sent to
+/// `fetch_reply_details`.
+struct ReplyDetails {
+    /// Reply events sent since the last `Clear` or `Reset`. The SDK fetches
+    /// an `Error` again on every call, and every receipt or reaction sends the
+    /// item again with `Set`; on `Clear` and `Reset` it rebuilds the items,
+    /// which come back `Unavailable`.
+    asked: HashSet<OwnedEventId>,
+    to_fetch: UnboundedSender<OwnedEventId>,
+}
+
+impl ReplyDetails {
+    fn see_diff(&mut self, diff: &VectorDiff<Arc<sdk::TimelineItem>>) {
+        match diff {
+            VectorDiff::Clear => self.asked.clear(),
+            VectorDiff::Reset { values } => {
+                self.asked.clear();
+                values.iter().for_each(|item| self.see(item));
+            }
+            VectorDiff::Append { values } => values.iter().for_each(|item| self.see(item)),
+            VectorDiff::PushFront { value }
+            | VectorDiff::PushBack { value }
+            | VectorDiff::Insert { value, .. }
+            | VectorDiff::Set { value, .. } => self.see(value),
+            VectorDiff::PopFront
+            | VectorDiff::PopBack
+            | VectorDiff::Remove { .. }
+            | VectorDiff::Truncate { .. } => {}
+        }
+    }
+
+    /// The SDK fetches details only for remote events.
+    fn see(&mut self, item: &sdk::TimelineItem) {
+        let Some(event) = item.as_event().filter(|event| event.is_remote_event()) else {
+            return;
+        };
+        let TimelineItemContent::MsgLike(msg_like) = event.content() else {
+            return;
+        };
+        if let Some(reply) = &msg_like.in_reply_to
+            && needs_details(reply)
+            && let Some(id) = event.event_id()
+            && self.asked.insert(id.to_owned())
+        {
+            let _ = self.to_fetch.send(id.to_owned());
+        }
+    }
+}
+
+/// Only details the SDK has not looked up: `Pending` ones are being fetched,
+/// and `Error` ones failed already.
+fn needs_details(reply: &InReplyToDetails) -> bool {
+    matches!(reply.event, TimelineDetails::Unavailable)
+}
+
+/// Fetches the replied-to events of the replies in `ids` one at a time, so a
+/// page of replies to older messages does not send its requests at once.
+/// The SDK looks in the loaded items and the event cache first, and sets the
+/// result on the reply item, which reaches the core as a `Set`. A failure is
+/// not something the user can act on, so it goes to `debug` only.
+async fn fetch_reply_details(timeline: Arc<Timeline>, mut ids: UnboundedReceiver<OwnedEventId>) {
+    while let Some(id) = ids.recv().await {
+        if let Err(error) = timeline.fetch_details_for_event(&id).await {
+            debug!("Loading a replied-to message failed: {error}");
         }
     }
 }
@@ -182,8 +264,8 @@ fn entry(item: &sdk::TimelineItem, me: &ruma::UserId) -> TimelineEntry {
     }
 }
 
-/// Messages and other message-like events are items; state events,
-/// membership changes and calls are hidden.
+/// Messages and other message-like events, calls included, are items; state
+/// events and membership changes are hidden.
 fn event_entry(event: &EventTimelineItem, me: &ruma::UserId) -> TimelineEntry {
     let (content, reply, reactions, edited) = match event.content() {
         TimelineItemContent::MsgLike(msg_like) => (
@@ -192,16 +274,10 @@ fn event_entry(event: &EventTimelineItem, me: &ruma::UserId) -> TimelineEntry {
             reaction_groups(&msg_like.reactions, me),
             matches!(&msg_like.kind, MsgLikeKind::Message(message) if message.is_edited()),
         ),
-        TimelineItemContent::FailedToParseMessageLike { event_type, .. } => {
-            let kind = event_type.to_string();
-            (
-                MessageContent::Unsupported { kind },
-                None,
-                Vec::new(),
-                false,
-            )
-        }
-        _ => return TimelineEntry::Hidden,
+        other => match other_content(other) {
+            Some(content) => (content, None, Vec::new(), false),
+            None => return TimelineEntry::Hidden,
+        },
     };
     TimelineEntry::Item(TimelineItem {
         id: item_ref(event.identifier()),
@@ -214,6 +290,20 @@ fn event_entry(event: &EventTimelineItem, me: &ruma::UserId) -> TimelineEntry {
         edited,
         send_state: event.send_state().map(send_state),
     })
+}
+
+/// The content of an event that is not `MsgLike`. Calls and message-like
+/// events the SDK could not parse are unsupported items, so the reader
+/// learns of them; state events are hidden (`None`).
+fn other_content(content: &TimelineItemContent) -> Option<MessageContent> {
+    let kind = match content {
+        TimelineItemContent::FailedToParseMessageLike { event_type, .. } => event_type.to_string(),
+        TimelineItemContent::CallInvite | TimelineItemContent::RtcNotification { .. } => {
+            "call".to_owned()
+        }
+        _ => return None,
+    };
+    Some(MessageContent::Unsupported { kind })
 }
 
 fn msg_like_content(kind: &MsgLikeKind) -> MessageContent {
@@ -288,22 +378,28 @@ fn message_content(msgtype: &MessageType, body: &str) -> MessageContent {
         }
         // The specification's fallback for message types a client does not
         // show (locations, verification requests, custom types): the body.
-        _ => MessageContent::Text {
-            body: body.to_owned(),
-            rich: RichText::plain(body),
-        },
+        // Not as `Text`, which the core lets the sender edit: the edit would
+        // turn the message into `m.text` for every client.
+        _ => MessageContent::Notice(RichText::plain(body)),
     }
 }
 
 /// The HTML body when there is one, otherwise the plain body. An HTML body
-/// without any text falls back to the plain body, so the message is not
-/// blank.
+/// with nothing but blank lines falls back to the plain body, so the message
+/// is not blank.
 fn rich_body(body: &str, formatted: Option<&FormattedBody>) -> RichText {
     let html = formatted.filter(|formatted| formatted.format == MessageFormat::Html);
     match html.map(|html| render_html(&html.body)) {
-        Some(rich) if !rich.blocks.is_empty() => rich,
+        Some(rich) if !is_blank(&rich) => rich,
         _ => RichText::plain(body),
     }
+}
+
+fn is_blank(rich: &RichText) -> bool {
+    rich.blocks.iter().all(|block| {
+        matches!(block, Block::Paragraph(inlines)
+            if inlines.iter().all(|inline| *inline == Inline::LineBreak))
+    })
 }
 
 /// The replied-to event's sender and plain body, once the SDK has them.
@@ -381,18 +477,21 @@ fn timestamp(ts: MilliSecondsSinceUnixEpoch) -> Timestamp {
 mod tests {
     use matrix_sdk::ruma::{
         OwnedMxcUri, UInt,
-        events::room::{
-            ImageInfo,
-            message::{
-                AudioInfo, AudioMessageEventContent, EmoteMessageEventContent, FileInfo,
-                FileMessageEventContent, ImageMessageEventContent, LocationMessageEventContent,
-                NoticeMessageEventContent, TextMessageEventContent,
+        events::{
+            StateEventType,
+            room::{
+                ImageInfo,
+                message::{
+                    AudioInfo, AudioMessageEventContent, EmoteMessageEventContent, FileInfo,
+                    FileMessageEventContent, ImageMessageEventContent, LocationMessageEventContent,
+                    NoticeMessageEventContent, TextMessageEventContent,
+                },
             },
         },
         owned_event_id, owned_user_id,
     };
     use matrix_sdk_ui::timeline::{EmbeddedEvent, MsgLikeContent, ReactionInfo};
-    use mxt_core::rich::{Block, Inline, Style};
+    use mxt_core::rich::Style;
 
     use super::*;
 
@@ -409,6 +508,24 @@ mod tests {
         MessageContent::Text {
             body: body.into(),
             rich,
+        }
+    }
+
+    /// A replied-to event by Bob, with `profile`.
+    fn replied(profile: TimelineDetails<Profile>) -> TimelineDetails<Box<EmbeddedEvent>> {
+        TimelineDetails::Ready(Box::new(EmbeddedEvent {
+            content: TimelineItemContent::MsgLike(MsgLikeContent::redacted()),
+            sender: owned_user_id!("@bob:example.org"),
+            sender_profile: profile,
+            timestamp: MilliSecondsSinceUnixEpoch(UInt::from(0u32)),
+            identifier: TimelineEventItemId::EventId(owned_event_id!("$event:example.org")),
+        }))
+    }
+
+    fn reply(event: TimelineDetails<Box<EmbeddedEvent>>) -> InReplyToDetails {
+        InReplyToDetails {
+            event_id: owned_event_id!("$event:example.org"),
+            event,
         }
     }
 
@@ -440,8 +557,9 @@ mod tests {
             content(MessageType::Text(other_format)),
             text("plain\nbody", RichText::plain("plain\nbody"))
         );
-        // An HTML body without text would leave the message blank.
-        let blank = TextMessageEventContent::html("fallback", "<p> </p>");
+        // An HTML body without text, or with only blank lines, would leave
+        // the message blank.
+        let blank = TextMessageEventContent::html("fallback", "<p> </p><p><br></p>");
         assert_eq!(
             content(MessageType::Text(blank)),
             text("fallback", RichText::plain("fallback"))
@@ -517,13 +635,47 @@ mod tests {
     }
 
     #[test]
-    fn message_types_mxt_does_not_show_fall_back_to_their_body() {
+    fn message_types_mxt_does_not_show_are_notices_with_their_body() {
         let location =
             LocationMessageEventContent::new("Big Ben".into(), "geo:51.5008,0.1247".into());
         assert_eq!(
             content(MessageType::Location(location)),
-            text("Big Ben", RichText::plain("Big Ben"))
+            MessageContent::Notice(RichText::plain("Big Ben"))
         );
+    }
+
+    #[test]
+    fn calls_and_unparsable_message_like_events_are_unsupported_and_state_is_hidden() {
+        let unsupported = |kind: &str| {
+            Some(MessageContent::Unsupported {
+                kind: kind.to_owned(),
+            })
+        };
+        assert_eq!(
+            other_content(&TimelineItemContent::CallInvite),
+            unsupported("call")
+        );
+        let notification = TimelineItemContent::RtcNotification {
+            call_intent: None,
+            declined_by: Vec::new(),
+            active_call_info: None,
+        };
+        assert_eq!(other_content(&notification), unsupported("call"));
+        let error = || Arc::new(serde_json::from_str::<u8>("x").unwrap_err());
+        let message_like = TimelineItemContent::FailedToParseMessageLike {
+            event_type: "org.example.custom".into(),
+            error: error(),
+        };
+        assert_eq!(
+            other_content(&message_like),
+            unsupported("org.example.custom")
+        );
+        let state = TimelineItemContent::FailedToParseState {
+            event_type: StateEventType::RoomTopic,
+            state_key: String::new(),
+            error: error(),
+        };
+        assert_eq!(other_content(&state), None);
     }
 
     #[test]
@@ -559,19 +711,6 @@ mod tests {
 
     #[test]
     fn reply_previews_show_the_sender_and_body_once_ready() {
-        let replied = |profile| {
-            TimelineDetails::Ready(Box::new(EmbeddedEvent {
-                content: TimelineItemContent::MsgLike(MsgLikeContent::redacted()),
-                sender: owned_user_id!("@bob:example.org"),
-                sender_profile: profile,
-                timestamp: MilliSecondsSinceUnixEpoch(UInt::from(0u32)),
-                identifier: TimelineEventItemId::EventId(owned_event_id!("$event:example.org")),
-            }))
-        };
-        let reply = |event| InReplyToDetails {
-            event_id: owned_event_id!("$event:example.org"),
-            event,
-        };
         let preview = |sender_name: Option<&str>, body: Option<&str>| ReplyPreview {
             event: EventId::new("$event:example.org"),
             sender_name: sender_name.map(Into::into),
@@ -594,5 +733,16 @@ mod tests {
             reply_preview(&reply(replied(TimelineDetails::Unavailable))),
             preview(Some("@bob:example.org"), Some("(deleted)"))
         );
+    }
+
+    #[test]
+    fn only_reply_details_the_sdk_has_not_looked_up_are_fetched() {
+        assert!(needs_details(&reply(TimelineDetails::Unavailable)));
+        assert!(!needs_details(&reply(TimelineDetails::Pending)));
+        assert!(!needs_details(&reply(replied(
+            TimelineDetails::Unavailable
+        ))));
+        let failed = TimelineDetails::Error(Arc::new(matrix_sdk::Error::InsufficientData));
+        assert!(!needs_details(&reply(failed)));
     }
 }
