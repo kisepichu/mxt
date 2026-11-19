@@ -235,6 +235,13 @@ impl App {
         self.timeline.follows()
     }
 
+    /// The first and last timeline entries of the open room's last reported
+    /// viewport; `None` until a render of that room reported one.
+    pub fn timeline_viewport(&self) -> Option<(usize, usize)> {
+        self.timeline_viewport
+            .map(|viewport| (viewport.first, viewport.last))
+    }
+
     pub fn view_open(&self) -> bool {
         self.view.is_some()
     }
