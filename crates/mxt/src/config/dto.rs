@@ -47,6 +47,9 @@ pub struct Ui {
 pub struct RoomList {
     pub visible: Option<bool>,
     pub sort: Option<RoomSort>,
+    /// Any integer, so every value outside the range gets the same message.
+    pub width: Option<Spanned<i64>>,
+    pub network: Option<NetworkPlacement>,
 }
 
 #[derive(Deserialize)]
@@ -61,6 +64,22 @@ impl From<RoomSort> for rooms::RoomSort {
         match sort {
             RoomSort::Recent => rooms::RoomSort::Recent,
             RoomSort::Name => rooms::RoomSort::Name,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkPlacement {
+    Inline,
+    Below,
+}
+
+impl From<NetworkPlacement> for mxt_tui::NetworkPlacement {
+    fn from(network: NetworkPlacement) -> mxt_tui::NetworkPlacement {
+        match network {
+            NetworkPlacement::Inline => mxt_tui::NetworkPlacement::Inline,
+            NetworkPlacement::Below => mxt_tui::NetworkPlacement::Below,
         }
     }
 }

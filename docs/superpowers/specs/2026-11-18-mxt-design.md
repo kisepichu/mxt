@@ -527,7 +527,23 @@ rooms set to mentions and keywords only show a `Mentions only` label.
 
 The default order is by latest activity, newest first. `sort = "name"` sorts
 case-insensitively by the full displayed name (`network / room`), which groups
-rooms by network. Spaces themselves are not listed.
+rooms by network, whichever `network` layout is set. Spaces themselves are
+not listed.
+
+The list is `ui.room_list.width` columns wide, its border included (30 by
+default). Terminals narrower than 90 columns give it a third of their width
+instead, and it never takes more than half of the width.
+
+`ui.room_list.network` places the network part of the name:
+
+- `"inline"` (default): one row per room, `network / room` as in "Room names".
+- `"below"`: a room with a network part takes two rows. The first row has the
+  room part (bold when the room is open) and, right-aligned, the badge and
+  the notification mode label. The second row has the network part, dim,
+  indented two columns and cut with `…` at its end when it does not fit. A
+  Discord DM reads `Alice` over `  Discord`. A room without a network part
+  takes one row. The cursor covers both rows of a room, and half-page moves
+  count rooms, not rows.
 
 ### Timeline
 
@@ -669,7 +685,8 @@ user_id = "@alice:example.org"
 [ui]
 leader = "<Space>"
 timeoutlen = 1000                                 # milliseconds
-room_list = { visible = true, sort = "recent" }  # sort: "recent" | "name"
+# sort: "recent" | "name"; width: 12 to 80; network: "inline" | "below"
+room_list = { visible = true, sort = "recent", width = 30, network = "inline" }
 time_format = "%H:%M"                             # strftime, in the local time zone
 image_preview = "auto"                            # "auto" | "off" (message view)
 read_receipts = "public"                          # "public" | "private"
@@ -695,6 +712,8 @@ Settings:
 - `ui.read_receipts = "public"` sends `m.read` receipts, which other users
   see. `"private"` sends `m.read.private`, which only the user's own devices
   see.
+- `ui.room_list.width` is an integer from 12 to 80; see "Room list" for
+  narrow terminals.
 - `ui.time_format` is applied in the local time zone (jiff, in `mxt-tui`).
 - `files.download_dir` defaults to `~/Downloads`. A leading `~` is expanded
   when the configuration is loaded.

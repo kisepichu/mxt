@@ -231,6 +231,7 @@ async fn run_ui(
         keymap,
         settings,
         time_format,
+        room_list_layout,
         opener,
         ..
     } = config;
@@ -249,6 +250,7 @@ async fn run_ui(
         }
     };
     tui.set_time_format(time_format);
+    tui.set_room_list_layout(room_list_layout);
     let outcome = tokio::select! {
         // The adapter's panic first: the panic hook has restored the terminal
         // and printed the panic, and the next frame fails then.

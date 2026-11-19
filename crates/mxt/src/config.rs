@@ -18,7 +18,7 @@ use mxt_core::ids::UserId;
 use mxt_core::keymap::{Keymap, TableId};
 use mxt_core::keys::{Key, KeyParseError, KeySeq};
 use mxt_core::settings::Settings;
-use mxt_tui::TimeFormat;
+use mxt_tui::{RoomListLayout, RoomListWidth, TimeFormat};
 use toml::Spanned;
 use toml::de::{DeTable, DeValue};
 
@@ -34,6 +34,8 @@ pub struct Config {
     pub settings: Settings,
     /// Applied in the local time zone by `mxt-tui`.
     pub time_format: TimeFormat,
+    /// `ui.room_list.width` and `ui.room_list.network`, for `mxt-tui`.
+    pub room_list_layout: RoomListLayout,
     /// Absolute.
     #[cfg_attr(
         not(test),
@@ -127,6 +129,20 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Config, ConfigError
         }
         None => TimeFormat::default(),
     };
+    let room_list_width = match ui.room_list.width {
+        Some(width) => RoomListWidth::new(*width.get_ref()).ok_or_else(|| {
+            let (min, max) = RoomListWidth::RANGE.into_inner();
+            source.invalid(
+                &width,
+                format!("ui.room_list.width: must be from {min} to {max}"),
+            )
+        })?,
+        None => RoomListWidth::default(),
+    };
+    let room_list_layout = RoomListLayout {
+        width: room_list_width,
+        network: ui.room_list.network.map(Into::into).unwrap_or_default(),
+    };
 
     let download_dir = match files.download_dir {
         Some(dir) => {
@@ -160,6 +176,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Config, ConfigError
         keymap: Keymap::new(&leader, bindings),
         settings,
         time_format,
+        room_list_layout,
         download_dir,
         opener,
     })
