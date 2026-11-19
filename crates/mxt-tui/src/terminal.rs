@@ -16,6 +16,8 @@ use mxt_core::effect::UiEffect;
 use mxt_core::ids::RoomId;
 use mxt_core::msg::{EditorMode, Msg, Pane};
 use mxt_core::resolver::TimerId;
+use mxt_core::rich::is_web_url;
+use mxt_core::settings::ImagePreview;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::ListState;
@@ -24,7 +26,7 @@ use crate::clipboard::SharedRegister;
 use crate::composer::{Composer, Composers};
 use crate::image_view::Images;
 use crate::input::key_from_crossterm;
-use crate::opener::{Opener, is_web_url};
+use crate::opener::Opener;
 use crate::overlay::Overlays;
 use crate::timeline_view::{TimeFormat, TimelinePane};
 use crate::timers::Timers;
@@ -49,7 +51,9 @@ pub struct Tui {
     timeline: TimelinePane,
     /// The message view while it is open.
     view: Option<View>,
-    images: Images,
+    /// `None` with `ui.image_preview = "off"`, where the terminal is never
+    /// asked for its graphics protocol.
+    images: Option<Images>,
     opener: Opener,
     composers: Composers,
     overlays: Overlays,
@@ -60,9 +64,9 @@ pub struct Tui {
 
 impl Tui {
     /// Raw mode, alternate screen, focus change reporting, hidden cursor,
-    /// and the terminal's graphics protocol for images. `opener` is
-    /// `files.opener`.
-    pub fn new(opener: Vec<String>) -> io::Result<Tui> {
+    /// and with `image_preview` `auto` the terminal's graphics protocol for
+    /// images. `opener` is `files.opener`.
+    pub fn new(opener: Vec<String>, image_preview: ImagePreview) -> io::Result<Tui> {
         crossterm::terminal::enable_raw_mode()?;
         ACTIVE.store(true, Ordering::SeqCst);
         let setup =
@@ -70,12 +74,17 @@ impl Tui {
                 // The terminal answers the query on its input, which the
                 // event stream does not read yet. When the answers do not
                 // come in time, as in a tmux pane that is not visible,
-                // ratatui-image's thread still takes the next input, so
-                // nothing below asks the terminal: ratatui's `clear` would
-                // ask for the cursor position. The clear wipes what a
-                // terminal prints for a query it does not know, and the
-                // new terminal's buffers are as blank as the screen.
-                let images = Images::query();
+                // ratatui-image's thread may still take the next input (see
+                // `Images::query`), so nothing below asks the terminal:
+                // ratatui's `clear` would ask for the cursor position. The
+                // clear wipes what a terminal prints for a query it does not
+                // know, and the new terminal's buffers are as blank as the
+                // screen. Without previews there is no query, and
+                // ratatui-image does not turn on tmux's `allow-passthrough`.
+                let images = match image_preview {
+                    ImagePreview::Auto => Some(Images::query()?),
+                    ImagePreview::Off => None,
+                };
                 execute!(io::stdout(), Clear(ClearType::All))?;
                 let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
                 Ok((terminal, images))
@@ -116,9 +125,11 @@ impl Tui {
     /// it yet, draws the frame, and returns `Msg::Viewport` for the room
     /// list when its visible range changed since the last draw, and for the
     /// timeline when its visible range is not the one the core has (see
-    /// `timeline_report`). Fails once the terminal has been restored, which
-    /// while the UI runs only the panic hook does, so a panic in any task
-    /// ends the event loop instead of drawing onto the main screen.
+    /// `timeline_report`). An image that failed to encode while drawing
+    /// becomes `Msg::EffectFailed`, once per image. Fails once the terminal
+    /// has been restored, which while the UI runs only the panic hook does,
+    /// so a panic in any task ends the event loop instead of drawing onto
+    /// the main screen.
     pub fn draw(&mut self, app: &App) -> io::Result<Vec<Msg>> {
         if !ACTIVE.load(Ordering::SeqCst) {
             return Err(io::Error::other("the terminal was restored after a panic"));
@@ -145,7 +156,7 @@ impl Tui {
                 room_list,
                 timeline,
                 view: view.as_mut(),
-                images: Some(images),
+                images: images.as_mut(),
                 composer,
                 overlays,
             };
@@ -164,6 +175,9 @@ impl Tui {
             });
         }
         msgs.extend(timeline_report(app, visible.timeline));
+        if let Some(error) = self.images.as_mut().and_then(Images::take_failure) {
+            msgs.push(cannot_show(error));
+        }
         Ok(msgs)
     }
 
@@ -213,7 +227,8 @@ impl Tui {
     ///   otherwise to the composer that last got the focus.
     /// - `OpenView` replaces the message view and `CloseView` drops it with
     ///   its edits. `ShowImage` decodes the image for the view (see
-    ///   [`Images::insert`]); a failure becomes `Msg::EffectFailed`.
+    ///   [`Images::insert`]); a failure becomes `Msg::EffectFailed`. Without
+    ///   previews it does nothing (the core does not fetch images then).
     /// - `OpenPath` and `OpenUrl` run `files.opener` (see
     ///   [`Opener::open`]), `OpenUrl` only for `http://` and `https://`
     ///   URLs. A refusal or a failure to start it becomes `Msg::EffectFailed`.
@@ -249,17 +264,17 @@ impl Tui {
                 self.view = Some(View::new(content, self.register.clone()));
             }
             UiEffect::ShowImage { item, bytes } => {
+                let Some(images) = &mut self.images else {
+                    return msgs;
+                };
                 let shown = match self.terminal.size() {
-                    Ok(screen) => self
-                        .images
+                    Ok(screen) => images
                         .insert(item, bytes.as_bytes(), screen)
                         .map_err(|error| error.to_string()),
                     Err(error) => Err(error.to_string()),
                 };
                 if let Err(error) = shown {
-                    msgs.push(Msg::EffectFailed {
-                        error: format!("Cannot show the image: {error}"),
-                    });
+                    msgs.push(cannot_show(error));
                 }
             }
             UiEffect::OpenPath(path) => self.open(&path, &mut msgs),
@@ -376,6 +391,13 @@ impl Drop for Tui {
     fn drop(&mut self) {
         // Nothing is left to report the error to.
         let _ = self.restore();
+    }
+}
+
+/// The status for an image that could not be decoded or encoded.
+fn cannot_show(error: impl std::fmt::Display) -> Msg {
+    Msg::EffectFailed {
+        error: format!("Cannot show the image: {error}"),
     }
 }
 

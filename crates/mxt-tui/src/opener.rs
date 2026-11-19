@@ -50,17 +50,6 @@ impl Opener {
     }
 }
 
-/// Whether `url` is an `http://` or `https://` URL, the only ones
-/// `message.open` opens: a link's target is chosen by its sender, and other
-/// schemes reach other programs.
-pub(crate) fn is_web_url(url: &str) -> bool {
-    let scheme = |prefix: &str| {
-        url.get(..prefix.len())
-            .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
-    };
-    scheme("http://") || scheme("https://")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,26 +71,5 @@ mod tests {
         let missing = Opener::new(vec!["/nonexistent/mxt-opener".into()]);
         assert!(missing.open("/tmp/cat.png").is_err());
         assert!(Opener::new(Vec::new()).open("/tmp/cat.png").is_err());
-    }
-
-    #[test]
-    fn only_http_and_https_urls_are_web_urls() {
-        for url in [
-            "https://example.org/x",
-            "http://example.org",
-            "HTTPS://example.org",
-        ] {
-            assert!(is_web_url(url), "{url}");
-        }
-        for url in [
-            "file:///etc/passwd",
-            "mailto:alice@example.org",
-            "javascript:alert(1)",
-            "--help",
-            "https:",
-            "",
-        ] {
-            assert!(!is_web_url(url), "{url}");
-        }
     }
 }
