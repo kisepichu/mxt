@@ -141,7 +141,7 @@ flowchart BT
 | Crate | Responsibility | May depend on |
 |---|---|---|
 | `mxt-core` | Domain types, keymap and its resolver, action registry, pickers, mention rendering, `App` state and `update` | `std` and small pure crates without I/O (`nucleo-matcher`, `emojis`, `pulldown-cmark`, `unicode-segmentation`). Not the SDK, `ruma`, an async runtime, a terminal library, `serde` or `toml`. |
-| `mxt-matrix` | Builds the SDK client, converts SDK data into domain types, executes matrix effects, forwards SDK streams as `Msg`s, fetches bridge state, renders HTML bodies into domain rich text | `mxt-core`, `matrix-sdk`, `matrix-sdk-ui`, tokio; HTML parsing through `matrix_sdk::ruma::html`, plus a feature-only `ruma` dependency of the SDK's ruma version that enables `html-matrix` (the SDK enables only `html`) |
+| `mxt-matrix` | Builds the SDK client, converts SDK data into domain types, executes matrix effects, forwards SDK streams as `Msg`s, reads bridge state, renders HTML bodies into domain rich text, reads and writes the session file | `mxt-core`, `matrix-sdk`, `matrix-sdk-ui`, tokio, `serde`/`serde_json` (the session file holds the SDK's serde session type); HTML parsing through `matrix_sdk::ruma::html`, plus a feature-only `ruma` dependency of the SDK's ruma version that enables `html-matrix` (the SDK enables only `html`) |
 | `mxt-tui` | Layout and widgets, input routing, the composers and the message view (edtui), image decoding and previews, OSC 52 clipboard, local time formatting, executing UI effects | `mxt-core`, ratatui, crossterm, edtui, ratatui-image, image, jiff |
 | `mxt` | Command line, startup flow, configuration file loading (TOML DTOs), paths, the data directory lock, logging, wiring the adapters and the event loop | all of the above, `serde`, `toml`, `tracing` |
 
@@ -178,7 +178,9 @@ Rules:
 
   pub enum Draft {
       New,
-      Reply { to: ItemRef },
+      /// Replies go to remote events only: a reply to a local echo is refused
+      /// until the echo is sent.
+      Reply { to: EventId },
       Edit { target: OwnEvent },
   }
 
@@ -238,7 +240,8 @@ The main types in `mxt-core`:
   reacted), an edited flag, and the local send state (sending, sent, failed).
   The timeline also contains date dividers and the read marker, which the SDK
   provides as virtual items.
-- `MessageContent`: `Text(RichText)`, `Notice(RichText)`, `Emote(RichText)`,
+- `MessageContent`: `Text { body, rich }` (the event's plain `body`, which
+  `message.edit` loads, and its `RichText`), `Notice(RichText)`, `Emote(RichText)`,
   `Image { name, size, dimensions }`, `File { name, size, mime }` (also used
   for video and audio), `Sticker { body }`, `Redacted`, `Undecryptable`,
   `Unsupported { kind }`.
@@ -288,8 +291,13 @@ covered by unit tests.
 
 ### Matrix adapter
 
-- Sync: `SyncService` with simplified sliding sync (MSC4186) and
-  `RoomListService` for the set of rooms.
+- Sync: classic `/sync` (phase 0 decided it; see "Phase 0 findings"). mxt
+  runs its own loop of `Client::sync_once` with the stored token, a long-poll
+  timeout, presence offline, and a filter with lazy-loaded members and a
+  small timeline limit. It subscribes the SDK's event cache, which computes
+  unread counts and latest events for every room. The set of rooms comes from
+  `Client::rooms()` (joined rooms that are not spaces), updated from each sync
+  response and from room info updates.
 - Timelines: only the open room has a subscribed `Timeline`. Opening another
   room unsubscribes the previous one. The core requests
   `Effect::Matrix(PaginateBackwards)` when the timeline cursor comes within 10 items
@@ -299,23 +307,10 @@ covered by unit tests.
   `is_marked_unread`, the user-defined notification mode and the latest event
   time. The core filters and sorts them itself, so the meaning of every filter
   is defined in one place.
-- Bridge state: `RoomListService` requests a fixed set of state events that
-  does not include `m.bridge`, and it has no API to extend that set. A second
-  `SlidingSync` instance would feed its responses through the SDK's sync
-  processing, and a `limited` response with a `prev_batch` token makes the
-  event cache add a gap to the room even when no events arrive. So mxt does
-  not use the SDK's sliding sync for this. It sends one-off MSC4186 requests
-  with `Client::send` (`ruma::api::client::sync::sync_events::v5::Request`):
-  - a list over all rooms, paged by its range until the response's `count` is
-    covered, with `timeline_limit` 0 and `required_state` of
-    `("m.bridge", "*")` and `("uk.half-shot.bridge", "*")`, and no extensions;
-  - at startup, and with `room_subscriptions` for rooms that appear later and
-    have not been checked yet.
-
-  `mxt-matrix` parses the returned state itself and keeps, per room, either
-  the bridge information or the fact that the room has none. The responses
-  never reach the SDK's store or event cache. `SpaceParent` state comes with
-  the room list connection already.
+- Bridge state: classic sync delivers each room's full state (members are
+  lazy-loaded), so `m.bridge` and `uk.half-shot.bridge` are read from the
+  stored room state. `mxt-matrix` parses them itself and keeps, per room,
+  either the bridge information or the fact that the room has none.
 - Network names, for every room including direct messages, first match wins:
   1. `network.displayname` of the room's `m.bridge` event (or
      `uk.half-shot.bridge`)
@@ -379,11 +374,10 @@ covered by unit tests.
   In encrypted rooms there is often none, and the SDK cannot ask the server to
   scale encrypted media, so the adapter downloads the full file. Files larger
   than 10 MB are not fetched for previews.
-- Sync path: phase 0 decides between sliding sync and classic `/sync` for the
-  target homeservers, and only the chosen path is implemented. If classic sync
-  is chosen, the adapter builds the room set from `Client::rooms()` and reads
-  `m.bridge` from the full room state. Either way the core receives the same
-  `Msg`s.
+- Sync path: phase 0 decided on classic `/sync` for the target homeserver,
+  and only that path is implemented (see "Phase 0 findings"). The core
+  receives the same `Msg`s either way, so another path could be added in
+  `mxt-matrix` alone.
 
 ### Terminal adapter and the composer
 
@@ -422,7 +416,9 @@ covered by unit tests.
   - The first time a room's composer gets focus, the core returns
     `Effect::Matrix(LoadMembers(room))`. The members arrive as `Msg::MembersLoaded`.
   - The core ranks the loaded members against the query with
-    `nucleo-matcher`, on display name and user ID. Members who sent one of the
+    `nucleo-matcher`, on the display name and the user ID's localpart (the
+    whole user ID when the query contains `:`, so same-named members on
+    different servers can be told apart). Members who sent one of the
     loaded messages come first, newest sender first.
   - Accepting a candidate records a `MentionRef` in the room's composer and
     returns `Effect::Ui(ReplaceMentionToken { room, text })`, which replaces
@@ -460,8 +456,10 @@ Command line: `mxt [--config PATH]` and `mxt --version`.
 2. Take an exclusive lock on `$XDG_DATA_HOME/mxt/lock` (`std::fs::File::try_lock`).
    If another mxt holds it, exit with a non-zero status. Two processes must
    never share the crypto store.
-3. If a session file exists, restore the session. Otherwise ask for the
-   password on the terminal without echo, log in (no refresh token is
+3. If a session file exists, restore the session; a session whose user ID
+   differs from `account.user_id` stops the start with both IDs, and nothing
+   is moved (removing the session file switches accounts). Otherwise ask for
+   the password on the terminal without echo, log in (no refresh token is
    requested, so the stored access token does not change), and save the
    session.
 4. Right after a first login, ask for the recovery key. An empty input skips
@@ -613,8 +611,9 @@ spaces work without quoting.
 ### Mentions
 
 `<leader>m` opens the room picker filtered to rooms whose `mentions > 0`.
-Listing individual mention events needs the server's `/notifications`
-endpoint, and phase 0 checks whether the target homeservers support it.
+Listing individual mention events would need the server's `/notifications`
+endpoint. Phase 0 found that the target homeserver answers it with an empty
+list, so mxt does not offer an event-level mention list.
 
 ### Mention completion
 
@@ -627,6 +626,9 @@ endpoint, and phase 0 checks whether the target homeservers support it.
   exactly one user.
 - The inserted text stays plain text in the editor. Deleting or changing it
   removes the mention: only texts still present when sending become mentions.
+  A text counts when it ends at a word boundary (Unicode UAX #29), so
+  `@Bob` is not a mention inside `@Bobby`, while `@Aliceさん` and `@田中さん`,
+  with an honorific written directly after the name, are.
 
 ### Files and images
 
@@ -901,28 +903,66 @@ Prebuilt binaries on GitHub Releases are out of scope for the first release.
 | 3. Sending | The edtui composers, sending Markdown, mention completion, replying, editing, deleting, toggling reactions with the emoji picker, the external editor | Messages can be written day to day, and mentions notify people on the remote network |
 | 4. Rest of the first release | Fuzzy room picker, mentions filter, mute and unmute, file download, open and upload, images in the message view | Everything in "Scope of the first release" works |
 
+## Phase 0 findings
+
+Run against the target account on 2026-11-19 with the throwaway spike (a
+separate device) and the edtui check program. Counts are from that account.
+
+1. **Sync path: classic `/sync`.** The homeserver advertises simplified
+   sliding sync, and `SyncService`/`RoomListService` run without errors, but
+   the room list holds only rooms that are not bridged: 1 room
+   (`maximum_number_of_rooms` 1), 2 after a new room was created. A one-off
+   MSC4186 list without filters also reports a `count` of 1. Classic `/sync`
+   (timeline limit 1, lazy-loaded members) returns all 363 joined rooms, about
+   10 MiB of JSON and 13 655 state events, in 6 s. Decision: classic sync
+   ("Matrix adapter").
+2. **Bridge state and network names:** open. The one-off MSC4186 request is
+   moot with classic sync; `m.bridge` is read from the room state that classic
+   sync delivers. Checked with mxt itself once its adapter syncs classically.
+3. **Unread counts after a long offline period:** open, measured with mxt.
+   The SDK's event cache computes the counts (not sliding sync), so classic
+   sync keeps them when mxt subscribes the event cache.
+4. **`/notifications`:** answers 200 with an empty list and no `next_token`
+   on an account with hundreds of rooms. Treated as unsupported; there is no
+   event-level mention list ("Mentions").
+5. **edtui with CJK text:** cursor columns, the drawn cell under the cursor,
+   committed input method text (simulated with tmux `send-keys`), wrapping of
+   wide characters at the pane edge and the internal register all work, so the
+   composer choice stands. Input method preedit placement needs `mxt-tui` to
+   put the terminal cursor at the editor's `cursor_screen_position()`; seeing
+   the preedit itself is a check by a person, still open. Not working in edtui
+   0.11.8: the cursor after emoji grapheme clusters (skin tones, ZWJ
+   sequences, VS16; drawn up to 4 columns off, `h`/`l` step into clusters),
+   CJK word motions (`w`, `e`, `b` treat every non-ASCII character as its own
+   word), `F`/`T`/`;`/`,`, and a linewise `p` on the last line (pastes above).
+   `r` is unbound rather than redo.
+6. **Mentions on the remote network:** open; needs a bridged channel, a
+   second person, and mxt with classic sync and sending (phase 3).
+7. **Key backup with `AfterDecryptionFailure`:** recovery imported the
+   cross-signing keys and enabled the backup for the new device, and the
+   device is cross-signed. Whether old messages of bridged rooms decrypt is
+   checked with mxt's timeline (phase 2).
+
+Also found: `Recovery::recover` signs the device and therefore needs the
+device keys on the server first, so a first start waits for them before
+asking for the recovery key ("Startup").
+
 ## Risks and open questions
 
-- **Sliding sync on bridge-heavy homeservers.** A homeserver can advertise
-  `org.matrix.simplified_msc3575` and still behave differently from what
-  `matrix-sdk-ui` expects. Phase 0 tests this before either sync path is
-  built.
-- **Bridge state requests.** mxt sends its own MSC4186 requests and parses
-  the returned state itself, outside the SDK. A homeserver could answer such
-  one-off requests differently from long-lived connections. Phase 0 checks
-  it. If the requests do not return `m.bridge`, network names come from
-  parent spaces only (steps 3 and 4 of the order).
+- **Sync size on large accounts.** Classic sync's first response carries the
+  state of every joined room (about 10 MiB for 363 rooms with lazy-loaded
+  members). Later syncs are incremental.
 - **Client-side unread counts.** The SDK counts unread messages from the
   events it has loaded since the user's read receipt. After a gap (a long
-  offline period, or the small timeline limit of the room list), it paginates
-  back to find the receipt, and until then the count can be too low. The
-  server's `unread_notification_counts()` follow push rules and are zero in
-  muted rooms, so they cannot replace it. Phase 0 measures this.
-- **edtui and CJK text.** Cursor placement with wide characters and input
-  method input are untested. Phase 0 tests them before the composer is built.
-- **edtui differences from vim.** edtui has no count prefixes, and `r` is
-  redo instead of replace. Rebinding through edtui's keybinding API covers
-  what it can. The rest is accepted for the first release.
+  offline period, or a `limited` sync response), it paginates back to find
+  the receipt, and until then the count can be too low. The server's
+  `unread_notification_counts()` follow push rules and are zero in muted
+  rooms, so they cannot replace it. Measured with mxt (phase 0 finding 3).
+- **edtui differences from vim.** edtui has no count prefixes; `r`, `F`, `T`,
+  `;` and `,` are missing, CJK word motions and emoji clusters are wrong (see
+  "Phase 0 findings"). Rebinding through edtui's keybinding API and small
+  workarounds in `mxt-tui` cover what they can; the rest needs edtui patches
+  or is accepted for the first release.
 - **Mentions on the remote network.** mxt relies on bridges turning
   `matrix.to` user links and `m.mentions` into remote mentions. Phase 0
   checks this for the target bridges.
