@@ -724,6 +724,48 @@ fn keys_left_after_a_binding_which_asks_for_confirmation_are_dropped() {
 }
 
 #[test]
+fn a_paste_never_answers_a_question() {
+    let mut app = opened();
+    reset(&mut app, vec![own(remote(1), "one")]);
+    no_timers(keys(&mut app, "dd"));
+    assert_eq!(app.confirmation(), Some("Delete this message? (y/n)"));
+    assert_eq!(paste(&mut app, "y", None), vec![]);
+    assert_eq!(app.confirmation(), None);
+    assert_eq!(no_timers(keys(&mut app, "y")), vec![]);
+}
+
+#[test]
+fn a_paste_never_answers_a_question_that_the_keys_it_ends_ask() {
+    let mut app = app_with(vec![
+        (
+            TableId::Timeline,
+            seq("g"),
+            Binding::single(Action::MessageDelete),
+        ),
+        (TableId::Timeline, seq("gyq"), Binding::single(Action::Nop)),
+    ]);
+    keys(&mut app, "<CR>");
+    reset(&mut app, vec![own(remote(1), "one"), own(remote(2), "two")]);
+    let question = Some("Delete this message? (y/n)");
+    keys(&mut app, "g");
+    let effects = paste(&mut app, "y\ny", None);
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Matrix(_))),
+        "{effects:?}"
+    );
+    assert_eq!(app.confirmation(), question);
+    keys(&mut app, "n");
+    // `gy` pending: `g` asks, and the `y` fed again is dropped.
+    keys(&mut app, "gy");
+    let effects = paste(&mut app, "y", None);
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Matrix(_))),
+        "{effects:?}"
+    );
+    assert_eq!(app.confirmation(), question);
+}
+
+#[test]
 fn deleted_messages_cannot_be_deleted_or_reacted_to() {
     let mut app = opened();
     reset(
