@@ -18,6 +18,7 @@ mod test_dir;
 
 use std::env::VarError;
 use std::ffi::OsString;
+use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -26,6 +27,7 @@ use config::{Config, ConfigError};
 use lock::{DataLock, LockError};
 use paths::Paths;
 use startup::{Invalid, Outcome};
+use tokio::runtime::Runtime;
 use tracing::error;
 
 const USAGE: &str = "usage: mxt [--config PATH]\n       mxt --version";
@@ -33,6 +35,16 @@ const USAGE: &str = "usage: mxt [--config PATH]\n       mxt --version";
 /// How long the runtime's tasks get to stop at exit. Stopping them drops the
 /// last SDK clients, which closes the stores before the data is moved aside.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The stack size of the runtime's worker and blocking threads, which poll
+/// every future, the SDK's included. ruma-html's `Html` tree has no `Drop`
+/// implementation, so dropping a tree recurses once per nesting level, and
+/// matrix-sdk-ui sanitizes every message body, which drops the part below the
+/// sanitizer's maximum depth. A 64 KiB event holds about 21,800 nested
+/// three-byte tags; tokio's default of 2 MiB overflows at about 32,800 levels
+/// in release builds and about 5,600 in debug builds, and a stack overflow
+/// aborts the process. 16 MiB covers debug builds too.
+const THREAD_STACK_SIZE: usize = 16 << 20;
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -130,17 +142,27 @@ fn run(config: Config, paths: &Paths, home: PathBuf) -> ExitCode {
         }
     };
 
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
+    let runtime = match runtime() {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("mxt: cannot start the async runtime: {error}");
             return ExitCode::FAILURE;
         }
     };
-    let outcome = runtime.block_on(startup::run(config, paths, home));
+    // The main thread's stack is the OS default, not `THREAD_STACK_SIZE`, so
+    // it only waits for the startup flow, which a blocking thread of the
+    // runtime polls. Not `spawn`: the terminal UI is not `Send`.
+    let task = {
+        let handle = runtime.handle().clone();
+        let paths = paths.clone();
+        runtime.spawn_blocking(move || handle.block_on(startup::run(config, &paths, home)))
+    };
+    let outcome = match runtime.block_on(task) {
+        Ok(outcome) => outcome,
+        // Nothing cancels the task, so this is a panic, which the hook has
+        // printed already; it unwinds `main` as if the flow ran here.
+        Err(error) => std::panic::resume_unwind(error.into_panic()),
+    };
     runtime.shutdown_timeout(SHUTDOWN_TIMEOUT);
     match outcome {
         Outcome::Quit => ExitCode::SUCCESS,
@@ -163,6 +185,14 @@ fn run(config: Config, paths: &Paths, home: PathBuf) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The runtime everything runs on: multi-threaded, with `THREAD_STACK_SIZE`.
+fn runtime() -> io::Result<Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(THREAD_STACK_SIZE)
+        .build()
 }
 
 /// Moves the data of a session that cannot be used any more aside, so the
@@ -197,5 +227,34 @@ fn set_aside(paths: &Paths, reason: Invalid) {
             error!("{why}; moving the data aside failed: {failure}");
             eprintln!("mxt: {why}, and moving the old data aside failed: {failure}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use matrix_sdk::ruma::html::{HtmlSanitizerMode, RemoveReplyFallback, sanitize_html};
+
+    use super::runtime;
+
+    /// A `formatted_body` at the event size limit, 64 KiB of nested
+    /// `<b>` and then text, sanitized the way
+    /// matrix-sdk-ui sanitizes every message body (`MessageType::sanitize` in
+    /// `Compat` mode). Dropping its tree recurses once per level.
+    fn sanitize_deepest_body() -> String {
+        let body = format!("{}x", "<b>".repeat(64 * 1024 / 3));
+        sanitize_html(&body, HtmlSanitizerMode::Compat, RemoveReplyFallback::No)
+    }
+
+    #[test]
+    fn runtime_threads_sanitize_the_deepest_message_body() {
+        // The sanitizer cuts the tree below its maximum depth, so the text at
+        // the bottom is gone, and drops the deep part on these threads.
+        let runtime = runtime().unwrap();
+        let task = runtime.spawn(async { sanitize_deepest_body() });
+        let sanitized = runtime.block_on(task).unwrap();
+        assert!(sanitized.starts_with("<b>") && !sanitized.contains('x'));
+        let blocking = runtime.spawn_blocking(sanitize_deepest_body);
+        let sanitized = runtime.block_on(blocking).unwrap();
+        assert!(sanitized.starts_with("<b>") && !sanitized.contains('x'));
     }
 }

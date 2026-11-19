@@ -365,15 +365,17 @@ covered by unit tests.
   reply call; edits of sent messages are built with `Room::make_edit_event`
   and sent through the timeline (so they work after the target has left the
   loaded timeline), edits of local echoes use `Timeline::edit`.
-- The send queue: messages, edits and reactions go through the SDK's send
-  queue, fed by one sequential task, so they keep their order without
-  holding up other effects. The SDK disables a room's queue after a failed
+- The send queue: messages, edits, reactions and uploads go through the
+  SDK's send queue, fed by one sequential task, so they keep their order
+  without holding up other effects; a message sent right after `:upload`
+  waits for the upload. The SDK disables a room's queue after a failed
   request; mxt enables it again on every write and whenever the sync state
   becomes synced, so a message that failed for a transient reason goes out
-  when the connection returns. A failed message stays as a local echo with a
-  failed marker until `message.resend` or its deletion. An edit or reaction
-  that the server refuses for good would block the room's queue; mxt aborts
-  it (the timeline drops it) and reports the failure.
+  when the connection returns. A failed message or upload stays as a local
+  echo with a failed marker until `message.resend` or its deletion, and
+  holds back the room's later requests until then. An edit or reaction that
+  the server refuses for good would block the room's queue; mxt aborts it
+  (the timeline drops it) and reports the failure.
 - Reactions: `Timeline::toggle_reaction`. Choosing a reaction the user already
   sent removes it.
 - Redaction: a sent message is redacted with `Room::redact` directly, not
@@ -399,12 +401,13 @@ covered by unit tests.
   user's identity changes.
 - HTML bodies: `formatted_body` is parsed with `ruma::html` into `RichText`.
   `<mx-reply>` fallbacks are dropped, `<del>` becomes strikethrough,
-  `data-mx-spoiler` becomes spoiler style, and `<img data-mx-emoticon>`
-  becomes its alt text.
+  `data-mx-spoiler` becomes spoiler style (mentions and emoticons inside it
+  are hidden too), and `<img data-mx-emoticon>` becomes its alt text.
 - Images: `FetchImage` uses the event's thumbnail source when there is one.
   In encrypted rooms there is often none, and the SDK cannot ask the server to
   scale encrypted media, so the adapter downloads the full file. Files larger
-  than 10 MB are not fetched for previews.
+  than 10 MiB are not fetched for previews; an event that gives no size is
+  fetched, and refused after the download if it is larger.
 - Sync path: phase 0 decided on classic `/sync` for the target homeserver,
   and only that path is implemented (see "Phase 0 findings"). The core
   receives the same `Msg`s either way, so another path could be added in
@@ -695,14 +698,21 @@ list, so mxt does not offer an event-level mention list.
   full-width punctuation, are not part of the URL). Other schemes
   (`mailto:`, `matrix:`) are not offered. The status line shows
   `Opening <url>`, because the link text may differ from its target.
-- `gx` on an attachment downloads it to `files.download_dir` and runs
-  `files.opener` with the file path appended. If a file with the same name
-  exists, the download is saved as `name (1).ext`, `name (2).ext`, and so on.
-  The opener gets the path or URL as one argument and never runs through a
-  shell; mxt does not wait for it, and its output is discarded.
-- `:upload <path>` sends the file as an image or a file message, using the
-  MIME type guessed from the file. A leading `~/` is the home directory;
-  relative paths are relative to the directory mxt was started in.
+- `gx` on an attachment shows `Downloading <name>`, downloads it to
+  `files.download_dir` and runs `files.opener` with the file path appended.
+  The file name comes from the event, made safe (no path separators, control
+  or bidirectional control characters, or leading dots) and kept within 255
+  bytes with its extension. If a file with the same name exists, the
+  download is saved as `name (1).ext`, `name (2).ext`, and so on; an
+  existing file is never overwritten. The opener gets the path or URL as one
+  argument and never runs through a shell; mxt does not wait for it, and its
+  output is discarded.
+- `:upload <path>` sends the file as an image, video, audio or file message
+  by the MIME type guessed from the file (mxt shows video and audio as
+  files). A leading `~/` is the home directory; relative paths are relative
+  to the directory mxt was started in. Before reading the file, mxt refuses
+  anything that is not a regular file and files above the homeserver's
+  upload limit.
 - Image previews use ratatui-image, which detects the terminal's graphics
   protocol (sixel, kitty, iTerm2) and falls back to half blocks. They appear
   only in the message view (`message.view`), which keeps the timeline's width
@@ -1052,9 +1062,14 @@ separate device) and the edtui check program. Counts are from that account.
    `b` treat every non-ASCII character as its own word), `F`/`T`/`;`/`,`, and
    a linewise `p` on the last line (pastes above). `r` is unbound rather than
    redo.
-6. **Mentions on the remote network:** open; needs a bridged channel and a
-   second person. Sending, mentions and mention completion work in mxt
-   (checked in a test room), so this is a check by the account owner.
+6. **Mentions on the remote network:** answered for the Discord bridge. A
+   mention sent from mxt in a bridged guild channel (a `matrix.to` link and
+   `m.mentions`) arrived on Discord as a real mention of that user, with a
+   notification, not as plain `@name` text. The other way, a Discord mention
+   of the account showed the channel with an `@1` badge in mxt. The
+   mentioned Discord user has to be a joined member of the Matrix room for
+   the mention menu to offer them; the bridge adds Discord users when they
+   first speak in the channel.
 7. **Key backup with `AfterDecryptionFailure`:** answered. Recovery imported
    the cross-signing keys and enabled the backup for the new device. In mxt's
    timeline, a bridged DM paged back months before the device existed, and a
@@ -1083,7 +1098,10 @@ asking for the recovery key ("Startup").
   or is accepted for the first release.
 - **Mentions on the remote network.** mxt relies on bridges turning
   `matrix.to` user links and `m.mentions` into remote mentions. Phase 0
-  checks this for the target bridges.
+  confirmed it for the Discord bridge in both directions; other bridges are
+  not yet verified. Mention completion only offers joined members, so a
+  remote user who has not spoken in a bridged channel cannot be mentioned
+  from mxt yet.
 - **Member lists of large rooms.** Mention completion needs the room's member
   list. Bridged rooms with thousands of members load slowly the first time.
   The SDK forgets that a room's members are loaded after every `limited` sync,
@@ -1097,6 +1115,14 @@ asking for the recovery key ("Startup").
   verified.
 - **SDK API churn.** matrix-rust-sdk is pre-1.0, and upgrades can break its
   API. The adapter boundary keeps that work inside `mxt-matrix`.
+- **Deeply nested HTML.** mxt polls every future, the SDK's included, on
+  runtime threads with 16 MiB stacks, because ruma-html drops its HTML tree
+  recursively and the SDK's sanitizer drops the tree of every message body.
+  One event at the size limit holds about 21,800 nested tags: on tokio's
+  default 2 MiB stack that aborts the process in debug builds (about 5,600
+  levels fit) and leaves release builds (about 32,800 levels) little margin
+  once other frames are on the stack. An iterative `Drop` in ruma-html would
+  make this unnecessary.
 
 ## Third-party licenses
 
