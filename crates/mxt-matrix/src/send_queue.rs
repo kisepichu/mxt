@@ -18,7 +18,7 @@ use matrix_sdk::{
             room::{encrypted::Relation, message::MessageType},
         },
     },
-    send_queue::{LocalEcho, LocalEchoContent, RoomSendQueueUpdate, SendQueueUpdate},
+    send_queue::{LocalEcho, LocalEchoContent, RoomSendQueueUpdate, SendHandle, SendQueueUpdate},
     store::SerializableEventContent,
 };
 use matrix_sdk_ui::{Timeline, timeline};
@@ -36,6 +36,7 @@ use tracing::{debug, warn};
 use crate::{
     adapter::{report_brief, report_send_brief},
     error::brief_sdk,
+    timeline::Answer,
 };
 
 /// The report of an edit that the homeserver refused.
@@ -52,39 +53,41 @@ const EDIT_FAILED: &str = "Editing the message failed";
 pub(crate) struct Edits(Arc<Mutex<HashMap<OwnedTransactionId, SendId>>>);
 
 impl Edits {
-    /// Queues `edit` through `timeline` as the core's send `id`; `true` when
-    /// it is recorded, `false` when its request was not found, so the send
-    /// is answered at once. The SDK's `SendHandle` does not expose its
-    /// transaction ID, so the request is found by its content among the send
-    /// queue's updates: `Timeline::send` reports it as a `NewLocalEvent`
-    /// before it returns. The lock is held from queueing the edit until it
-    /// is recorded, so `handle_failures` cannot look up its outcome in
-    /// between.
+    /// Queues `edit` through `timeline` as the core's send `id`:
+    /// `Answer::WhenSent` when it is recorded, `Answer::Now` when its request
+    /// was not found. The SDK's `SendHandle` does not expose its transaction
+    /// ID, so the request is found among the send queue's updates by its
+    /// creation time and its content: `Timeline::send` reports it as a
+    /// `NewLocalEvent` before it returns. The lock is held from queueing the
+    /// edit until it is recorded, so `handle_failures` cannot look up its
+    /// outcome in between.
     pub(crate) async fn send(
         &self,
         timeline: &Timeline,
         edit: AnyMessageLikeEventContent,
         id: SendId,
-    ) -> Result<bool, timeline::Error> {
+    ) -> Result<Answer, timeline::Error> {
         // As the send queue stores it: the SDK serializes it the same way.
         let stored = SerializableEventContent::new(&edit).ok();
         let room = timeline.room();
         let mut edits = self.0.lock().await;
         let mut updates = room.client().send_queue().subscribe();
-        timeline.send(edit).await?;
+        let handle = timeline.send(edit).await?;
         loop {
             match updates.try_recv() {
                 Ok(SendQueueUpdate {
                     room_id,
                     update: RoomSendQueueUpdate::NewLocalEvent(echo),
-                }) if room_id == room.room_id() && is_event(&echo.content, stored.as_ref()) => {
+                }) if room_id == room.room_id()
+                    && is_request(&echo.content, &handle, stored.as_ref()) =>
+                {
                     edits.insert(echo.transaction_id, id);
-                    return Ok(true);
+                    return Ok(Answer::WhenSent);
                 }
                 Ok(_) | Err(TryRecvError::Lagged(_)) => {}
                 Err(TryRecvError::Empty | TryRecvError::Closed) => {
                     debug!("The request of an edit is not among the send queue's updates");
-                    return Ok(false);
+                    return Ok(Answer::Now);
                 }
             }
         }
@@ -96,18 +99,26 @@ impl Edits {
     }
 }
 
-/// Whether `echo` is an event stored as `stored`.
-fn is_event(echo: &LocalEchoContent, stored: Option<&SerializableEventContent>) -> bool {
+/// Whether `echo` is the request of `handle`, an event stored as `stored`:
+/// it was created at the same time and has the same content.
+fn is_request(
+    echo: &LocalEchoContent,
+    handle: &SendHandle,
+    stored: Option<&SerializableEventContent>,
+) -> bool {
     let (
         LocalEchoContent::Event {
-            serialized_event, ..
+            serialized_event,
+            send_handle,
+            ..
         },
         Some(stored),
     ) = (echo, stored)
     else {
         return false;
     };
-    serialized_event.raw().0.json().get() == stored.raw().0.json().get()
+    send_handle.created_at == handle.created_at
+        && serialized_event.raw().0.json().get() == stored.raw().0.json().get()
 }
 
 /// Edits, reactions and redactions are aggregations: the SDK applies them to
@@ -177,9 +188,10 @@ pub(crate) async fn handle_failures(
 /// After missed updates: a request that failed for good meanwhile is handled
 /// as above, since the store keeps its error (a failed upload keeps its
 /// local echo, which shows the failure), and an edit in `edits` that is no
-/// longer queued was sent. `edits` stays locked throughout, so no edit is
-/// recorded between loading the queues and answering the ones that left
-/// them.
+/// longer queued was sent. An edit missing because `local_echoes` left its
+/// room out is taken for sent too, so its draft is not put back. `edits`
+/// stays locked throughout, so no edit is recorded between loading the
+/// queues and answering the ones that left them.
 async fn after_lag(client: &Client, edits: &Edits, to_core: &UnboundedSender<Msg>) {
     let mut recorded = edits.0.lock().await;
     let Some(queues) = local_echoes(client).await else {
@@ -224,7 +236,10 @@ fn report_failure(
 }
 
 /// The requests in the rooms' send queues, by room; `None` when they cannot
-/// be loaded.
+/// be loaded. Not every failure of the store is seen here: matrix-sdk 0.19's
+/// `SendQueue::local_echoes` takes a failure to list the rooms with unsent
+/// requests for no rooms, and leaves out rooms that the client does not
+/// know, so their requests are missing from the result.
 async fn local_echoes(client: &Client) -> Option<BTreeMap<OwnedRoomId, Vec<LocalEcho>>> {
     client
         .send_queue()

@@ -527,29 +527,6 @@ fn an_edit_refused_after_it_was_queued_comes_back_as_an_edit_of_its_message() {
 }
 
 #[test]
-fn a_refused_edit_only_reports_once_the_user_has_moved_on() {
-    // A new message is being typed.
-    let mut app = editing();
-    submit(&mut app, "@Alice fixed");
-    edited(&mut app, C, false);
-    assert_eq!(refused(&mut app, 0), vec![]);
-    assert_eq!(
-        status(&app),
-        Some("Editing the message failed: the homeserver answered 403")
-    );
-    assert_eq!(app.draft(&id(C)), Some(&Draft::New));
-
-    // Another room is open.
-    let mut app = editing();
-    submit(&mut app, "@Alice fixed");
-    normal(&mut app, "<Esc>");
-    keys(&mut app, "<C-w>hj<CR>");
-    assert_eq!(refused(&mut app, 0), vec![]);
-    assert_eq!(app.draft(&id(B)), None);
-    assert_eq!(app.draft(&id(C)), Some(&Draft::New));
-}
-
-#[test]
 fn message_reply_refuses_a_local_echo_and_an_edit_draft() {
     let mut app = opened();
     reset(

@@ -304,14 +304,7 @@ pub(crate) async fn send_message(
                 .make_edit_event(&event_id(&target)?, EditedContent::RoomMessage(content))
                 .await
                 .map_err(|error| timeline_error(sdk::EditError::RoomError(error).into()))?;
-            let recorded = edits.send(timeline, edit, id).await;
-            recorded.map(|recorded| {
-                if recorded {
-                    Answer::WhenSent
-                } else {
-                    Answer::Now
-                }
-            })
+            edits.send(timeline, edit, id).await
         }
         // A local echo is replaced in the send queue.
         OutgoingKind::Edit {

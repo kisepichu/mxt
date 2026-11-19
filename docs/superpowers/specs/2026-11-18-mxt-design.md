@@ -375,7 +375,10 @@ covered by unit tests.
   echo with a failed marker until `message.resend` or its deletion, and
   holds back the room's later requests until then. An edit or reaction that
   the server refuses for good would block the room's queue; mxt aborts it
-  (the timeline drops it) and reports the failure.
+  and reports the failure, and a refused edit of a sent message is answered
+  as its send (see "Error handling"). The SDK takes an aborted reaction off
+  its target, but an aborted edit's text stays on it until the next
+  matrix-sdk-ui release.
 - Reactions: `Timeline::toggle_reaction`. Choosing a reaction the user already
   sent removes it.
 - Redaction: a sent message is redacted with `Room::redact` directly, not
