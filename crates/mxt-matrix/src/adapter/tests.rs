@@ -56,9 +56,9 @@ impl Adapter {
             .client_builder()
             // The access token the mocks expect.
             .logged_in_with_token("1234".to_owned(), me.clone(), owned_device_id!("DEVICE"))
-            // The mock homeserver speaks plain HTTP. Otherwise the HTTP
-            // client loads the system's CA certificates, and the Linux Nix
-            // build sandbox has none.
+            // The mock homeserver speaks plain HTTP. Otherwise building the
+            // HTTP client loads the system's CA certificates, which fails on
+            // hosts without any.
             .on_builder(|builder| builder.disable_ssl_verification())
             .build()
             .await;
