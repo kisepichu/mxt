@@ -3054,6 +3054,7 @@ dependencies = [
  "mxt-core",
  "ratatui",
  "ratatui-image",
+ "rustix 1.1.6",
  "unicode-segmentation",
 ]
 

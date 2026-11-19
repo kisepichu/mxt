@@ -5,10 +5,23 @@ use crate::rooms::RoomSort;
 /// What the message view shows for images (`ui.image_preview`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ImagePreview {
+    /// The image, in the graphics protocol chosen for the terminal.
     #[default]
     Auto,
+    /// The image, in this protocol whatever the terminal is.
+    Forced(ImageProtocol),
     /// Only the file name and size.
     Off,
+}
+
+/// A way to draw images in the terminal, for `ui.image_preview`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageProtocol {
+    Iterm2,
+    Sixel,
+    Kitty,
+    /// Colored half-block characters, which every terminal can show.
+    Halfblocks,
 }
 
 /// The read receipt type the matrix adapter sends (`ui.read_receipts`).

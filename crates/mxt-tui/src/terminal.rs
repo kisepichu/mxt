@@ -69,7 +69,7 @@ pub struct Tui {
 
 impl Tui {
     /// Raw mode, alternate screen, focus change reporting, bracketed paste,
-    /// hidden cursor, and with `image_preview` `auto` the terminal's graphics
+    /// hidden cursor, and unless `image_preview` is `off` the graphics
     /// protocol for images. `opener` is `files.opener`.
     pub fn new(opener: Vec<String>, image_preview: ImagePreview) -> io::Result<Tui> {
         crossterm::terminal::enable_raw_mode()?;
@@ -82,7 +82,7 @@ impl Tui {
             Hide
         )
         .and_then(|()| {
-            // The terminal answers the query on its input, which the
+            // The terminal answers the queries on its input, which the
             // event stream does not read yet. When the answers do not
             // come in time, as in a tmux pane that is not visible,
             // ratatui-image's thread may still take the next input (see
@@ -93,7 +93,8 @@ impl Tui {
             // screen. Without previews there is no query, and
             // ratatui-image does not turn on tmux's `allow-passthrough`.
             let images = match image_preview {
-                ImagePreview::Auto => Some(Images::query()?),
+                ImagePreview::Auto => Some(Images::query(None)?),
+                ImagePreview::Forced(protocol) => Some(Images::query(Some(protocol))?),
                 ImagePreview::Off => None,
             };
             execute!(io::stdout(), Clear(ClearType::All))?;

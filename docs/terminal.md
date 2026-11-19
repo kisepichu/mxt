@@ -20,17 +20,16 @@ set -g allow-passthrough on
 - `focus-events on` lets mxt know when its terminal is in front, so read
   receipts wait until you look ([Focus](#focus-and-read-receipts)).
 - `allow-passthrough on` lets images through in the terminal's graphics
-  protocol ([Images](#images)). With `ui.image_preview = "auto"`, mxt turns
-  it on by itself (ratatui-image runs `tmux set -p allow-passthrough on`)
-  for the active pane of the tmux session's current window, which is mxt's
-  own pane when mxt's window is in front, and the option stays on after mxt
-  exits. Setting it in the configuration makes it independent of which pane
-  is active when mxt starts.
+  protocol ([Images](#images)). Unless `ui.image_preview = "off"`, mxt
+  turns it on by itself (ratatui-image runs `tmux set -p allow-passthrough
+  on`) for the active pane of the tmux session's current window, which is
+  mxt's own pane when mxt's window is in front, and the option stays on
+  after mxt exits. Setting it in the configuration makes it independent of
+  which pane is active when mxt starts.
 
-When mxt runs over SSH from inside a local tmux, the local tmux needs
-`set -g allow-passthrough on` for sixel or kitty images; otherwise mxt falls
-back to half blocks. `set-clipboard on` and `focus-events on` belong in the
-local tmux in that case too.
+When mxt runs over SSH from inside a local tmux, `set-clipboard on` and
+`focus-events on` belong in the local tmux. mxt cannot tell the terminal
+there, so images are usually half blocks ([Images](#images)).
 
 If `<Esc>` feels slow inside tmux, lower tmux's `escape-time`, as for nvim.
 
@@ -80,12 +79,59 @@ go out even while you look at another window.
 ## Images
 
 Images appear only in the message view (`<CR>` on an image), never in the
-timeline. With `ui.image_preview = "auto"` (the default), mxt asks the
-terminal for its graphics protocol at startup and draws images with
+timeline. mxt draws them with
 [ratatui-image](https://github.com/benjajaja/ratatui-image) in sixel, kitty
-or iTerm2 graphics. When the terminal supports none of them, or does not
-answer in time, ratatui-image guesses from the environment and otherwise
-uses half blocks, colored half-block characters.
+or iTerm2 graphics, or in half blocks: colored half-block characters, which
+every terminal shows.
+
+With `ui.image_preview = "auto"` (the default), mxt chooses the protocol
+when it starts:
+
+- Inside WSL, unless mxt runs over SSH (`WSL_DISTRO_NAME` is set, and
+  neither `SSH_CONNECTION` nor `SSH_TTY`), images are half blocks: every
+  graphics protocol breaks in ConPTY, which stands between WSL and the
+  Windows terminal. mxt then asks the terminal nothing.
+- Otherwise mxt asks the terminal for its name (the XTVERSION query, which
+  also works over SSH). Inside tmux, tmux answers that query itself, so
+  mxt asks tmux which terminal its client runs in instead
+  (`#{client_termtype}`, tmux 3.2 or later).
+
+| Terminal | Protocol |
+|---|---|
+| WezTerm, iTerm2 | iTerm2 |
+| kitty, Ghostty | kitty |
+| any other, or no answer | ratatui-image's choice |
+
+ratatui-image asks the terminal which protocols it supports and how large
+a cell is in pixels. When the answers do not come in time, it guesses from
+the environment (iTerm2 hints, the cell size from the window's size in
+pixels), and with neither it uses half blocks. mxt uses the protocol from
+the table only when the cell size is known, as ratatui-image does, since the
+graphics protocols draw an image in pixels that must fill its cells.
+
+- WezTerm gets iTerm2 graphics: ratatui-image's kitty graphics use Unicode
+  placeholders, which WezTerm draws as boxes, and over SSH ratatui-image
+  cannot tell WezTerm by itself.
+- Windows Terminal does not answer the XTVERSION query. ratatui-image
+  finds sixel support in its device attributes.
+- Over SSH from inside a local tmux, the local tmux answers for the
+  terminal, and the remote mxt is not inside tmux, so it cannot ask tmux.
+  ratatui-image's choice there is usually half blocks.
+- In tmux, ratatui-image's query passes through tmux, so it gets no answer
+  while mxt's pane is not shown by any client; ratatui-image then guesses
+  as above. With several clients attached, the cell size comes from
+  whichever terminal answers first, and the terminal's name from the one
+  client tmux reports, so images suit only one of the terminals.
+
+When the choice is wrong for your terminal, `ui.image_preview = "iterm2"`,
+`"sixel"`, `"kitty"` or `"halfblocks"` uses that protocol, also in WSL.
+mxt then skips the name, and ratatui-image's query still runs for the cell
+size; when it gets none, ratatui-image assumes 10 by 20 pixels, and images
+in a graphics protocol may be drawn larger or smaller than their area. In
+WSL, any of these values, `"halfblocks"` too, brings back the query that
+`"auto"` skips there: when ConPTY does not pass the answers on, mxt starts
+2 seconds later, and ratatui-image's reader stays waiting on the terminal,
+where it may take your first key press.
 
 - mxt fetches the event's thumbnail when it has one, and the full file
   otherwise (encrypted rooms usually have no thumbnail). Files larger than
@@ -94,9 +140,6 @@ uses half blocks, colored half-block characters.
 - PNG, JPEG, GIF and WebP are decoded, and scaled down to the terminal.
   Decoding is limited to 128 MiB of memory, so an image with huge
   dimensions shows an error instead.
-- In tmux, the query passes through tmux, so it gets no answer while mxt's
-  pane is not shown by any client, or over SSH from a local tmux without
-  `allow-passthrough`; mxt then guesses as above.
 - With `ui.image_preview = "off"`, the view shows the image's name and size,
   and mxt never queries the terminal or changes tmux's `allow-passthrough`.
 
