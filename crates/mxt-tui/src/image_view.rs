@@ -2,7 +2,7 @@
 //! `image`, scaled down to the terminal, kept for the last few items, and
 //! drawn with ratatui-image in the graphics protocol chosen for the terminal
 //! (see [`crate::image_protocol`]): sixel, kitty, iTerm2, else half blocks,
-//! and inside tmux sixel that tmux stores in the pane.
+//! and inside tmux sixel that tmux stores in the pane or kitty graphics.
 
 use std::io::{self, Cursor, Write as _};
 use std::thread;
@@ -18,7 +18,7 @@ use ratatui::Frame;
 use ratatui::layout::{Rect, Size};
 use ratatui_image::errors::Errors;
 use ratatui_image::picker::cap_parser::QueryStdioOptions;
-use ratatui_image::picker::{Capability, Picker};
+use ratatui_image::picker::{Capability, Picker, ProtocolType};
 use ratatui_image::protocol::sixel::Sixel;
 use ratatui_image::protocol::{Protocol, StatefulProtocol};
 use ratatui_image::{FilterType, FontSize, Image, Resize, StatefulImage};
@@ -81,11 +81,12 @@ enum Prepared {
 impl Images {
     /// Chooses the graphics protocol: `forced`, or for `None` (`auto`) the
     /// one for the terminal's name, and otherwise ratatui-image's; inside
-    /// tmux, sixel for tmux to store where tmux can, else half blocks. Unless
-    /// the choice is half blocks or sixel for tmux, ratatui-image then asks
-    /// the terminal for its graphics protocols and cell size. The terminal
-    /// must be in raw mode, and nothing else may read its input yet: the
-    /// answers arrive there.
+    /// tmux, sixel for tmux to store where tmux can, else kitty graphics for
+    /// kitty and Ghostty, else half blocks. Unless the choice is half
+    /// blocks, sixel for tmux or kitty graphics inside tmux, ratatui-image
+    /// then asks the terminal for its graphics protocols and cell size. The
+    /// terminal must be in raw mode, and nothing else may read its input
+    /// yet: the answers arrive there.
     pub(crate) fn query(forced: Option<ImageProtocol>) -> io::Result<Images> {
         let choice = image_protocol::choose(
             forced,
@@ -109,6 +110,7 @@ impl Images {
                 Encoder::Picker(picker)
             }
             Choice::TmuxSixel { cell } => Encoder::TmuxSixel(cell.into()),
+            Choice::TmuxKitty { cell } => Encoder::Picker(tmux_kitty(cell.into())),
         };
         Ok(Images {
             encoder,
@@ -334,6 +336,30 @@ fn detect() -> io::Result<Picker> {
         release_query_thread()?;
     }
     Ok(picker)
+}
+
+/// ratatui-image's kitty graphics inside tmux, laid out in `cell`, the cell
+/// size of the terminal of tmux's client, without ratatui-image's query.
+/// The image goes to the terminal through tmux's passthrough, which
+/// ratatui-image turns on (`allow-passthrough`), and is drawn with Unicode
+/// placeholders: text with the image's ID in its colour, which tmux places,
+/// crops, scrolls and redraws like any other. The terminal takes the size
+/// of the placement in cells from the image's pixels and its own cell size
+/// (ratatui-image names no rows or columns; kitty's graphics.c), so `cell`
+/// must be that terminal's. Half blocks where ratatui-image does not take
+/// tmux from `TERM` or `TERM_PROGRAM`, as it would not wrap the upload for
+/// passthrough then.
+// The only way to give ratatui-image's picker a cell size without its
+// query; deprecated in favour of the query.
+#[allow(deprecated)]
+fn tmux_kitty(cell: FontSize) -> Picker {
+    let mut picker = Picker::from_fontsize(cell);
+    picker.set_protocol_type(if picker.tmux_detected() {
+        ProtocolType::Kitty
+    } else {
+        ProtocolType::Halfblocks
+    });
+    picker
 }
 
 /// Whether `picker`'s cell size was measured: answered by the terminal, or

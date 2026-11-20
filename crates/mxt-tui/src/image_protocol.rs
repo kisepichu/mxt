@@ -5,11 +5,12 @@
 //! at `WEZTERM_EXECUTABLE`, which SSH does not forward), so it picks kitty
 //! graphics, whose Unicode placeholders WezTerm draws as boxes
 //! (wezterm#7924). Inside tmux, images are sixel that tmux stores in the
-//! pane, when tmux and its client's terminal support it, and else half
-//! blocks: tmux passes every other image to the outer terminal at the outer
-//! cursor, without the pane's offset, and does not track it. Inside WSL
-//! without SSH, images are half blocks: every graphics protocol breaks in
-//! ConPTY.
+//! pane, when tmux and its client's terminal support it; else kitty
+//! graphics for a kitty or Ghostty client, whose Unicode placeholders are
+//! text that tmux places; and else half blocks: tmux passes iTerm2 images,
+//! and sixel it does not store, to the outer terminal at the outer cursor,
+//! without the pane's offset, and does not track them. Inside WSL without
+//! SSH, images are half blocks: every graphics protocol breaks in ConPTY.
 
 use std::env;
 use std::ffi::OsString;
@@ -41,12 +42,16 @@ const RETRY: Duration = Duration::from_millis(10);
 const MAX_DCS: usize = 256;
 /// What [`query_tmux`] asks tmux: its version, whether it was built with
 /// sixel (tmux 3.6 and later say so), the window's cell size in pixels, the
-/// cell size of the client's terminal in pixels, and the features of the
-/// client's terminal. Spaces separate the values, so an empty value, as from
-/// a variable an older tmux does not know, keeps its place.
+/// cell size of the client's terminal in pixels, and the features and the
+/// name of the client's terminal. Spaces separate the values, so an empty
+/// value, as from a variable an older tmux does not know, keeps its place.
+/// The name, which may hold spaces, comes last.
 const TMUX_FORMAT: &str = "#{version} #{sixel_support} #{window_cell_width} \
                            #{window_cell_height} #{client_cell_width} \
-                           #{client_cell_height} #{client_termfeatures}";
+                           #{client_cell_height} #{client_termfeatures} \
+                           #{client_termtype}";
+/// How many values [`TMUX_FORMAT`] has.
+const TMUX_VALUES: usize = 8;
 /// The first tmux version that stores sixel images in the pane.
 const TMUX_SIXEL: (u32, u32) = (3, 4);
 
@@ -66,6 +71,10 @@ pub(crate) enum Choice {
     /// Sixel that tmux stores in the pane, drawn in tmux's cell size
     /// (width, height) in pixels, without asking the terminal anything.
     TmuxSixel { cell: (u16, u16) },
+    /// ratatui-image's kitty graphics inside tmux, in the cell size (width,
+    /// height) in pixels of the terminal of tmux's client, without asking
+    /// the terminal anything.
+    TmuxKitty { cell: (u16, u16) },
 }
 
 /// The environment variables the choice depends on. A variable counts as
@@ -126,16 +135,14 @@ pub(crate) fn choose(
     if env.wsl && !env.ssh {
         return Choice::Halfblocks;
     }
-    // tmux passes ratatui-image's iTerm2 and kitty images, and sixel it does
-    // not store, to the outer terminal at the outer cursor, which is not
-    // where the image belongs in the pane, and it neither crops nor clears
-    // them; half blocks are text, which tmux handles.
+    // Inside tmux, sixel that tmux stores, else kitty graphics, whose Unicode
+    // placeholders are text that tmux places like any other. tmux passes
+    // ratatui-image's iTerm2 images, and sixel it does not store, to the
+    // outer terminal at the outer cursor, which is not where the image
+    // belongs in the pane, and it neither crops nor clears them; half blocks
+    // are text, which tmux handles.
     if env.tmux {
-        return tmux()
-            .filter(Tmux::client_draws_sixel)
-            .as_ref()
-            .and_then(Tmux::sixel_cell)
-            .map_or(Choice::Halfblocks, |cell| Choice::TmuxSixel { cell });
+        return tmux().as_ref().map_or(Choice::Halfblocks, Tmux::choice);
     }
     name()
         .as_deref()
@@ -214,35 +221,59 @@ pub(crate) struct Tmux {
     /// `#{window_cell_width}` and `#{window_cell_height}`, nonzero: the cell
     /// size in pixels with which tmux turns an image's pixels into cells.
     cell: Option<(u16, u16)>,
-    /// `#{client_cell_width}` and `#{client_cell_height}` are nonzero: tmux
-    /// knows the cell size in pixels of the terminal of the client it takes
-    /// when several are attached.
-    client_cell: bool,
+    /// `#{client_cell_width}` and `#{client_cell_height}`, nonzero: the cell
+    /// size in pixels of the terminal of the client tmux takes when several
+    /// are attached.
+    client_cell: Option<(u16, u16)>,
     /// `#{client_termfeatures}` has `sixel`: the terminal of that client
     /// draws sixel.
     client_sixel: bool,
+    /// `#{client_termtype}`: that terminal's answer to the XTVERSION query
+    /// that tmux sends it, such as `kitty(0.50.0)`; empty when tmux does not
+    /// know it.
+    client_name: String,
 }
 
 impl Tmux {
     /// `answer`, [`TMUX_FORMAT`] expanded by tmux. A value that cannot be
     /// read counts as missing.
     fn parse(answer: &str) -> Tmux {
-        let mut values = answer.trim_end_matches('\n').split(' ');
+        let mut values = answer.trim_end_matches('\n').splitn(TMUX_VALUES, ' ');
         let mut next = || values.next().unwrap_or_default();
-        let nonzero = |value: &str| value.parse::<u32>().is_ok_and(|value| value > 0);
+        let size = |width: &str, height: &str| -> Option<(u16, u16)> {
+            let width = width.parse().ok().filter(|&width| width > 0);
+            let height = height.parse().ok().filter(|&height| height > 0);
+            width.zip(height)
+        };
         let version = tmux_version(next());
         let sixel_support = next() == "1";
-        let width = next().parse().ok().filter(|&width| width > 0);
-        let height = next().parse().ok().filter(|&height| height > 0);
-        let client_width = next();
-        let client_height = next();
+        let cell = size(next(), next());
+        let client_cell = size(next(), next());
         let client_sixel = next().split(',').any(|feature| feature == "sixel");
         Tmux {
             version,
             sixel_support,
-            cell: width.zip(height),
-            client_cell: nonzero(client_width) && nonzero(client_height),
+            cell,
+            client_cell,
             client_sixel,
+            client_name: next().to_owned(),
+        }
+    }
+
+    /// The choice with `auto`: sixel that tmux stores where tmux draws it
+    /// for its client; else ratatui-image's kitty graphics where the
+    /// client's terminal is kitty or Ghostty, by the names mxt maps outside
+    /// tmux, and tmux knows its cell size; and else half blocks.
+    fn choice(&self) -> Choice {
+        if self.client_draws_sixel()
+            && let Some(cell) = self.sixel_cell()
+        {
+            return Choice::TmuxSixel { cell };
+        }
+        let kitty = protocol_for(&self.client_name) == Some(ProtocolType::Kitty);
+        match self.client_cell {
+            Some(cell) if kitty => Choice::TmuxKitty { cell },
+            _ => Choice::Halfblocks,
         }
     }
 
@@ -251,7 +282,7 @@ impl Tmux {
     /// feature and tmux knows its cell size in pixels
     /// (`tty_cmd_sixelimage` in tmux's tty.c).
     fn client_draws_sixel(&self) -> bool {
-        self.client_sixel && self.client_cell
+        self.client_sixel && self.client_cell.is_some()
     }
 
     /// tmux's cell size when tmux stores sixel images in the pane: from
@@ -697,6 +728,10 @@ mod tests {
     /// The same terminal without sixel.
     const WITHOUT_SIXEL: &str =
         "256,bpaste,clipboard,cstyle,extkeys,focus,margins,mouse,rectfill,RGB,sync,title";
+    /// Terminal names as tmux keeps them in `#{client_termtype}` (the
+    /// XTVERSION texts above).
+    const WEZTERM_NAME: &str = "WezTerm 20240203-110809-5046fc22";
+    const GHOSTTY_NAME: &str = "ghostty 1.4.1-main+2fc8d02c2";
 
     /// What [`choose`] asked for.
     #[derive(Debug, Default, PartialEq)]
@@ -762,18 +797,60 @@ mod tests {
     }
 
     #[test]
-    fn auto_inside_tmux_uses_the_sixel_tmux_stores_or_else_half_blocks() {
+    fn auto_inside_tmux_uses_the_sixel_tmux_stores_else_kitty_or_half_blocks() {
         let tmux = env(&[IN_TMUX]);
         let stored = &Choice::TmuxSixel { cell: (9, 18) };
+        // In the cell size of the client's terminal, which draws it.
+        let kitty = &Choice::TmuxKitty { cell: (10, 20) };
         let half = &Choice::Halfblocks;
         for (answer, expected) in [
             (format!("3.6a 1 9 18 10 20 {WITH_SIXEL}\n"), stored),
             (format!("3.4 1 9 18 10 20 {WITH_SIXEL}"), stored),
             (format!("next-3.7 1 9 18 10 20 {WITH_SIXEL}"), stored),
-            // The client's terminal does not draw sixel, or no client is
-            // attached.
+            // Sixel that tmux stores wins over the terminal's name.
+            (
+                format!("3.6a 1 9 18 10 20 {WITH_SIXEL} kitty(0.50.0)"),
+                stored,
+            ),
+            (
+                format!("3.6a 1 9 18 10 20 {WITH_SIXEL} {WEZTERM_NAME}"),
+                stored,
+            ),
+            // Otherwise kitty and Ghostty get kitty graphics, whichever
+            // tmux, as long as tmux knows their cell size.
+            (
+                format!("3.6a 1 9 18 10 20 {WITHOUT_SIXEL} kitty(0.50.0)"),
+                kitty,
+            ),
+            (
+                format!("3.6a 1 9 18 10 20 {WITHOUT_SIXEL} {GHOSTTY_NAME}"),
+                kitty,
+            ),
+            (
+                format!("3.6a 0 9 18 10 20 {WITH_SIXEL} kitty(0.50.0)"),
+                kitty,
+            ),
+            (
+                format!("3.3a  9 18 10 20 {WITHOUT_SIXEL} kitty(0.50.0)"),
+                kitty,
+            ),
+            (
+                format!("3.6a 1 9 18 0 0 {WITHOUT_SIXEL} kitty(0.50.0)"),
+                half,
+            ),
+            // Other terminals without sixel, or without a name, get half
+            // blocks, WezTerm and iTerm2 too.
+            (
+                format!("3.6a 1 9 18 10 20 {WITHOUT_SIXEL} {WEZTERM_NAME}"),
+                half,
+            ),
+            (
+                format!("3.6a 1 9 18 10 20 {WITHOUT_SIXEL} iTerm2 3.7.7"),
+                half,
+            ),
             (format!("3.6a 1 9 18 10 20 {WITHOUT_SIXEL}"), half),
-            ("3.6a 1 9 18   \n".to_owned(), half),
+            // No client is attached.
+            ("3.6a 1 9 18     \n".to_owned(), half),
             // tmux does not know the size of the terminal's cells in
             // pixels, so it would show a placeholder.
             (format!("3.6a 1 9 18 0 0 {WITH_SIXEL}"), half),
@@ -785,12 +862,7 @@ mod tests {
             (format!("3.3a 1 9 18 10 20 {WITH_SIXEL}"), half),
             (format!("openbsd-7.4 1 9 18 10 20 {WITH_SIXEL}"), half),
         ] {
-            let (got, asked) = choice(
-                None,
-                &tmux,
-                Some("WezTerm 20240203-110809-5046fc22"),
-                Some(&answer),
-            );
+            let (got, asked) = choice(None, &tmux, Some(WEZTERM_NAME), Some(&answer));
             assert_eq!((&got, asked), (expected, TMUX_ANSWER), "{answer}");
         }
         // tmux cannot be asked.
@@ -837,14 +909,16 @@ mod tests {
 
     #[test]
     fn tmux_answers_are_read_by_position() {
+        // The terminal's name, last, keeps its spaces.
         assert_eq!(
-            Tmux::parse(&format!("3.6a 1 9 18 10 20 {WITH_SIXEL}\n")),
+            Tmux::parse(&format!("3.6a 1 9 18 10 20 {WITH_SIXEL} {GHOSTTY_NAME}\n")),
             Tmux {
                 version: Some((3, 6)),
                 sixel_support: true,
                 cell: Some((9, 18)),
-                client_cell: true,
+                client_cell: Some((10, 20)),
                 client_sixel: true,
+                client_name: GHOSTTY_NAME.to_owned(),
             }
         );
         // tmux 3.3a does not know `sixel_support`.
@@ -853,7 +927,7 @@ mod tests {
             Tmux {
                 version: Some((3, 3)),
                 cell: Some((9, 18)),
-                client_cell: true,
+                client_cell: Some((10, 20)),
                 client_sixel: true,
                 ..Tmux::default()
             }

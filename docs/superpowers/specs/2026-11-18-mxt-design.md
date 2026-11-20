@@ -838,22 +838,27 @@ list, so mxt does not offer an event-level mention list.
     ratatui-image notes), so ratatui-image's query would wait for its
     timeout and leave its thread blocked on stdin, taking the first key.
   - `auto` inside tmux (`TMUX` set): sixel that tmux stores in the pane,
-    or else half blocks, and no query of the terminal. The tui adapter asks
-    tmux once, `tmux display -p '#{version} #{sixel_support}
-    #{window_cell_width} #{window_cell_height} #{client_cell_width}
-    #{client_cell_height} #{client_termfeatures}'`, read by position (a
-    variable an older tmux does not know expands to nothing). tmux stores
-    sixel when its version is 3.4 or later (or `next-3.4` and later) and
-    `#{sixel_support}` is `1`, which tmux reports from 3.6; tmux draws sixel
-    for its client when `#{client_termfeatures}` has `sixel` and
-    `#{client_cell_width}` and `#{client_cell_height}` are not 0, and shows
-    a placeholder otherwise (tmux's tty.c). Without all of these, or when
-    tmux cannot be asked or read, images are half blocks: ratatui-image
-    wraps its iTerm2 and kitty images, and sixel, in tmux passthrough,
-    which tmux writes to the outer terminal at the outer cursor, without
-    the pane's offset, and does not track, so in mxt 0.1.1 they appeared
-    over the view's text and left pieces at the bottom after the view
-    closed.
+    else kitty graphics for a kitty or Ghostty client, or else half blocks,
+    and no query of the terminal. The tui adapter asks tmux once,
+    `tmux display -p '#{version} #{sixel_support} #{window_cell_width}
+    #{window_cell_height} #{client_cell_width} #{client_cell_height}
+    #{client_termfeatures} #{client_termtype}'`, read by position (a
+    variable an older tmux does not know expands to nothing; the terminal's
+    name, which may hold spaces, comes last). tmux stores sixel when its
+    version is 3.4 or later (or `next-3.4` and later) and `#{sixel_support}`
+    is `1`, which tmux reports from 3.6; tmux draws sixel for its client
+    when `#{client_termfeatures}` has `sixel` and `#{client_cell_width}` and
+    `#{client_cell_height}` are not 0, and shows a placeholder otherwise
+    (tmux's tty.c). Otherwise a client whose terminal's name
+    (`#{client_termtype}`, its answer to the XTVERSION query that tmux
+    sends it) is kitty or Ghostty by the mapping used outside tmux, and
+    whose cell size tmux knows, gets ratatui-image's kitty graphics, as in
+    mxt 0.1.1. Any other client, WezTerm and iTerm2 without sixel too, and
+    a tmux that cannot be asked or read, get half blocks: ratatui-image
+    wraps its iTerm2 images, and sixel, in tmux passthrough, which tmux
+    writes to the outer terminal at the outer cursor, without the pane's
+    offset, and does not track, so in mxt 0.1.1 they appeared over the
+    view's text and left pieces at the bottom after the view closed.
   - tmux's sixel: ratatui-image's picker takes tmux from `TERM` or
     `TERM_PROGRAM`, has no setter, and wraps its sixel for passthrough, so
     the tui adapter encodes the sixel itself from ratatui-image's public
@@ -879,7 +884,20 @@ list, so mxt does not offer an event-level mention list.
     draws again over that text on its next redraw. So when the view of an
     image closes or another view replaces it, the next frame starts with a
     cleared screen.
-  - Otherwise, with `auto`, the terminal's name decides where mxt knows
+  - kitty graphics inside tmux: ratatui-image sends the image through
+    tmux's passthrough, which it turns on (`allow-passthrough`), and draws
+    it with Unicode placeholders, text with the image's ID in its colour,
+    which tmux places, crops, scrolls and redraws like any other text. The
+    terminal takes the placement's size in cells from the image's pixels
+    and its own cell size (ratatui-image names no rows or columns; kitty's
+    graphics.c), so the tui adapter makes the picker with the client's
+    `#{client_cell_*}` and without ratatui-image's query
+    (`Picker::from_fontsize`, deprecated in favour of the query but the only
+    way to give the picker a cell size). Where ratatui-image does not take
+    tmux from `TERM` or `TERM_PROGRAM`, it would not wrap the upload for
+    passthrough, so images are half blocks there. Not yet tried in a real
+    kitty or Ghostty inside tmux.
+  - Elsewhere, with `auto`, the terminal's name decides where mxt knows
     better than ratatui-image: WezTerm and iTerm2 get iTerm2, kitty and
     Ghostty kitty. Over SSH ratatui-image cannot tell WezTerm (it reads
     only `WEZTERM_EXECUTABLE`, which SSH does not forward), picks kitty,
@@ -912,14 +930,18 @@ list, so mxt does not offer an event-level mention list.
     its thread stays blocked on stdin and takes the first key. Inside tmux,
     `"sixel"` is tmux's sixel wherever tmux stores sixel, whatever
     `#{client_termfeatures}` says, and without ratatui-image's query;
-    elsewhere in tmux it, `"iterm2"` and `"kitty"` go through passthrough
-    and may be misplaced, as the user documentation says.
+    elsewhere in tmux it and `"iterm2"` go through passthrough and may be
+    misplaced, as the user documentation says. `"kitty"` inside tmux is
+    ratatui-image's kitty graphics in the cell size from its query.
   - `"off"` shows only the file name and size in the view, and mxt then
     never queries the terminal for its graphics protocol.
-  - Under tmux with several clients attached, `#{client_termfeatures}` and
-    `#{client_cell_*}` are those of the client tmux takes for the session,
-    and tmux draws a sixel image only for clients whose terminal draws
-    sixel, a text placeholder for the others. tmux's cell size is that of
+  - Under tmux with several clients attached, `#{client_termfeatures}`,
+    `#{client_cell_*}` and `#{client_termtype}` are those of the client
+    tmux takes for the session, and tmux draws a sixel image only for
+    clients whose terminal draws sixel, a text placeholder for the others.
+    Kitty graphics reach every client that shows the pane, in the cell size
+    of that one client; other terminals draw the placeholder characters as
+    they draw characters they do not know. tmux's cell size is that of
     the client that sets the window's size: with tmux's default
     `window-size latest`, the client that attached or typed last (with
     `largest` or `smallest`, the largest cells among the clients). When a

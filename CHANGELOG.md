@@ -12,8 +12,11 @@ marked **Breaking:**.
 
 - Inside tmux, with `ui.image_preview = "auto"`, images are sixel that tmux
   itself places in the pane when tmux (3.6 or later, built with sixel) and
-  the terminal support it, and half blocks otherwise. `"sixel"` inside tmux
-  goes to tmux the same way wherever tmux supports it.
+  the terminal support it. Otherwise kitty and Ghostty keep kitty graphics,
+  which reach the terminal through tmux's `allow-passthrough`, and other
+  terminals, WezTerm and iTerm2 too, get half blocks instead of iTerm2
+  images, which tmux could not place. `"sixel"` inside tmux goes to tmux
+  the same way wherever tmux supports it.
 
 ### Fixed
 
