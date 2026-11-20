@@ -151,7 +151,7 @@ const _: () = {
 /// The tables that share the movement and search defaults.
 const LISTS: &[TableId] = &[TableId::RoomList, TableId::Timeline];
 
-/// `]u` and `[u`: the next or previous room with a badge.
+/// `]u` and `[u`: the next or previous unread room.
 const UNREAD_NEXT: Action = Action::RoomOpen(RoomTarget::Pick {
     filter: RoomFilter::Unread,
     pick: Pick::Next,

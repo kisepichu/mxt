@@ -23,6 +23,8 @@ marked **Breaking:**.
 
 - The room list no longer labels rooms set to notify only for mentions and
   keywords `Mentions only`; muted rooms keep `Muted`.
+- With the mention menu open, `<Down>` and `<Up>` select the next and
+  previous candidate instead of moving the editor's cursor.
 - `<Esc>` in the composer's normal mode runs `composer.leave`: it also ends
   a reply or an edit without text, so a reply started by mistake ends with
   `<Esc>`. Any text stays with its reply or edit. Binding `<Esc>` in

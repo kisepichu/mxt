@@ -205,9 +205,8 @@ Bind the key that arrives.
 
 ### Examples
 
-`]u` and `[u` open the next and previous room with unread messages by
-default. Open the next room that notifies you with `]n`, and the previous one
-with `[n`:
+`]u` and `[u` open the next and previous unread room by default. Open the
+next room that notifies you with `]n`, and the previous one with `[n`:
 
 ```toml
 [account]

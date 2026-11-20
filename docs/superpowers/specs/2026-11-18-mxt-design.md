@@ -728,7 +728,7 @@ instead, and it never takes more than half of the width.
 | `composer.insert` | `<CR>` | `composer.send` | |
 | `composer.insert` | `<C-j>` | `composer.newline` | |
 | `composer.insert`, `composer.normal` | `<C-x><C-e>` | `composer.external_editor` | shell edit-command-line |
-| `composer.normal` | `<Esc>` | `composer.leave`; text and its draft are kept | |
+| `composer.normal` | `<Esc>` | `composer.leave`: back to the timeline; a reply or an edit without text ends | |
 | `composer.normal` | `<C-c>` | `composer.cancel` | |
 | `composer.completion` | `<C-n>` / `<C-p>` | `completion.next` / `completion.prev` | completion menu |
 | `composer.completion` | `<Down>` / `<Up>` | `completion.next` / `completion.prev` | completion menu |
@@ -758,7 +758,7 @@ The emoji picker lists, for an empty query, the user's own reactions on the
 message first, then the most common reactions, then every other emoji; a
 query is matched against shortcodes and names.
 
-`]u` and `[u` open the next and previous room with a badge, wrapping around
+`]u` and `[u` open the next and previous unread room, wrapping around
 (`filter = "unread"`). `room.mark_read` has no default binding; the
 configuration example binds it to `<leader>x` together with opening the
 next unread room.

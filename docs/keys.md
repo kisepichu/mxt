@@ -81,7 +81,7 @@ visual mode.
 | `<C-w>l`, `<C-w><C-l>` | `focus.timeline` | focus the timeline |
 | `<C-w>j`, `<C-w><C-j>` | `composer.focus` with `mode = "keep"` | focus the composer below the timeline, in the mode it was left in |
 | `<C-w>k`, `<C-w><C-k>` | `focus.timeline` | focus the timeline above the composer |
-| `]u` / `[u` | `room.open` with `filter = "unread"` and `pick = "next"` / `"prev"` | open the next or previous room with a badge, wrapping around |
+| `]u` / `[u` | `room.open` with `filter = "unread"` and `pick = "next"` / `"prev"` | open the next or previous unread room, wrapping around |
 
 As in nvim, ctrl can stay held for the key after `<C-w>`.
 
