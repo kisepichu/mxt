@@ -3,6 +3,7 @@
 
 use std::fmt;
 
+use crate::emoji::Emoji;
 use crate::rooms::{Pick, RoomFilter, RoomTarget};
 
 /// A neutral argument value; the configuration loader converts TOML values into it.
@@ -22,6 +23,18 @@ pub enum FocusMode {
     Keep,
 }
 
+impl FocusMode {
+    pub const ALL: [FocusMode; 2] = [FocusMode::Insert, FocusMode::Keep];
+
+    /// The value of the `mode` argument: "insert", "keep".
+    pub fn config_name(self) -> &'static str {
+        match self {
+            FocusMode::Insert => "insert",
+            FocusMode::Keep => "keep",
+        }
+    }
+}
+
 /// An action with checked arguments. [`Action::name`] is its registry name,
 /// `<target>.<verb>`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,7 +48,8 @@ pub enum Action {
     MessageEdit,
     MessageDelete,
     MessageYank,
-    MessageReact,
+    /// With an emoji, toggles that reaction; without, the emoji picker.
+    MessageReact(Option<Emoji>),
     MessageOpen,
     MessageGotoReply,
     MessageResend,
@@ -70,6 +84,10 @@ pub enum Action {
     SearchNext,
     SearchPrev,
     ViewClose,
+    /// `:help`: the command list.
+    HelpCommands,
+    /// `:map`: the key bindings of each table.
+    HelpKeymap,
     SidebarToggle,
     FocusRoomList,
     FocusTimeline,
@@ -92,6 +110,8 @@ impl Action {
     /// - `picker.rooms`: `filter`, as for `room.open`
     /// - `composer.focus`: `mode` (`insert` or `keep`; default `insert`)
     /// - `file.upload`: `path` (non-empty), required
+    /// - `message.react`: `emoji` (an emoji or a shortcode, see
+    ///   [`Emoji::parse`])
     ///
     /// Argument names are unique in a configuration table; if one repeats
     /// anyway, its last value counts.
@@ -106,14 +126,13 @@ impl Action {
             }
             "composer.focus" => {
                 let args = Args::new("composer.focus", &["mode"], args)?;
-                let mode = args.choice(
-                    "mode",
-                    &["insert", "keep"],
-                    [FocusMode::Insert, FocusMode::Keep],
-                )?;
+                let mode = args.choice("mode", &FocusMode::ALL, FocusMode::config_name)?;
                 return Ok(Action::ComposerFocus(mode.unwrap_or_default()));
             }
             "file.upload" => return file_upload(Args::new("file.upload", &["path"], args)?),
+            "message.react" => {
+                return message_react(Args::new("message.react", &["emoji"], args)?);
+            }
             "room.open_selected" => Action::RoomOpenSelected,
             "room.mark_read" => Action::RoomMarkRead,
             "room.mute" => Action::RoomMute,
@@ -122,7 +141,6 @@ impl Action {
             "message.edit" => Action::MessageEdit,
             "message.delete" => Action::MessageDelete,
             "message.yank" => Action::MessageYank,
-            "message.react" => Action::MessageReact,
             "message.open" => Action::MessageOpen,
             "message.goto_reply" => Action::MessageGotoReply,
             "message.resend" => Action::MessageResend,
@@ -154,6 +172,8 @@ impl Action {
             "search.next" => Action::SearchNext,
             "search.prev" => Action::SearchPrev,
             "view.close" => Action::ViewClose,
+            "help.commands" => Action::HelpCommands,
+            "help.keymap" => Action::HelpKeymap,
             "sidebar.toggle" => Action::SidebarToggle,
             "focus.room_list" => Action::FocusRoomList,
             "focus.timeline" => Action::FocusTimeline,
@@ -182,7 +202,7 @@ impl Action {
             Action::MessageEdit => "message.edit",
             Action::MessageDelete => "message.delete",
             Action::MessageYank => "message.yank",
-            Action::MessageReact => "message.react",
+            Action::MessageReact(_) => "message.react",
             Action::MessageOpen => "message.open",
             Action::MessageGotoReply => "message.goto_reply",
             Action::MessageResend => "message.resend",
@@ -216,6 +236,8 @@ impl Action {
             Action::SearchNext => "search.next",
             Action::SearchPrev => "search.prev",
             Action::ViewClose => "view.close",
+            Action::HelpCommands => "help.commands",
+            Action::HelpKeymap => "help.keymap",
             Action::SidebarToggle => "sidebar.toggle",
             Action::FocusRoomList => "focus.room_list",
             Action::FocusTimeline => "focus.timeline",
@@ -223,6 +245,33 @@ impl Action {
             Action::AccountRecover => "account.recover",
             Action::AppQuit => "app.quit",
             Action::Nop => "nop",
+        }
+    }
+
+    /// The arguments [`Action::from_spec`] builds this action from, as
+    /// names and string values: those at their default are left out, the
+    /// others follow in the order `filter`, `pick`, `query`, `mode`, `path`,
+    /// `emoji`. An emoji is the emoji itself, not a shortcode.
+    pub fn arguments(&self) -> Vec<(&'static str, &str)> {
+        let filter = |filter: RoomFilter| {
+            (filter != RoomFilter::default()).then(|| ("filter", filter.config_name()))
+        };
+        match self {
+            Action::RoomOpen(RoomTarget::Pick { filter: f, pick }) => {
+                let pick = (*pick != Pick::default()).then(|| ("pick", pick.config_name()));
+                filter(*f).into_iter().chain(pick).collect()
+            }
+            Action::RoomOpen(RoomTarget::Fuzzy { filter: f, query }) => filter(*f)
+                .into_iter()
+                .chain([("query", query.as_str())])
+                .collect(),
+            Action::PickerRooms(f) => filter(*f).into_iter().collect(),
+            Action::ComposerFocus(mode) if *mode != FocusMode::default() => {
+                vec![("mode", mode.config_name())]
+            }
+            Action::FileUpload { path } => vec![("path", path.as_str())],
+            Action::MessageReact(Some(emoji)) => vec![("emoji", emoji.as_str())],
+            _ => Vec::new(),
         }
     }
 
@@ -253,11 +302,7 @@ fn room_open(args: Args<'_>) -> Result<Action, ActionError> {
             query: query.to_owned(),
         },
         None => {
-            let pick = args.choice(
-                "pick",
-                &["first", "next", "prev"],
-                [Pick::First, Pick::Next, Pick::Prev],
-            )?;
+            let pick = args.choice("pick", &Pick::ALL, Pick::config_name)?;
             RoomTarget::Pick {
                 filter,
                 pick: pick.unwrap_or_default(),
@@ -277,6 +322,21 @@ fn file_upload(args: Args<'_>) -> Result<Action, ActionError> {
     Ok(Action::FileUpload {
         path: path.to_owned(),
     })
+}
+
+/// An unknown or empty `emoji` is rejected, so a binding never reacts with
+/// something no client shows as an emoji.
+fn message_react(args: Args<'_>) -> Result<Action, ActionError> {
+    let Some(value) = args.string("emoji")? else {
+        return Ok(Action::MessageReact(None));
+    };
+    match Emoji::parse(value) {
+        Some(emoji) => Ok(Action::MessageReact(Some(emoji))),
+        None => Err(ActionError::UnknownEmoji {
+            action: args.action,
+            value: value.to_owned(),
+        }),
+    }
 }
 
 /// The arguments of one action, checked against the names it accepts.
@@ -327,45 +387,35 @@ impl<'a> Args<'a> {
                 action: self.action,
                 arg,
                 value: String::new(),
-                allowed: &[],
+                allowed: Vec::new(),
             }),
             value => Ok(value),
         }
     }
 
-    /// A string argument with a fixed set of values: `names[i]` stands for
-    /// `values[i]`.
-    fn choice<T: Copy, const N: usize>(
+    /// A string argument with a fixed set of values, each named by `name`.
+    fn choice<T: Copy>(
         &self,
         arg: &'static str,
-        names: &'static [&'static str; N],
-        values: [T; N],
+        values: &[T],
+        name: fn(T) -> &'static str,
     ) -> Result<Option<T>, ActionError> {
         let Some(value) = self.string(arg)? else {
             return Ok(None);
         };
-        match names.iter().position(|name| *name == value) {
-            Some(index) => Ok(Some(values[index])),
+        match values.iter().copied().find(|known| name(*known) == value) {
+            Some(known) => Ok(Some(known)),
             None => Err(ActionError::InvalidValue {
                 action: self.action,
                 arg,
                 value: value.to_owned(),
-                allowed: names,
+                allowed: values.iter().copied().map(name).collect(),
             }),
         }
     }
 
     fn filter(&self) -> Result<RoomFilter, ActionError> {
-        let filter = self.choice(
-            "filter",
-            &["all", "unread", "notify", "mentions"],
-            [
-                RoomFilter::All,
-                RoomFilter::Unread,
-                RoomFilter::Notify,
-                RoomFilter::Mentions,
-            ],
-        )?;
+        let filter = self.choice("filter", &RoomFilter::ALL, RoomFilter::config_name)?;
         Ok(filter.unwrap_or_default())
     }
 }
@@ -390,7 +440,7 @@ pub enum ActionError {
         action: &'static str,
         arg: &'static str,
         value: String,
-        allowed: &'static [&'static str],
+        allowed: Vec<&'static str>,
     },
     Conflict {
         action: &'static str,
@@ -399,6 +449,12 @@ pub enum ActionError {
     MissingArgument {
         action: &'static str,
         arg: &'static str,
+    },
+    /// An `emoji` that is neither an emoji nor a shortcode, the empty one
+    /// included.
+    UnknownEmoji {
+        action: &'static str,
+        value: String,
     },
 }
 
@@ -440,6 +496,11 @@ impl fmt::Display for ActionError {
             ActionError::MissingArgument { action, arg } => {
                 write!(f, "{action}: \"{arg}\" is required")
             }
+            ActionError::UnknownEmoji { action, value } => write!(
+                f,
+                "{action}: unknown emoji \"{value}\"; expected an emoji or a shortcode, \
+                 such as \"👍\", \"thumbsup\" or \":+1:\""
+            ),
         }
     }
 }
@@ -530,6 +591,8 @@ mod tests {
             "search.next",
             "search.prev",
             "view.close",
+            "help.commands",
+            "help.keymap",
             "sidebar.toggle",
             "focus.room_list",
             "focus.timeline",
@@ -543,6 +606,59 @@ mod tests {
         }
         let upload = Action::from_spec("file.upload", &[s("path", "/tmp/a b.png")]).unwrap();
         assert_eq!(upload.name(), "file.upload");
+    }
+
+    /// `arguments()` as the configuration would give them to `from_spec`.
+    fn spec(action: &Action) -> Vec<(String, ArgValue)> {
+        action
+            .arguments()
+            .into_iter()
+            .map(|(name, value)| s(name, value))
+            .collect()
+    }
+
+    #[test]
+    fn arguments_leave_defaults_out_and_build_the_same_action() {
+        let cases = [
+            (Action::from_spec("room.open", &[]), vec![]),
+            (
+                Action::from_spec("room.open", &[s("pick", "prev"), s("filter", "notify")]),
+                vec![("filter", "notify"), ("pick", "prev")],
+            ),
+            (
+                Action::from_spec("room.open", &[s("query", "a \"b\""), s("filter", "all")]),
+                vec![("query", "a \"b\"")],
+            ),
+            (
+                Action::from_spec("picker.rooms", &[s("filter", "all")]),
+                vec![],
+            ),
+            (
+                Action::from_spec("composer.focus", &[s("mode", "insert")]),
+                vec![],
+            ),
+            (
+                Action::from_spec("composer.focus", &[s("mode", "keep")]),
+                vec![("mode", "keep")],
+            ),
+            (
+                Action::from_spec("file.upload", &[s("path", "/tmp/a b.png")]),
+                vec![("path", "/tmp/a b.png")],
+            ),
+            (Action::from_spec("message.react", &[]), vec![]),
+            (
+                Action::from_spec("message.react", &[s("emoji", "thumbsup")]),
+                vec![("emoji", "👍")],
+            ),
+        ];
+        for (action, arguments) in cases {
+            let action = action.unwrap();
+            assert_eq!(action.arguments(), arguments, "{action:?}");
+            assert_eq!(
+                Action::from_spec(action.name(), &spec(&action)),
+                Ok(action.clone())
+            );
+        }
     }
 
     #[test]
@@ -604,14 +720,12 @@ mod tests {
                 expected: "string"
             })
         );
-        assert!(matches!(
-            Action::from_spec("room.open", &[s("filter", "unreads")]),
-            Err(ActionError::InvalidValue {
-                action: "room.open",
-                arg: "filter",
-                ..
-            })
-        ));
+        let unknown_filter = Action::from_spec("room.open", &[s("filter", "unreads")]).unwrap_err();
+        assert_eq!(
+            unknown_filter.to_string(),
+            "room.open: invalid \"filter\" value \"unreads\"; \
+             expected one of \"all\", \"unread\", \"notify\", \"mentions\""
+        );
         assert_eq!(
             Action::from_spec("file.upload", &[]),
             Err(ActionError::MissingArgument {
@@ -630,7 +744,7 @@ mod tests {
                 action: "room.open",
                 arg: "query",
                 value: String::new(),
-                allowed: &[]
+                allowed: Vec::new()
             }
         );
         assert!(
@@ -641,6 +755,40 @@ mod tests {
             Action::from_spec("file.upload", &[s("path", "")]),
             Err(ActionError::InvalidValue { arg: "path", .. })
         ));
+    }
+
+    #[test]
+    fn message_react_takes_an_emoji_or_a_shortcode() {
+        let thumbs = Action::MessageReact(Emoji::get("👍"));
+        for emoji in ["👍", "thumbsup", ":+1:"] {
+            assert_eq!(
+                Action::from_spec("message.react", &[s("emoji", emoji)]),
+                Ok(thumbs.clone())
+            );
+        }
+        assert_eq!(
+            Action::from_spec("message.react", &[]),
+            Ok(Action::MessageReact(None))
+        );
+    }
+
+    #[test]
+    fn an_unknown_or_empty_emoji_is_rejected() {
+        for emoji in ["nonsense", "", ":+1"] {
+            let error = Action::from_spec("message.react", &[s("emoji", emoji)]).unwrap_err();
+            assert_eq!(
+                error,
+                ActionError::UnknownEmoji {
+                    action: "message.react",
+                    value: emoji.into()
+                }
+            );
+            let message = error.to_string();
+            assert!(
+                message.starts_with(&format!("message.react: unknown emoji \"{emoji}\"; ")),
+                "{message}"
+            );
+        }
     }
 
     #[test]

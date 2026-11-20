@@ -47,7 +47,7 @@ come between messages.
 | `INSERT`, `NORMAL`, `VISUAL`, `SEARCH` | the composer has focus; the mode of its editor | the keymap, then the editor (see [The editors](#the-editors)) |
 | `COMMAND` | the `:` command line or a `/` search line is open | the `command_line` table, then the text |
 | `PICKER` | a picker is open | the `picker` table, then the query |
-| `VIEW NORMAL`, `VIEW INSERT`, `VIEW VISUAL`, `VIEW SEARCH` | the message view is open; the mode of its editor | the `message_view` table in normal and visual mode, then the editor |
+| `VIEW NORMAL`, `VIEW INSERT`, `VIEW VISUAL`, `VIEW SEARCH` | the message view, or `:help` or `:map` in it, is open; the mode of its editor | the `message_view` table in normal and visual mode, then the editor |
 | `CONFIRM` | an action asks first, as `dd` does | `y` confirms, any other key cancels |
 | `SECRET` | `:recover` asks for the recovery key; the status line shows `Recovery key:` and a `*` for each character | typed text, a paste's first line, `<BS>`, `<C-u>` and `<C-w>`; `<CR>` submits, `<Esc>` cancels; no keymap |
 
@@ -160,8 +160,11 @@ use the commands below:
 | `room.open` with other arguments than `]u` and `[u`, for example a `query` | `:open <room>` |
 | `room.mark_read` | |
 | `room.mute`, `room.unmute` | `:mute`, `:unmute` |
+| `message.react` with an `emoji`, for example `emoji = "thumbsup"` | `:react <emoji>` |
 | `file.upload` | `:upload <path>` |
 | `account.recover`, which asks for the recovery key | `:recover` |
+| `help.commands`, the command list | `:help` |
+| `help.keymap`, the bindings of each table | `:map` |
 | `app.quit` | `:q` |
 
 `room.mark_read` marks the room under the cursor (in the room list) or the
@@ -186,11 +189,26 @@ user_id = "@alice:example.org"
 "<leader>x" = "room.mark_read"
 ```
 
+Show the bindings with `<leader>sk`, and react with 👍 on the message under
+the cursor with `<leader>+`:
+
+```toml
+[account]
+user_id = "@alice:example.org"
+
+[keymap.normal]
+"<leader>sk" = "help.keymap"
+
+[keymap.timeline]
+"<leader>+" = { action = "message.react", emoji = "thumbsup" }
+```
+
 ## Commands
 
 `:` opens the command line. Everything after the command name is one
 argument, so names and paths with spaces need no quotes. `<Tab>` completes
-command names, and room names after `:open`.
+command names, room names after `:open`, and emoji shortcodes after
+`:react` (`:react thu` offers `thumbsdown` and `thumbsup`).
 
 | Command | What it does |
 |---|---|
@@ -198,11 +216,17 @@ command names, and room names after `:open`.
 | `:mute` | Mutes the room: the room under the cursor in the room list, otherwise the open room. |
 | `:unmute` | Unmutes it: its own notification setting is removed, so the account's default applies. A room that is not muted is left alone. |
 | `:upload <path>` | Sends the file to the open room as an image, video, audio or file message, by the type its name suggests. `~/` is your home directory; a relative path is relative to where mxt was started. Anything that is not a regular file, and files larger than the homeserver's upload limit, are refused. |
+| `:react [<emoji>]` | Toggles a reaction with the emoji on the message under the open room's timeline cursor: adds it, or removes yours. The emoji is an emoji (`:react 👍`) or a shortcode with colons on both sides or none (`:react thumbsup`, `:react :+1:`); an unknown one is an error in the status line, and nothing is sent. Without an emoji, it opens the emoji picker, as `+` does. With no open room, on an empty timeline or on a deleted message, both say so in the status line. |
 | `:recover` | Asks for the recovery key in `SECRET` mode and, as on the first start, cross-signs this device with it and lets it fetch room keys from the key backup (see [First start](../README.md#first-start)). An empty key changes nothing. The status line then says `Recovery complete` or why it failed: a wrong key, or an account without secret storage, which needs recovery set up in another client first. |
+| `:help` | Lists the commands, each with its usage and a one-line description, in the full-screen view. |
+| `:map` | Lists the bindings of each keymap table after your configuration, as `keys -> action (arguments)`, in the full-screen view. A table shows its own bindings, not those of the table it falls back to, and a removed default shows as `nop`. |
 | `:q` | Quits. |
 
-`:mute`, `:unmute`, `:recover` and `:q` take no argument, and `:open` and
-`:upload` without one show their usage.
+`:mute`, `:unmute`, `:recover`, `:help`, `:map` and `:q` take no argument,
+`:open` and `:upload` without one show their usage, and `:react`'s argument
+is optional. `:react` acts on the open room's timeline cursor also while the
+room list has focus, whereas `:mute` and `:unmute` there act on the room
+under the room list's cursor.
 
 ## The editors
 
@@ -228,7 +252,8 @@ The composer:
 The message view (`<CR>` on a message) holds the message's text in an
 editor, so motions, `/` search, visual selection and yanks work on messages
 taller than the screen. `i` and other edits work too, but are discarded when
-the view closes. `q` and `<Esc>` close it in normal and visual mode.
+the view closes. `q` and `<Esc>` close it in normal and visual mode. `:help`
+and `:map` show their text in the same view.
 
 Yanks (`yy` in the timeline, `y` in the editors) go to one register that
 every editor shares, and to the terminal's clipboard

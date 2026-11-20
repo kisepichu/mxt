@@ -262,6 +262,15 @@ fn argument_errors_point_at_the_argument() {
 }
 
 #[test]
+fn an_unknown_emoji_points_at_its_argument() {
+    let (line, msg) = err(&format!(
+        "{MINIMAL}[keymap.timeline.t]\naction = \"message.react\"\nemoji = \"nonsense\"\n"
+    ));
+    assert_eq!(line, 5);
+    assert!(msg.contains("unknown emoji \"nonsense\""), "{msg}");
+}
+
+#[test]
 fn leader_applies_to_defaults_and_user_bindings() {
     let c = ok(&format!(
         "{MINIMAL}[ui]\nleader = \",\"\n[keymap.normal]\n\"<leader>q\" = \"app.quit\"\n"

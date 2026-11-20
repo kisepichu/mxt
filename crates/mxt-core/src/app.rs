@@ -14,9 +14,10 @@ mod timeline;
 use std::collections::HashMap;
 
 use crate::action::{Action, Binding};
+use crate::command::{COMMANDS, help_text};
 use crate::effect::{Effect, MatrixEffect, RecoveryKey, UiEffect};
 use crate::ids::{RoomId, SendId, UserId};
-use crate::keymap::{InputContext, KeySink, Keymap};
+use crate::keymap::{InputContext, KeySink, Keymap, keymap_text};
 use crate::keys::Key;
 use crate::msg::{EditorMode, Msg, Pane, SyncState};
 use crate::resolver::{Resolved, Resolver, TimerId};
@@ -80,6 +81,14 @@ enum Motion {
     Last,
 }
 
+/// What the full-screen view shows (design, "Help views").
+enum View {
+    /// A message's text or image: the item under the cursor when it opened.
+    Message(ItemRef),
+    /// `:help` or `:map`: text the core generated when it opened.
+    Help,
+}
+
 /// An action waiting for `y` in `CONFIRM` mode.
 enum Confirm {
     Redact { room: RoomId, item: ItemRef },
@@ -119,8 +128,8 @@ pub struct App {
     open_room: Option<RoomId>,
     /// The open room's timeline; empty while no room is open.
     timeline: Timeline,
-    /// The item the full-screen message view shows, while it is open.
-    view: Option<ItemRef>,
+    /// The full-screen view, while it is open.
+    view: Option<View>,
     focus: Focus,
     sidebar_visible: bool,
     sync_state: SyncState,
@@ -591,13 +600,15 @@ impl App {
             Action::RoomUnmute => self.set_mute(false, effects),
             Action::MessageView => self.view_message(effects),
             Action::ViewClose => self.close_view(effects),
+            Action::HelpCommands => self.view_help(help_text(COMMANDS), effects),
+            Action::HelpKeymap => self.view_help(keymap_text(&self.keymap), effects),
             Action::MessageYank => self.yank_message(effects),
             Action::MessageGotoReply => self.goto_reply(effects),
             Action::MessageOpen => self.open_message(effects),
             Action::MessageReply => self.reply(effects),
             Action::MessageEdit => self.edit_message(effects),
             Action::MessageDelete => self.delete_message(),
-            Action::MessageReact => self.react(),
+            Action::MessageReact(emoji) => self.react(*emoji, effects),
             Action::MessageResend => self.resend_message(effects),
             Action::ComposerFocus(mode) => self.focus_composer(*mode, effects),
             Action::ComposerSend => self.composer_effect(UiEffect::RequestSubmit, effects),

@@ -425,3 +425,17 @@ fn an_image_that_arrives_after_its_view_closed_is_dropped() {
     assert_eq!(unavailable(&mut app, 1, "timed out"), vec![]);
     assert_eq!(app.status(), None);
 }
+
+#[test]
+fn an_image_that_arrives_after_a_help_view_replaced_its_view_is_dropped() {
+    let help = Binding::single(Action::HelpCommands);
+    let mut app = app_with(vec![(TableId::MessageView, seq("?"), help)]);
+    keys(&mut app, "<CR>");
+    reset(&mut app, vec![image(1)]);
+    assert_eq!(keys(&mut app, "<CR>"), vec![image_view(1), fetch(1)]);
+    keys_in(&mut app, "?", Some(EditorMode::Normal));
+    assert!(app.view_open());
+    assert_eq!(fetched(&mut app, 1), vec![]);
+    assert_eq!(unavailable(&mut app, 1, "too large to preview"), vec![]);
+    assert_eq!(app.status(), None);
+}

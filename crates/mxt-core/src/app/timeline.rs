@@ -1,7 +1,7 @@
 //! The open room's timeline: its diffs, the cursor, back pagination, read
 //! receipts, and the message actions on the item under the cursor.
 
-use super::{App, Confirm, Focus, Motion, StatusKind};
+use super::{App, Confirm, Focus, Motion, StatusKind, View};
 use crate::effect::{Effect, MatrixEffect, UiEffect, ViewContent};
 use crate::ids::{EventId, RoomId};
 use crate::msg::Pane;
@@ -304,7 +304,14 @@ impl App {
                 item: item.id.clone(),
             }));
         }
-        self.view = Some(item.id.clone());
+        self.view = Some(View::Message(item.id.clone()));
+    }
+
+    /// `help.commands` and `help.keymap`: `text` in the full-screen view, in
+    /// place of an open view.
+    pub(super) fn view_help(&mut self, text: String, effects: &mut Vec<Effect>) {
+        effects.push(Effect::Ui(UiEffect::OpenView(ViewContent::Text(text))));
+        self.view = Some(View::Help);
     }
 
     /// `view.close`.
@@ -312,6 +319,11 @@ impl App {
         if self.view.take().is_some() {
             effects.push(Effect::Ui(UiEffect::CloseView));
         }
+    }
+
+    /// Whether the open view is the message view of `item`.
+    fn shows_message(&self, item: &ItemRef) -> bool {
+        matches!(&self.view, Some(View::Message(viewed)) if viewed == item)
     }
 
     /// `Msg::ImageFetched`: only for the item the open view shows; an image
@@ -322,7 +334,7 @@ impl App {
         bytes: MediaBytes,
         effects: &mut Vec<Effect>,
     ) {
-        if self.view.as_ref() == Some(&item) {
+        if self.shows_message(&item) {
             effects.push(Effect::Ui(UiEffect::ShowImage { item, bytes }));
         }
     }
@@ -331,7 +343,7 @@ impl App {
     /// Info, because the reason is expected (the file is too large to
     /// preview); a failed fetch comes as `Msg::EffectFailed`.
     pub(super) fn image_unavailable(&mut self, item: &ItemRef, reason: &str) {
-        if self.view.as_ref() == Some(item) {
+        if self.shows_message(item) {
             self.set_status(StatusKind::Info, format!("No image preview: {reason}"));
         }
     }
@@ -405,13 +417,15 @@ impl App {
 
     /// Starts a new timeline when another room or no room is open, and closes
     /// what belongs to the previous one: its viewport, which must not count
-    /// for the new room's entries before the new room is drawn, the message
-    /// view, the picker, a confirmation, and the focus and mention menu of
-    /// its composer.
+    /// for the new room's entries before the new room is drawn, a message
+    /// view (a help view stays), the picker, a confirmation, and the focus
+    /// and mention menu of its composer.
     pub(super) fn reset_timeline(&mut self, effects: &mut Vec<Effect>) {
         self.timeline = Timeline::default();
         self.timeline_viewport = None;
-        self.close_view(effects);
+        if matches!(self.view, Some(View::Message(_))) {
+            self.close_view(effects);
+        }
         self.picker = None;
         self.confirm = None;
         self.mention_menu = None;

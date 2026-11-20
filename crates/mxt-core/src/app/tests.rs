@@ -817,6 +817,36 @@ fn completes_command_names_and_cycles_back() {
 }
 
 #[test]
+fn react_completes_with_a_space_before_recover() {
+    let mut app = app();
+    keys(&mut app, ":re<Tab>");
+    assert_eq!(line(&app), Some((LineKind::Command, "react ")));
+    keys(&mut app, "<Tab>");
+    assert_eq!(line(&app), Some((LineKind::Command, "recover")));
+    keys(&mut app, "<Tab>");
+    assert_eq!(line(&app), Some((LineKind::Command, "re")));
+}
+
+#[test]
+fn completes_shortcodes_for_react_without_colons() {
+    for typed in ["thu", ":thu"] {
+        let mut app = app();
+        keys(&mut app, &format!(":react {typed}"));
+        for shown in ["react thumbsdown", "react thumbsup"] {
+            keys(&mut app, "<Tab>");
+            assert_eq!(line(&app), Some((LineKind::Command, shown)));
+        }
+        keys(&mut app, "<Tab>");
+        let back = format!("react {typed}");
+        assert_eq!(line(&app), Some((LineKind::Command, back.as_str())));
+    }
+    // Shortcodes are lower case.
+    let mut app = app();
+    keys(&mut app, ":react Thu<Tab>");
+    assert_eq!(line(&app), Some((LineKind::Command, "react Thu")));
+}
+
+#[test]
 fn completes_room_names_for_open() {
     let mut app = app();
     keys(&mut app, ":open c<Tab>");
@@ -841,6 +871,47 @@ fn an_edit_after_tab_starts_a_new_completion() {
     assert_eq!(line(&app), Some((LineKind::Command, "unmut")));
     keys(&mut app, "<Tab>");
     assert_eq!(line(&app), Some((LineKind::Command, "unmute")));
+}
+
+fn text_view(text: String) -> Effect {
+    Effect::Ui(UiEffect::OpenView(crate::effect::ViewContent::Text(text)))
+}
+
+#[test]
+fn help_and_map_open_the_view_and_q_or_escape_close_it() {
+    // `:` cannot be typed in a view, so `K` runs `help.keymap` there.
+    let map = Binding::single(Action::HelpKeymap);
+    let mut app = app_with(vec![(TableId::MessageView, seq("K"), map)]);
+    let help = text_view(help_text(COMMANDS));
+    let map = text_view(keymap_text(&app.keymap));
+    let view = |app: &mut App, text: &str| keys_in(app, text, Some(EditorMode::Normal));
+
+    assert_eq!(keys(&mut app, ":help<CR>"), vec![help]);
+    assert!(app.view_open());
+    assert_eq!(app.mode_label(Some(EditorMode::Normal)), "VIEW NORMAL");
+    // A help action replaces the open view.
+    assert_eq!(view(&mut app, "K"), vec![map.clone()]);
+    assert!(app.view_open());
+    assert_eq!(view(&mut app, "q"), vec![Effect::Ui(UiEffect::CloseView)]);
+    assert!(!app.view_open());
+    assert_eq!(app.focus(), Focus::RoomList);
+
+    assert_eq!(keys(&mut app, ":map<CR>"), vec![map]);
+    assert_eq!(
+        view(&mut app, "<Esc>"),
+        vec![Effect::Ui(UiEffect::CloseView)]
+    );
+    assert!(!app.view_open());
+
+    // Unlike a message view, a help view stays when the open room goes.
+    keys(&mut app, "<CR>:help<CR>");
+    assert_eq!(
+        app.update(Msg::RoomRemoved(id("!c:example.org"))),
+        vec![Effect::Matrix(MatrixEffect::UnsubscribeTimeline(id(
+            "!c:example.org"
+        )))]
+    );
+    assert!(app.view_open());
 }
 
 #[test]

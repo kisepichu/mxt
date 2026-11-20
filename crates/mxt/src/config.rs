@@ -299,6 +299,7 @@ fn argument_start(spec: &dto::ActionSpec, error: &ActionError) -> Option<usize> 
     match error {
         ActionError::UnknownArgument { arg, .. } => start(arg),
         ActionError::WrongType { arg, .. } | ActionError::InvalidValue { arg, .. } => start(arg),
+        ActionError::UnknownEmoji { .. } => start("emoji"),
         ActionError::Conflict {
             args: [first, second],
             ..

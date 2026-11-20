@@ -55,6 +55,24 @@ pub enum RoomFilter {
 }
 
 impl RoomFilter {
+    pub const ALL: [RoomFilter; 4] = [
+        RoomFilter::All,
+        RoomFilter::Unread,
+        RoomFilter::Notify,
+        RoomFilter::Mentions,
+    ];
+
+    /// The value of the `filter` argument: "all", "unread", "notify",
+    /// "mentions".
+    pub fn config_name(self) -> &'static str {
+        match self {
+            RoomFilter::All => "all",
+            RoomFilter::Unread => "unread",
+            RoomFilter::Notify => "notify",
+            RoomFilter::Mentions => "mentions",
+        }
+    }
+
     pub fn matches(self, counts: &UnreadCounts) -> bool {
         match self {
             RoomFilter::All => true,
@@ -81,6 +99,19 @@ pub enum Pick {
     Next,
     /// The first room before the current one, wrapping around.
     Prev,
+}
+
+impl Pick {
+    pub const ALL: [Pick; 3] = [Pick::First, Pick::Next, Pick::Prev];
+
+    /// The value of the `pick` argument: "first", "next", "prev".
+    pub fn config_name(self) -> &'static str {
+        match self {
+            Pick::First => "first",
+            Pick::Next => "next",
+            Pick::Prev => "prev",
+        }
+    }
 }
 
 /// Which room `room.open` and `picker.rooms` act on. A pick rule and a query

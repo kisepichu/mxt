@@ -15,11 +15,36 @@ const COMMON: [&str; 8] = ["👍", "❤️", "😂", "😮", "😢", "🎉", "�
 /// Every emoji in `emojis` order, built once for searching.
 static ALL: LazyLock<Vec<Emoji>> = LazyLock::new(|| all().collect());
 
+/// Every shortcode in alphabetical order, built once for completion.
+static SHORTCODES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    let mut shortcodes: Vec<&'static str> = emojis::iter()
+        .flat_map(|emoji| emoji.shortcodes())
+        .collect();
+    shortcodes.sort_unstable();
+    shortcodes.dedup();
+    shortcodes
+});
+
 impl Emoji {
     /// The emoji `text` is, also when it lacks the variation selector of its
     /// fully qualified form (`❤` for `❤️`).
     pub fn get(text: &str) -> Option<Emoji> {
         emojis::get(text).map(Emoji)
+    }
+
+    /// The emoji an argument names (design, "Commands"): an emoji, as for
+    /// [`Emoji::get`], or a shortcode with colons on both sides or none
+    /// (`thumbsup`, `:+1:`; not `:+1`).
+    pub fn parse(text: &str) -> Option<Emoji> {
+        if let Some(emoji) = Emoji::get(text) {
+            return Some(emoji);
+        }
+        let shortcode = match text.strip_prefix(':') {
+            Some(rest) => rest.strip_suffix(':')?,
+            None if text.ends_with(':') => return None,
+            None => text,
+        };
+        emojis::get_by_shortcode(shortcode).map(Emoji)
     }
 
     /// The fully qualified emoji, the key of a reaction with it.
@@ -59,6 +84,15 @@ pub fn search(query: &str) -> Vec<Emoji> {
     .collect()
 }
 
+/// The shortcodes that start with `prefix`, without colons, in alphabetical
+/// order.
+pub fn shortcodes_starting_with(prefix: &str) -> &'static [&'static str] {
+    let all = SHORTCODES.as_slice();
+    let start = all.partition_point(|shortcode| *shortcode < prefix);
+    let len = all[start..].partition_point(|shortcode| shortcode.starts_with(prefix));
+    &all[start..start + len]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,5 +117,29 @@ mod tests {
         assert_eq!(thumbs.label(), ":+1: 👍");
         assert_eq!(Emoji::get("\u{2764}").unwrap().as_str(), "\u{2764}\u{fe0f}");
         assert_eq!(common().count(), COMMON.len());
+    }
+
+    #[test]
+    fn an_argument_is_an_emoji_or_a_shortcode_with_colons_on_both_sides_or_none() {
+        let thumbs = Emoji::get("👍");
+        assert!(thumbs.is_some());
+        for text in ["👍", "thumbsup", "+1", ":+1:", ":thumbsup:"] {
+            assert_eq!(Emoji::parse(text), thumbs, "{text}");
+        }
+        for text in [":+1", "+1:", "nonsense", "", ":", "::", "Thumbsup", " 👍"] {
+            assert_eq!(Emoji::parse(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn shortcodes_complete_by_prefix_in_alphabetical_order() {
+        assert_eq!(
+            shortcodes_starting_with("thumbs"),
+            ["thumbsdown", "thumbsup"]
+        );
+        let every = shortcodes_starting_with("");
+        assert!(every.is_sorted() && every.len() > all().count() / 2);
+        assert!(shortcodes_starting_with("Thumbs").is_empty());
+        assert!(shortcodes_starting_with("zzzz").is_empty());
     }
 }
