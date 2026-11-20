@@ -8,6 +8,18 @@ marked **Breaking:**.
 
 ## [Unreleased]
 
+### Changed
+
+- Inside tmux, with `ui.image_preview = "auto"`, images are sixel that tmux
+  itself places in the pane when tmux (3.6 or later, built with sixel) and
+  the terminal support it, and half blocks otherwise. `"sixel"` inside tmux
+  goes to tmux the same way wherever tmux supports it.
+
+### Fixed
+
+- Images inside tmux were drawn in the wrong place, over the file name, and
+  left pieces behind after the message view closed.
+
 ## [0.1.1] - 2026-11-20
 
 ### Added

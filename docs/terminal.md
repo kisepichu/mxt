@@ -19,13 +19,15 @@ set -g allow-passthrough on
   ([Clipboard](#clipboard)).
 - `focus-events on` lets mxt know when its terminal is in front, so read
   receipts wait until you look ([Focus](#focus-and-read-receipts)).
-- `allow-passthrough on` lets images through in the terminal's graphics
-  protocol ([Images](#images)). Unless `ui.image_preview = "off"`, mxt
-  turns it on by itself (ratatui-image runs `tmux set -p allow-passthrough
-  on`) for the active pane of the tmux session's current window, which is
-  mxt's own pane when mxt's window is in front, and the option stays on
-  after mxt exits. Setting it in the configuration makes it independent of
-  which pane is active when mxt starts.
+- `allow-passthrough on` lets images through to the terminal in its
+  graphics protocol, which only a forced `ui.image_preview` uses inside
+  tmux ([Images](#images)). Unless `ui.image_preview = "off"` or images are
+  sixel that tmux stores, mxt turns it on by itself (ratatui-image runs
+  `tmux set -p allow-passthrough on`) for the active pane of the tmux
+  session's current window, which is mxt's own pane when mxt's window is in
+  front, and the option stays on after mxt exits. Setting it in the
+  configuration makes it independent of which pane is active when mxt
+  starts.
 
 When mxt runs over SSH from inside a local tmux, `set-clipboard on` and
 `focus-events on` belong in the local tmux. mxt cannot tell the terminal
@@ -91,10 +93,21 @@ when it starts:
   neither `SSH_CONNECTION` nor `SSH_TTY`), images are half blocks: every
   graphics protocol breaks in ConPTY, which stands between WSL and the
   Windows terminal. mxt then asks the terminal nothing.
+- Inside tmux (`TMUX` is set), images are sixel that tmux stores in the
+  pane, when tmux supports it and the terminal of tmux's client draws sixel;
+  otherwise they are half blocks. mxt asks tmux
+  (`tmux display -p '#{version} #{sixel_support} ...'`) and nothing else.
+  tmux supports it from version 3.4 when built with sixel, which only tmux
+  3.6 and later report (`#{sixel_support}` is `1`), so tmux 3.4 and 3.5 get
+  half blocks. The terminal draws sixel when `#{client_termfeatures}` has
+  `sixel`: tmux finds it in the terminal's device attributes, and for a
+  terminal where it does not, `set -as terminal-features ',xterm*:sixel'`
+  adds it. tmux places such an image in the pane, keeps it within the pane,
+  redraws it with the pane, and removes it once mxt draws over it. Any other
+  image goes through tmux to the terminal, which draws it at its own cursor,
+  without the pane's offset, and tmux neither moves nor removes it.
 - Otherwise mxt asks the terminal for its name (the XTVERSION query, which
-  also works over SSH). Inside tmux, tmux answers that query itself, so
-  mxt asks tmux which terminal its client runs in instead
-  (`#{client_termtype}`, tmux 3.2 or later).
+  also works over SSH).
 
 | Terminal | Protocol |
 |---|---|
@@ -117,15 +130,22 @@ graphics protocols draw an image in pixels that must fill its cells.
 - Over SSH from inside a local tmux, the local tmux answers for the
   terminal, and the remote mxt is not inside tmux, so it cannot ask tmux.
   ratatui-image's choice there is usually half blocks.
-- In tmux, ratatui-image's query passes through tmux, so it gets no answer
-  while mxt's pane is not shown by any client; ratatui-image then guesses
-  as above. With several clients attached, the cell size comes from
-  whichever terminal answers first, and the terminal's name from the one
-  client tmux reports, so images suit only one of the terminals.
+- With several tmux clients attached, tmux reports the features of one of
+  them, the one it takes for mxt's session, and mxt decides by that one.
+  tmux draws a sixel image only for clients whose terminal draws sixel, and
+  shows the others a placeholder (`SIXEL IMAGE (width x height)`) in its
+  place. mxt sizes images by tmux's cell size when mxt starts; when a client
+  with another cell size attaches later, images may be smaller or larger
+  than their area until mxt restarts.
 
 When the choice is wrong for your terminal, `ui.image_preview = "iterm2"`,
 `"sixel"`, `"kitty"` or `"halfblocks"` uses that protocol, also in WSL.
-mxt then skips the name, and ratatui-image's query still runs for the cell
+Inside tmux, `"sixel"` is the sixel that tmux stores wherever tmux supports
+it, whatever tmux says about the terminal. `"iterm2"`, `"kitty"`, and
+`"sixel"` where tmux does not support it, pass through tmux (see
+`allow-passthrough` [above](#tmux)), so inside tmux these images may be
+drawn in the wrong place and leave pieces behind. mxt then skips the name,
+and except for tmux's sixel, ratatui-image's query still runs for the cell
 size; when it gets none, ratatui-image assumes 10 by 20 pixels, and images
 in a graphics protocol may be drawn larger or smaller than their area. In
 WSL, any of these values, `"halfblocks"` too, brings back the query that

@@ -823,11 +823,12 @@ list, so mxt does not offer an event-level mention list.
   anything that is not a regular file and files above the homeserver's
   upload limit.
 - Image previews use ratatui-image, in sixel, kitty or iTerm2 graphics or
-  in half blocks. They appear only in the message view (`message.view`),
-  which keeps the timeline's width fixed. The image comes from the
-  thumbnail source when the event has one and from the full file otherwise,
-  up to 10 MiB, scaled down locally. Decoding is limited to 128 MiB of
-  memory, so an image that claims huge dimensions shows an error instead.
+  in half blocks, and inside tmux in sixel that tmux stores. They appear
+  only in the message view (`message.view`), which keeps the timeline's
+  width fixed. The image comes from the thumbnail source when the event
+  has one and from the full file otherwise, up to 10 MiB, scaled down
+  locally. Decoding is limited to 128 MiB of memory, so an image that
+  claims huge dimensions shows an error instead.
 - The protocol, chosen when the tui adapter sets up the terminal, after
   raw mode and the alternate screen and before the key reader starts:
   - `ui.image_preview = "auto"` inside WSL without SSH (`WSL_DISTRO_NAME`
@@ -836,6 +837,42 @@ list, so mxt does not offer an event-level mention list.
     cell size; and ConPTY does not reliably pass a query's answers on (as
     ratatui-image notes), so ratatui-image's query would wait for its
     timeout and leave its thread blocked on stdin, taking the first key.
+  - `auto` inside tmux (`TMUX` set): sixel that tmux stores in the pane,
+    or else half blocks, and no query of the terminal. The tui adapter asks
+    tmux once, `tmux display -p '#{version} #{sixel_support}
+    #{window_cell_width} #{window_cell_height} #{client_termfeatures}'`,
+    read by position (a variable an older tmux does not know expands to
+    nothing). tmux stores sixel when its version is 3.4 or later (or
+    `next-3.4` and later) and `#{sixel_support}` is `1`, which tmux reports
+    from 3.6; the client's terminal draws sixel when
+    `#{client_termfeatures}` has `sixel`. Without all of these, or when
+    tmux cannot be asked or read, images are half blocks: ratatui-image
+    wraps its iTerm2 and kitty images, and sixel, in tmux passthrough,
+    which tmux writes to the outer terminal at the outer cursor, without
+    the pane's offset, and does not track, so in mxt 0.1.1 they appeared
+    over the view's text and left pieces at the bottom after the view
+    closed.
+  - tmux's sixel: ratatui-image's picker takes tmux from `TERM` or
+    `TERM_PROGRAM`, has no setter, and wraps its sixel for passthrough, so
+    the tui adapter encodes the sixel itself from ratatui-image's public
+    parts: `Resize::size_for` and `Resize::resize` as `StatefulImage`
+    uses them, `protocol::sixel::Sixel::new` with `is_tmux` false, and the
+    `Image` widget, again only when the image's size in cells changes. The
+    cell size is tmux's `#{window_cell_width}` and `#{window_cell_height}`,
+    with which tmux turns the image's pixels into cells, taken when mxt
+    starts. Only whole sixel bands of 6 pixel rows are kept (at most 5 rows
+    of pixels go): tmux counts an image's height in whole bands and its
+    cells rounded up (tmux's image-sixel.c), so a height that is not a
+    multiple of 6 takes a row more than the cells ratatui keeps for the
+    image. tmux drops an image when ASCII text, a blank too, or an erase is
+    written over any of its cells, which the view's blanks below the image
+    did in its first frame, and an image that reaches past the pane's last
+    row scrolls the pane (screen-write.c); one that ends on the last row
+    does not. tmux also drops images on a cleared screen and a resize, but
+    not when characters outside ASCII are written over them, which it then
+    draws again over that text on its next redraw. So when the view of an
+    image closes or another view replaces it, the next frame starts with a
+    cleared screen.
   - Otherwise, with `auto`, the terminal's name decides where mxt knows
     better than ratatui-image: WezTerm and iTerm2 get iTerm2, kitty and
     Ghostty kitty. Over SSH ratatui-image cannot tell WezTerm (it reads
@@ -847,7 +884,7 @@ list, so mxt does not offer an event-level mention list.
     terminal), and no name leave ratatui-image's own choice. Windows
     Terminal does not answer XTVERSION; ratatui-image finds sixel in its
     DA1 reply.
-  - The name: outside tmux, the tui adapter writes XTVERSION (`CSI > q`)
+  - The name, outside tmux: the tui adapter writes XTVERSION (`CSI > q`)
     and DA1 (`CSI c`). Terminals answer in order and all answer DA1, so the
     DA1 reply ends the answers at once for a terminal without XTVERSION.
     It reads stdin one byte per read, with `VMIN` 0 and `VTIME` up to a
@@ -855,10 +892,7 @@ list, so mxt does not offer an event-level mention list.
     at the DA1 reply's last byte, so the bytes after it stay unread. The
     name is the text of `DCS > | text ST` before that; other input before
     it is skipped. An answer later than 1 s goes to ratatui-image's query,
-    which runs next and reads up to its own last answer. Inside tmux
-    (`TMUX` set), tmux answers XTVERSION itself, so the name is
-    `tmux display -p '#{client_termtype}'`, the outer terminal's answer to
-    tmux's own query, for one client when several are attached.
+    which runs next and reads up to its own last answer.
   - ratatui-image's query then runs as before, for the cell size and its
     own choice, with the workaround for its thread in tmux. The protocol
     for the name replaces ratatui-image's choice only when the cell size
@@ -869,25 +903,32 @@ list, so mxt does not offer an event-level mention list.
     protocol, also in WSL: no name, and ratatui-image's query still runs
     for the cell size. In WSL that brings back what `auto` avoids there:
     when ConPTY drops the answers, the query waits for its 2 s timeout, and
-    its thread stays blocked on stdin and takes the first key.
+    its thread stays blocked on stdin and takes the first key. Inside tmux,
+    `"sixel"` is tmux's sixel wherever tmux stores sixel, whatever
+    `#{client_termfeatures}` says, and without ratatui-image's query;
+    elsewhere in tmux it, `"iterm2"` and `"kitty"` go through passthrough
+    and may be misplaced, as the user documentation says.
   - `"off"` shows only the file name and size in the view, and mxt then
     never queries the terminal for its graphics protocol.
-  - Under tmux with several clients attached, the cell size comes from
-    whichever terminal answers ratatui-image's query first, and the name
-    from the client tmux reports.
+  - Under tmux with several clients attached, `#{client_termfeatures}` is
+    the client tmux takes for the session, and tmux draws a sixel image
+    only for clients whose terminal draws sixel, a text placeholder for the
+    others; `#{window_cell_*}` follows the client with the largest cells.
+    With forced protocols through passthrough, the cell size comes from
+    whichever terminal answers ratatui-image's query first.
 
 ### Clipboard and terminal focus
 
 `message.yank` and edtui copies use OSC 52. Inside tmux, OSC 52 reaches the
 outer terminal only with `set -g set-clipboard on`, and focus events reach mxt
 only with `set -g focus-events on`. Without focus events, mxt treats the
-terminal as always focused. Unless `ui.image_preview = "off"`, under tmux
-ratatui-image turns tmux's `allow-passthrough` on for the active pane of the
-tmux session's current window (mxt's own pane when mxt's window is in
-front), and the option stays on after mxt exits. When mxt runs over SSH from
-inside a local tmux, the remote mxt cannot tell the terminal (see "Files and
-images"), and images are usually half blocks. The user documentation,
-[Terminal setup](../../terminal.md), says so.
+terminal as always focused. Unless `ui.image_preview = "off"` or images are
+tmux's sixel, under tmux ratatui-image turns tmux's `allow-passthrough` on
+for the active pane of the tmux session's current window (mxt's own pane
+when mxt's window is in front), and the option stays on after mxt exits.
+When mxt runs over SSH from inside a local tmux, the remote mxt cannot tell
+the terminal (see "Files and images"), and images are usually half blocks.
+The user documentation, [Terminal setup](../../terminal.md), says so.
 
 ## Configuration
 
@@ -1293,12 +1334,10 @@ separate device) and the edtui check program. Counts are from that account.
    channels `traQ / <channel>`. Bridged Discord DMs first read
    `Discord / Discord bridge bot, <name>`, because the bridge bot is a member;
    the rule in "Room names" makes them `Discord / <name>`.
-3. **Unread counts after a long offline period:** partly answered. After a
-   first sync many rooms showed a count of 1, and within a minute, as
-   receipts arrived, they settled (1 of 69 visible rooms kept a badge).
-   Whether settled counts match the real number after a long offline period,
-   especially in muted rooms, needs a comparison with another client over
-   time.
+3. **Unread counts after a long offline period:** answered (owner,
+   2026-11-20): the counts match the owner's other client. After a first
+   sync many rooms showed a count of 1, and within a minute, as receipts
+   arrived, they settled (1 of 69 visible rooms kept a badge).
 4. **`/notifications`:** answers 200 with an empty list and no `next_token`
    on an account with hundreds of rooms. Treated as unsupported; there is no
    event-level mention list ("Mentions").

@@ -1,11 +1,15 @@
 //! The graphics protocol for images (design, "Files and images"). With
 //! `ui.image_preview = "auto"`, mxt asks the terminal for its name itself
-//! (XTVERSION), or tmux for the outer terminal's name, and sets the protocol
-//! for the terminals where ratatui-image's own detection goes wrong: over
-//! SSH it cannot tell WezTerm (it looks only at `WEZTERM_EXECUTABLE`, which
-//! SSH does not forward), so it picks kitty graphics, whose Unicode
-//! placeholders WezTerm draws as boxes (wezterm#7924). Inside WSL without
-//! SSH, images are half blocks: every graphics protocol breaks in ConPTY.
+//! (XTVERSION) and sets the protocol for the terminals where ratatui-image's
+//! own detection goes wrong: over SSH it cannot tell WezTerm (it looks only
+//! at `WEZTERM_EXECUTABLE`, which SSH does not forward), so it picks kitty
+//! graphics, whose Unicode placeholders WezTerm draws as boxes
+//! (wezterm#7924). Inside tmux, images are sixel that tmux stores in the
+//! pane, when tmux and its client's terminal support it, and else half
+//! blocks: tmux passes every other image to the outer terminal at the outer
+//! cursor, without the pane's offset, and does not track it. Inside WSL
+//! without SSH, images are half blocks: every graphics protocol breaks in
+//! ConPTY.
 
 use std::env;
 use std::ffi::OsString;
@@ -35,6 +39,15 @@ const WAIT: Duration = Duration::from_secs(1);
 const RETRY: Duration = Duration::from_millis(10);
 /// The longest DCS string read; tmux keeps 127 bytes of the XTVERSION text.
 const MAX_DCS: usize = 256;
+/// What [`query_tmux`] asks tmux: its version, whether it was built with
+/// sixel (tmux 3.6 and later say so), the window's cell size in pixels, and
+/// the features of the client's terminal. Spaces separate the values, so an
+/// empty value, as from a variable an older tmux does not know, keeps its
+/// place.
+const TMUX_FORMAT: &str = "#{version} #{sixel_support} #{window_cell_width} \
+                           #{window_cell_height} #{client_termfeatures}";
+/// The first tmux version that stores sixel images in the pane.
+const TMUX_SIXEL: (u32, u32) = (3, 4);
 
 /// How [`Images::query`](crate::image_view::Images::query) sets up
 /// ratatui-image's picker.
@@ -49,16 +62,9 @@ pub(crate) enum Choice {
     ForTerminal(ProtocolType),
     /// ratatui-image's query for the cell size, and this protocol.
     Forced(ProtocolType),
-}
-
-/// Where the terminal's name comes from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum NameSource {
-    /// The terminal's answer to XTVERSION, from [`query_terminal`].
-    Terminal,
-    /// tmux, from [`tmux_client_termtype`]: inside tmux, tmux answers
-    /// XTVERSION itself.
-    Tmux,
+    /// Sixel that tmux stores in the pane, drawn in tmux's cell size
+    /// (width, height) in pixels, without asking the terminal anything.
+    TmuxSixel { cell: (u16, u16) },
 }
 
 /// The environment variables the choice depends on. A variable counts as
@@ -89,16 +95,29 @@ impl Env {
 }
 
 /// The choice for `forced`, the protocol `ui.image_preview` names (`None`
-/// for `auto`), in `env`. With `auto`, `name` gets the terminal's name from
-/// the source, `None` when it has none, unless the environment decides
-/// alone.
+/// for `auto`), in `env`. `tmux` gets tmux's answer, asked only inside tmux
+/// with `auto` or `"sixel"`; `name` gets the terminal's name, asked only
+/// outside tmux with `auto`. Each is `None` when there is none, unless the
+/// environment decides alone.
 pub(crate) fn choose(
     forced: Option<ImageProtocol>,
     env: &Env,
-    name: impl FnOnce(NameSource) -> Option<String>,
+    name: impl FnOnce() -> Option<String>,
+    tmux: impl FnOnce() -> Option<Tmux>,
 ) -> Choice {
-    if let Some(protocol) = forced {
-        return Choice::Forced(protocol_type(protocol));
+    match forced {
+        // Wherever tmux stores sixel images, even when it does not know
+        // whether the terminal draws them: the setting says it does.
+        Some(ImageProtocol::Sixel) if env.tmux => {
+            return tmux()
+                .as_ref()
+                .and_then(Tmux::sixel_cell)
+                .map_or(Choice::Forced(ProtocolType::Sixel), |cell| {
+                    Choice::TmuxSixel { cell }
+                });
+        }
+        Some(protocol) => return Choice::Forced(protocol_type(protocol)),
+        None => {}
     }
     // ConPTY stands between WSL and the Windows terminal, unless mxt runs
     // over SSH. Half blocks need no cell size, and ConPTY does not reliably
@@ -106,12 +125,18 @@ pub(crate) fn choose(
     if env.wsl && !env.ssh {
         return Choice::Halfblocks;
     }
-    let source = if env.tmux {
-        NameSource::Tmux
-    } else {
-        NameSource::Terminal
-    };
-    name(source)
+    // tmux passes ratatui-image's iTerm2 and kitty images, and sixel it does
+    // not store, to the outer terminal at the outer cursor, which is not
+    // where the image belongs in the pane, and it neither crops nor clears
+    // them; half blocks are text, which tmux handles.
+    if env.tmux {
+        return tmux()
+            .filter(|tmux| tmux.client_sixel)
+            .as_ref()
+            .and_then(Tmux::sixel_cell)
+            .map_or(Choice::Halfblocks, |cell| Choice::TmuxSixel { cell });
+    }
+    name()
         .as_deref()
         .and_then(protocol_for)
         .map_or(Choice::Detected, Choice::ForTerminal)
@@ -128,9 +153,10 @@ fn protocol_type(protocol: ImageProtocol) -> ProtocolType {
 
 /// The protocol for the terminal that `name` names, its XTVERSION text such
 /// as `WezTerm 20240203-110809-5046fc22` or `kitty(0.50.0)`. `None` leaves
-/// the choice to ratatui-image: for other terminals, and for tmux, whose
-/// answer tells nothing about the terminal outside it. Windows Terminal
-/// does not answer XTVERSION; ratatui-image finds sixel in its DA1 reply.
+/// the choice to ratatui-image: for other terminals, and for a tmux in front
+/// of SSH, whose answer tells nothing about the terminal outside it. Windows
+/// Terminal does not answer XTVERSION; ratatui-image finds sixel in its DA1
+/// reply.
 fn protocol_for(name: &str) -> Option<ProtocolType> {
     let program = name.split([' ', '(']).next().unwrap_or_default();
     let is = |known: &str| program.eq_ignore_ascii_case(known);
@@ -176,19 +202,74 @@ fn ask_name(tty: BorrowedFd<'_>, out: &mut impl Write, wait: Duration) -> Option
     name
 }
 
-/// tmux's `client_termtype`: the outer terminal's answer to the XTVERSION
-/// query that tmux (3.2 and later) sends it, for the client tmux takes when
-/// several are attached. `None` when tmux does not know it.
-pub(crate) fn tmux_client_termtype() -> Option<String> {
+/// tmux's answer to [`TMUX_FORMAT`].
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Tmux {
+    /// `#{version}` as (major, minor), `None` unless it is a release such as
+    /// `3.6a`, or a development version such as `next-3.7`.
+    version: Option<(u32, u32)>,
+    /// `#{sixel_support}` is `1`: tmux was built with sixel.
+    sixel_support: bool,
+    /// `#{window_cell_width}` and `#{window_cell_height}`, nonzero: the cell
+    /// size in pixels with which tmux turns an image's pixels into cells.
+    cell: Option<(u16, u16)>,
+    /// `#{client_termfeatures}` has `sixel`: the terminal of the client
+    /// tmux takes when several are attached draws sixel.
+    client_sixel: bool,
+}
+
+impl Tmux {
+    /// `answer`, [`TMUX_FORMAT`] expanded by tmux. A value that cannot be
+    /// read counts as missing.
+    fn parse(answer: &str) -> Tmux {
+        let mut values = answer.trim_end_matches('\n').split(' ');
+        let mut next = || values.next().unwrap_or_default();
+        let version = tmux_version(next());
+        let sixel_support = next() == "1";
+        let width = next().parse().ok().filter(|&width| width > 0);
+        let height = next().parse().ok().filter(|&height| height > 0);
+        let client_sixel = next().split(',').any(|feature| feature == "sixel");
+        Tmux {
+            version,
+            sixel_support,
+            cell: width.zip(height),
+            client_sixel,
+        }
+    }
+
+    /// tmux's cell size when tmux stores sixel images in the pane: from
+    /// version 3.4, if built with sixel, which only tmux 3.6 and later
+    /// report.
+    fn sixel_cell(&self) -> Option<(u16, u16)> {
+        let stores = self.version.is_some_and(|version| version >= TMUX_SIXEL);
+        self.cell.filter(|_| stores && self.sixel_support)
+    }
+}
+
+/// A tmux version, `3.6a` or `next-3.7`, as (major, minor).
+fn tmux_version(text: &str) -> Option<(u32, u32)> {
+    let text = text.strip_prefix("next-").unwrap_or(text);
+    let (major, rest) = text.split_once('.')?;
+    let digits = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    Some((major.parse().ok()?, rest[..digits].parse().ok()?))
+}
+
+/// Asks tmux with [`TMUX_FORMAT`] about the pane mxt runs in and the client
+/// tmux takes for it. `None` when tmux cannot be asked: the answer only
+/// refines the choice, so it never keeps mxt from starting.
+pub(crate) fn query_tmux() -> Option<Tmux> {
     let output = Command::new("tmux")
-        .args(["display", "-p", "#{client_termtype}"])
+        .args(["display", "-p", TMUX_FORMAT])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
         .ok()?;
-    let name = String::from_utf8_lossy(&output.stdout);
-    let name = name.trim();
-    (output.status.success() && !name.is_empty()).then(|| name.to_owned())
+    output
+        .status
+        .success()
+        .then(|| Tmux::parse(&String::from_utf8_lossy(&output.stdout)))
 }
 
 /// The terminal's input, one byte at a time, until a deadline.
@@ -567,74 +648,192 @@ mod tests {
         })
     }
 
-    /// The choice with `auto` in `env` when the terminal's name is `name`,
-    /// and where the name came from.
-    fn auto(env: &Env, name: Option<&str>) -> (Choice, Option<NameSource>) {
-        let mut asked = None;
-        let choice = choose(None, env, |source| {
-            asked = Some(source);
-            name.map(str::to_owned)
-        });
+    const IN_TMUX: (&str, &str) = ("TMUX", "/tmp/tmux-1000/default,1234,0");
+    /// `#{client_termfeatures}` for a terminal that draws sixel, in tmux
+    /// 3.6a's order (`tty_features` in tty-features.c).
+    const WITH_SIXEL: &str =
+        "256,bpaste,clipboard,cstyle,extkeys,focus,margins,mouse,rectfill,RGB,sixel,sync,title";
+    /// The same terminal without sixel.
+    const WITHOUT_SIXEL: &str =
+        "256,bpaste,clipboard,cstyle,extkeys,focus,margins,mouse,rectfill,RGB,sync,title";
+
+    /// What [`choose`] asked for.
+    #[derive(Debug, Default, PartialEq)]
+    struct Asked {
+        name: bool,
+        tmux: bool,
+    }
+
+    /// The choice for `forced` in `env` when the terminal's name is `name`
+    /// and tmux answers `tmux`, and what it asked for.
+    fn choice(
+        forced: Option<ImageProtocol>,
+        env: &Env,
+        name: Option<&str>,
+        tmux: Option<&str>,
+    ) -> (Choice, Asked) {
+        let mut asked = Asked::default();
+        let choice = choose(
+            forced,
+            env,
+            || {
+                asked.name = true;
+                name.map(str::to_owned)
+            },
+            || {
+                asked.tmux = true;
+                tmux.map(Tmux::parse)
+            },
+        );
         (choice, asked)
     }
 
+    const NAME: Asked = Asked {
+        name: true,
+        tmux: false,
+    };
+    const TMUX_ANSWER: Asked = Asked {
+        name: false,
+        tmux: true,
+    };
+
     #[test]
-    fn auto_asks_the_terminal_and_maps_its_name() {
+    fn auto_outside_tmux_asks_the_terminal_and_maps_its_name() {
         let ssh = env(&[("SSH_CONNECTION", "192.0.2.1 50000 192.0.2.2 22")]);
+        let wezterm = Some("WezTerm 20240203-110809-5046fc22");
         assert_eq!(
-            auto(&ssh, Some("WezTerm 20240203-110809-5046fc22")),
-            (
-                Choice::ForTerminal(ProtocolType::Iterm2),
-                Some(NameSource::Terminal)
-            )
+            choice(None, &ssh, wezterm, None),
+            (Choice::ForTerminal(ProtocolType::Iterm2), NAME)
         );
         // A local tmux in front of SSH answers for the terminal.
         assert_eq!(
-            auto(&ssh, Some("tmux 3.4")),
-            (Choice::Detected, Some(NameSource::Terminal))
+            choice(None, &ssh, Some("tmux 3.4"), None),
+            (Choice::Detected, NAME)
         );
         assert_eq!(
-            auto(&env(&[]), None),
-            (Choice::Detected, Some(NameSource::Terminal))
+            choice(None, &env(&[]), None, None),
+            (Choice::Detected, NAME)
+        );
+        assert_eq!(
+            choice(None, &env(&[("TMUX", "")]), wezterm, None),
+            (Choice::ForTerminal(ProtocolType::Iterm2), NAME)
         );
     }
 
     #[test]
-    fn inside_tmux_the_name_comes_from_tmux() {
-        let tmux = env(&[("TMUX", "/tmp/tmux-1000/default,1234,0")]);
-        assert_eq!(
-            auto(&tmux, Some("WezTerm 20240203-110809-5046fc22")),
+    fn auto_inside_tmux_uses_the_sixel_tmux_stores_or_else_half_blocks() {
+        let tmux = env(&[IN_TMUX]);
+        let stored = Choice::TmuxSixel { cell: (9, 18) };
+        for (answer, expected) in [
+            (format!("3.6a 1 9 18 {WITH_SIXEL}\n"), &stored),
+            (format!("3.4 1 9 18 {WITH_SIXEL}"), &stored),
+            (format!("next-3.7 1 9 18 {WITH_SIXEL}"), &stored),
+            // The client's terminal does not draw sixel, or no client is
+            // attached.
+            (format!("3.6a 1 9 18 {WITHOUT_SIXEL}"), &Choice::Halfblocks),
+            ("3.6a 1 9 18 \n".to_owned(), &Choice::Halfblocks),
+            // tmux was built without sixel, or does not say (3.5a).
+            (format!("3.6a 0 9 18 {WITH_SIXEL}"), &Choice::Halfblocks),
+            (format!("3.5a  9 18 {WITH_SIXEL}"), &Choice::Halfblocks),
+            // Too old, or a version that cannot be read.
+            (format!("3.3a 1 9 18 {WITH_SIXEL}"), &Choice::Halfblocks),
             (
-                Choice::ForTerminal(ProtocolType::Iterm2),
-                Some(NameSource::Tmux)
-            )
-        );
+                format!("openbsd-7.4 1 9 18 {WITH_SIXEL}"),
+                &Choice::Halfblocks,
+            ),
+        ] {
+            let (got, asked) = choice(
+                None,
+                &tmux,
+                Some("WezTerm 20240203-110809-5046fc22"),
+                Some(&answer),
+            );
+            assert_eq!((&got, asked), (expected, TMUX_ANSWER), "{answer}");
+        }
+        // tmux cannot be asked.
         assert_eq!(
-            auto(&tmux, Some("ghostty 1.4.1-main+2fc8d02c2")),
-            (
-                Choice::ForTerminal(ProtocolType::Kitty),
-                Some(NameSource::Tmux)
-            )
+            choice(None, &tmux, None, None),
+            (Choice::Halfblocks, TMUX_ANSWER)
         );
-        // An outer terminal that did not answer tmux.
+    }
+
+    #[test]
+    fn forced_sixel_inside_tmux_goes_to_tmux_where_tmux_stores_it() {
+        let tmux = env(&[IN_TMUX]);
+        // Whatever the client's features say: the setting says the
+        // terminal draws sixel.
+        let without = format!("3.6a 1 9 18 {WITHOUT_SIXEL}");
         assert_eq!(
-            auto(&tmux, None),
-            (Choice::Detected, Some(NameSource::Tmux))
+            choice(Some(ImageProtocol::Sixel), &tmux, None, Some(&without)),
+            (Choice::TmuxSixel { cell: (9, 18) }, TMUX_ANSWER)
         );
+        // Otherwise ratatui-image wraps it for passthrough.
+        for answer in [Some("3.6a 0 9 18 sixel"), Some("3.3a    sixel"), None] {
+            assert_eq!(
+                choice(Some(ImageProtocol::Sixel), &tmux, None, answer),
+                (Choice::Forced(ProtocolType::Sixel), TMUX_ANSWER),
+                "{answer:?}"
+            );
+        }
+        // The other protocols always go through ratatui-image.
+        for (forced, protocol) in [
+            (ImageProtocol::Iterm2, ProtocolType::Iterm2),
+            (ImageProtocol::Kitty, ProtocolType::Kitty),
+            (ImageProtocol::Halfblocks, ProtocolType::Halfblocks),
+        ] {
+            assert_eq!(
+                choice(Some(forced), &tmux, None, Some(&without)),
+                (Choice::Forced(protocol), Asked::default())
+            );
+        }
+    }
+
+    #[test]
+    fn tmux_answers_are_read_by_position() {
         assert_eq!(
-            auto(&env(&[("TMUX", "")]), None),
-            (Choice::Detected, Some(NameSource::Terminal))
+            Tmux::parse(&format!("3.6a 1 9 18 {WITH_SIXEL}\n")),
+            Tmux {
+                version: Some((3, 6)),
+                sixel_support: true,
+                cell: Some((9, 18)),
+                client_sixel: true,
+            }
         );
+        // tmux 3.3a knows neither `sixel_support` nor the cell size.
+        assert_eq!(
+            Tmux::parse(&format!("3.3a    {WITH_SIXEL}\n")),
+            Tmux {
+                version: Some((3, 3)),
+                client_sixel: true,
+                ..Tmux::default()
+            }
+        );
+        // A cell size of zero, a feature that only contains `sixel`, and
+        // an answer cut short.
+        assert_eq!(
+            Tmux::parse("3.4 1 0 18 nosixel,RGB"),
+            Tmux {
+                version: Some((3, 4)),
+                sixel_support: true,
+                ..Tmux::default()
+            }
+        );
+        assert_eq!(Tmux::parse("3.6a 1"), Tmux::parse("3.6a 1   "));
+        assert_eq!(Tmux::parse(""), Tmux::default());
+        assert_eq!(tmux_version("next-3.7"), Some((3, 7)));
+        assert_eq!(tmux_version("3.4-rc"), Some((3, 4)));
+        for version in ["openbsd-7.4", "master", "3", "3.", ".4", "3.x"] {
+            assert_eq!(tmux_version(version), None, "{version}");
+        }
     }
 
     #[test]
     fn wsl_without_ssh_gets_half_blocks_without_asking() {
         let wsl = ("WSL_DISTRO_NAME", "Ubuntu");
-        let tmux = ("TMUX", "/tmp/tmux-1000/default,1234,0");
-        for vars in [&[wsl][..], &[wsl, tmux][..], &[wsl, ("SSH_TTY", "")][..]] {
+        for vars in [&[wsl][..], &[wsl, IN_TMUX][..], &[wsl, ("SSH_TTY", "")][..]] {
             assert_eq!(
-                auto(&env(vars), Some("kitty(0.50.0)")),
-                (Choice::Halfblocks, None)
+                choice(None, &env(vars), Some("kitty(0.50.0)"), None),
+                (Choice::Halfblocks, Asked::default())
             );
         }
         for ssh in [
@@ -642,21 +841,18 @@ mod tests {
             ("SSH_TTY", "/dev/pts/3"),
         ] {
             assert_eq!(
-                auto(&env(&[wsl, ssh]), Some("kitty(0.50.0)")),
-                (
-                    Choice::ForTerminal(ProtocolType::Kitty),
-                    Some(NameSource::Terminal)
-                )
+                choice(None, &env(&[wsl, ssh]), Some("kitty(0.50.0)"), None),
+                (Choice::ForTerminal(ProtocolType::Kitty), NAME)
             );
         }
         assert_eq!(
-            auto(&env(&[("WSL_DISTRO_NAME", "")]), None),
-            (Choice::Detected, Some(NameSource::Terminal))
+            choice(None, &env(&[("WSL_DISTRO_NAME", "")]), None, None),
+            (Choice::Detected, NAME)
         );
     }
 
     #[test]
-    fn a_forced_protocol_needs_no_name_and_holds_in_wsl() {
+    fn a_forced_protocol_outside_tmux_asks_nothing_and_holds_in_wsl() {
         let wsl = env(&[("WSL_DISTRO_NAME", "Ubuntu")]);
         let elsewhere = env(&[]);
         for (forced, protocol) in [
@@ -666,8 +862,10 @@ mod tests {
             (ImageProtocol::Halfblocks, ProtocolType::Halfblocks),
         ] {
             for env in [&wsl, &elsewhere] {
-                let choice = choose(Some(forced), env, |_| panic!("asked for the name"));
-                assert_eq!(choice, Choice::Forced(protocol));
+                assert_eq!(
+                    choice(Some(forced), env, None, None),
+                    (Choice::Forced(protocol), Asked::default())
+                );
             }
         }
     }
