@@ -32,6 +32,12 @@ marked **Breaking:**.
 
 ### Fixed
 
+- After the timeline cursor moved up from the newest message (to reply to
+  a message, for example), new messages, your own included, stayed below
+  the pane until the cursor reached the newest message or the room was
+  opened again. Now they appear at the bottom while the pane shows the
+  newest message's last row, and whenever the cursor's message and every
+  message after it fit on the pane.
 - As in nvim's operator-pending mode, the key after `ci`, `di` and visual
   `i`, after `ca`, `da`, `yi`, `ya` and visual `a`, and after a bare `d`,
   `c` or `y` goes to the editor without the keymap. Bindings in `normal`
