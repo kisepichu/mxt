@@ -224,8 +224,9 @@ impl Tui {
     /// dropped), both with the key mode (see `Editor::key_mode`) of the
     /// editor that has the keys: the message view's while it is open,
     /// otherwise the open room's composer's while it has focus. Focus events
-    /// become `Msg::TerminalFocus`; resizes produce nothing (the loop redraws
-    /// after every event anyway). Mouse events are not enabled.
+    /// become `Msg::TerminalFocus`. A resize produces nothing (the loop
+    /// redraws after every event anyway) but takes tmux's cell size again
+    /// for images (see [`Images::resized`]). Mouse events are not enabled.
     pub fn handle_event(&mut self, app: &App, event: Event) -> Vec<Msg> {
         let msg = match event {
             Event::Key(event) => key_from_crossterm(event).map(|key| Msg::Key {
@@ -239,7 +240,13 @@ impl Tui {
             }),
             Event::FocusGained => Some(Msg::TerminalFocus(true)),
             Event::FocusLost => Some(Msg::TerminalFocus(false)),
-            Event::Resize(..) | Event::Mouse(_) => None,
+            Event::Resize(..) => {
+                if let Some(images) = &mut self.images {
+                    images.resized();
+                }
+                None
+            }
+            Event::Mouse(_) => None,
         };
         msg.into_iter().collect()
     }

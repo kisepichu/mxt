@@ -102,10 +102,14 @@ when it starts:
   half blocks. The terminal draws sixel when `#{client_termfeatures}` has
   `sixel`: tmux finds it in the terminal's device attributes, and for a
   terminal where it does not, `set -as terminal-features ',xterm*:sixel'`
-  adds it. tmux places such an image in the pane, keeps it within the pane,
-  redraws it with the pane, and removes it once mxt draws over it. Any other
-  image goes through tmux to the terminal, which draws it at its own cursor,
-  without the pane's offset, and tmux neither moves nor removes it.
+  adds it. tmux also needs the size of the terminal's cells in pixels
+  (`#{client_cell_width}` and `#{client_cell_height}`, which it gets from
+  the terminal's window size or asks the terminal for); without it tmux
+  shows a placeholder, so images are half blocks. tmux places such an image
+  in the pane, keeps it within the pane, redraws it with the pane, and
+  removes it once mxt draws over it. Any other image goes through tmux to
+  the terminal, which draws it at its own cursor, without the pane's
+  offset, and tmux neither moves nor removes it.
 - Otherwise mxt asks the terminal for its name (the XTVERSION query, which
   also works over SSH).
 
@@ -134,9 +138,14 @@ graphics protocols draw an image in pixels that must fill its cells.
   them, the one it takes for mxt's session, and mxt decides by that one.
   tmux draws a sixel image only for clients whose terminal draws sixel, and
   shows the others a placeholder (`SIXEL IMAGE (width x height)`) in its
-  place. mxt sizes images by tmux's cell size when mxt starts; when a client
-  with another cell size attaches later, images may be smaller or larger
-  than their area until mxt restarts.
+  place. tmux counts an image's rows in the cell size of the client that
+  sets the window's size: with tmux's default `window-size latest`, the
+  client that attached or typed last. When a client with another window
+  size takes over, tmux resizes the window, and mxt draws images again in
+  the new cell size. In a window split into panes, mxt's pane may keep its
+  size; mxt then keeps the old cell size until the pane resizes again, and
+  an image may take more or fewer rows than its area, and scroll the pane
+  when it reaches past the pane's bottom.
 
 When the choice is wrong for your terminal, `ui.image_preview = "iterm2"`,
 `"sixel"`, `"kitty"` or `"halfblocks"` uses that protocol, also in WSL.

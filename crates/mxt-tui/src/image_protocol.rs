@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use mxt_core::settings::ImageProtocol;
 use ratatui_image::picker::ProtocolType;
 use rustix::io::Errno;
-use rustix::termios::{self, OptionalActions, SpecialCodeIndex, Termios};
+use rustix::termios::{self, OptionalActions, SpecialCodeIndex, Termios, Winsize};
 
 /// XTVERSION (`CSI > q`), then DA1 (`CSI c`). Terminals answer in order,
 /// and every terminal answers DA1, so its reply ends the wait at once for a
@@ -40,12 +40,13 @@ const RETRY: Duration = Duration::from_millis(10);
 /// The longest DCS string read; tmux keeps 127 bytes of the XTVERSION text.
 const MAX_DCS: usize = 256;
 /// What [`query_tmux`] asks tmux: its version, whether it was built with
-/// sixel (tmux 3.6 and later say so), the window's cell size in pixels, and
-/// the features of the client's terminal. Spaces separate the values, so an
-/// empty value, as from a variable an older tmux does not know, keeps its
-/// place.
+/// sixel (tmux 3.6 and later say so), the window's cell size in pixels, the
+/// cell size of the client's terminal in pixels, and the features of the
+/// client's terminal. Spaces separate the values, so an empty value, as from
+/// a variable an older tmux does not know, keeps its place.
 const TMUX_FORMAT: &str = "#{version} #{sixel_support} #{window_cell_width} \
-                           #{window_cell_height} #{client_termfeatures}";
+                           #{window_cell_height} #{client_cell_width} \
+                           #{client_cell_height} #{client_termfeatures}";
 /// The first tmux version that stores sixel images in the pane.
 const TMUX_SIXEL: (u32, u32) = (3, 4);
 
@@ -131,7 +132,7 @@ pub(crate) fn choose(
     // them; half blocks are text, which tmux handles.
     if env.tmux {
         return tmux()
-            .filter(|tmux| tmux.client_sixel)
+            .filter(Tmux::client_draws_sixel)
             .as_ref()
             .and_then(Tmux::sixel_cell)
             .map_or(Choice::Halfblocks, |cell| Choice::TmuxSixel { cell });
@@ -213,8 +214,12 @@ pub(crate) struct Tmux {
     /// `#{window_cell_width}` and `#{window_cell_height}`, nonzero: the cell
     /// size in pixels with which tmux turns an image's pixels into cells.
     cell: Option<(u16, u16)>,
-    /// `#{client_termfeatures}` has `sixel`: the terminal of the client
-    /// tmux takes when several are attached draws sixel.
+    /// `#{client_cell_width}` and `#{client_cell_height}` are nonzero: tmux
+    /// knows the cell size in pixels of the terminal of the client it takes
+    /// when several are attached.
+    client_cell: bool,
+    /// `#{client_termfeatures}` has `sixel`: the terminal of that client
+    /// draws sixel.
     client_sixel: bool,
 }
 
@@ -224,17 +229,29 @@ impl Tmux {
     fn parse(answer: &str) -> Tmux {
         let mut values = answer.trim_end_matches('\n').split(' ');
         let mut next = || values.next().unwrap_or_default();
+        let nonzero = |value: &str| value.parse::<u32>().is_ok_and(|value| value > 0);
         let version = tmux_version(next());
         let sixel_support = next() == "1";
         let width = next().parse().ok().filter(|&width| width > 0);
         let height = next().parse().ok().filter(|&height| height > 0);
+        let client_width = next();
+        let client_height = next();
         let client_sixel = next().split(',').any(|feature| feature == "sixel");
         Tmux {
             version,
             sixel_support,
             cell: width.zip(height),
+            client_cell: nonzero(client_width) && nonzero(client_height),
             client_sixel,
         }
+    }
+
+    /// Whether tmux draws sixel images for its client: tmux shows a client
+    /// a placeholder in their place unless its terminal has the `sixel`
+    /// feature and tmux knows its cell size in pixels
+    /// (`tty_cmd_sixelimage` in tmux's tty.c).
+    fn client_draws_sixel(&self) -> bool {
+        self.client_sixel && self.client_cell
     }
 
     /// tmux's cell size when tmux stores sixel images in the pane: from
@@ -270,6 +287,30 @@ pub(crate) fn query_tmux() -> Option<Tmux> {
         .status
         .success()
         .then(|| Tmux::parse(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// tmux's cell size in pixels, read again after mxt's pane resized: the
+/// pane's size in pixels over its size in cells, which tmux sets to its
+/// cell size times the pane's columns and rows whenever it resizes the pane
+/// (`window_pane_send_resize` in tmux's window.c), so no tmux runs. When the
+/// pane has no size in pixels, tmux's `#{window_cell_*}`. `None` when
+/// neither is known.
+pub(crate) fn tmux_cell() -> Option<(u16, u16)> {
+    termios::tcgetwinsize(io::stdout())
+        .ok()
+        .and_then(|size| window_cell(&size))
+        .or_else(|| query_tmux().and_then(|tmux| tmux.cell))
+}
+
+/// The cell size in pixels from `size`, a terminal's size in cells and in
+/// pixels, as ratatui-image computes it, when the terminal reports both
+/// and a cell is at least a pixel.
+pub(crate) fn window_cell(size: &Winsize) -> Option<(u16, u16)> {
+    let cell = (
+        size.ws_xpixel.checked_div(size.ws_col)?,
+        size.ws_ypixel.checked_div(size.ws_row)?,
+    );
+    (cell.0 > 0 && cell.1 > 0).then_some(cell)
 }
 
 /// The terminal's input, one byte at a time, until a deadline.
@@ -723,24 +764,26 @@ mod tests {
     #[test]
     fn auto_inside_tmux_uses_the_sixel_tmux_stores_or_else_half_blocks() {
         let tmux = env(&[IN_TMUX]);
-        let stored = Choice::TmuxSixel { cell: (9, 18) };
+        let stored = &Choice::TmuxSixel { cell: (9, 18) };
+        let half = &Choice::Halfblocks;
         for (answer, expected) in [
-            (format!("3.6a 1 9 18 {WITH_SIXEL}\n"), &stored),
-            (format!("3.4 1 9 18 {WITH_SIXEL}"), &stored),
-            (format!("next-3.7 1 9 18 {WITH_SIXEL}"), &stored),
+            (format!("3.6a 1 9 18 10 20 {WITH_SIXEL}\n"), stored),
+            (format!("3.4 1 9 18 10 20 {WITH_SIXEL}"), stored),
+            (format!("next-3.7 1 9 18 10 20 {WITH_SIXEL}"), stored),
             // The client's terminal does not draw sixel, or no client is
             // attached.
-            (format!("3.6a 1 9 18 {WITHOUT_SIXEL}"), &Choice::Halfblocks),
-            ("3.6a 1 9 18 \n".to_owned(), &Choice::Halfblocks),
+            (format!("3.6a 1 9 18 10 20 {WITHOUT_SIXEL}"), half),
+            ("3.6a 1 9 18   \n".to_owned(), half),
+            // tmux does not know the size of the terminal's cells in
+            // pixels, so it would show a placeholder.
+            (format!("3.6a 1 9 18 0 0 {WITH_SIXEL}"), half),
+            (format!("3.6a 1 9 18 10 0 {WITH_SIXEL}"), half),
             // tmux was built without sixel, or does not say (3.5a).
-            (format!("3.6a 0 9 18 {WITH_SIXEL}"), &Choice::Halfblocks),
-            (format!("3.5a  9 18 {WITH_SIXEL}"), &Choice::Halfblocks),
+            (format!("3.6a 0 9 18 10 20 {WITH_SIXEL}"), half),
+            (format!("3.5a  9 18 10 20 {WITH_SIXEL}"), half),
             // Too old, or a version that cannot be read.
-            (format!("3.3a 1 9 18 {WITH_SIXEL}"), &Choice::Halfblocks),
-            (
-                format!("openbsd-7.4 1 9 18 {WITH_SIXEL}"),
-                &Choice::Halfblocks,
-            ),
+            (format!("3.3a 1 9 18 10 20 {WITH_SIXEL}"), half),
+            (format!("openbsd-7.4 1 9 18 10 20 {WITH_SIXEL}"), half),
         ] {
             let (got, asked) = choice(
                 None,
@@ -760,15 +803,19 @@ mod tests {
     #[test]
     fn forced_sixel_inside_tmux_goes_to_tmux_where_tmux_stores_it() {
         let tmux = env(&[IN_TMUX]);
-        // Whatever the client's features say: the setting says the
-        // terminal draws sixel.
-        let without = format!("3.6a 1 9 18 {WITHOUT_SIXEL}");
+        // Whatever the client's features and cell size say: the setting
+        // says the terminal draws sixel.
+        let without = format!("3.6a 1 9 18 0 0 {WITHOUT_SIXEL}");
         assert_eq!(
             choice(Some(ImageProtocol::Sixel), &tmux, None, Some(&without)),
             (Choice::TmuxSixel { cell: (9, 18) }, TMUX_ANSWER)
         );
         // Otherwise ratatui-image wraps it for passthrough.
-        for answer in [Some("3.6a 0 9 18 sixel"), Some("3.3a    sixel"), None] {
+        for answer in [
+            Some("3.6a 0 9 18 10 20 sixel"),
+            Some("3.3a  9 18 10 20 sixel"),
+            None,
+        ] {
             assert_eq!(
                 choice(Some(ImageProtocol::Sixel), &tmux, None, answer),
                 (Choice::Forced(ProtocolType::Sixel), TMUX_ANSWER),
@@ -791,27 +838,30 @@ mod tests {
     #[test]
     fn tmux_answers_are_read_by_position() {
         assert_eq!(
-            Tmux::parse(&format!("3.6a 1 9 18 {WITH_SIXEL}\n")),
+            Tmux::parse(&format!("3.6a 1 9 18 10 20 {WITH_SIXEL}\n")),
             Tmux {
                 version: Some((3, 6)),
                 sixel_support: true,
                 cell: Some((9, 18)),
+                client_cell: true,
                 client_sixel: true,
             }
         );
-        // tmux 3.3a knows neither `sixel_support` nor the cell size.
+        // tmux 3.3a does not know `sixel_support`.
         assert_eq!(
-            Tmux::parse(&format!("3.3a    {WITH_SIXEL}\n")),
+            Tmux::parse(&format!("3.3a  9 18 10 20 {WITH_SIXEL}\n")),
             Tmux {
                 version: Some((3, 3)),
+                cell: Some((9, 18)),
+                client_cell: true,
                 client_sixel: true,
                 ..Tmux::default()
             }
         );
-        // A cell size of zero, a feature that only contains `sixel`, and
-        // an answer cut short.
+        // Cell sizes of zero, a feature that only contains `sixel`, and an
+        // answer cut short.
         assert_eq!(
-            Tmux::parse("3.4 1 0 18 nosixel,RGB"),
+            Tmux::parse("3.4 1 0 18 10 0 nosixel,RGB"),
             Tmux {
                 version: Some((3, 4)),
                 sixel_support: true,
@@ -824,6 +874,31 @@ mod tests {
         assert_eq!(tmux_version("3.4-rc"), Some((3, 4)));
         for version in ["openbsd-7.4", "master", "3", "3.", ".4", "3.x"] {
             assert_eq!(tmux_version(version), None, "{version}");
+        }
+    }
+
+    #[test]
+    fn the_cell_size_is_the_size_in_pixels_over_the_size_in_cells() {
+        let cell = |(ws_col, ws_row, ws_xpixel, ws_ypixel)| {
+            window_cell(&Winsize {
+                ws_row,
+                ws_col,
+                ws_xpixel,
+                ws_ypixel,
+            })
+        };
+        // What tmux sets for a pane of 80x23 cells while its window's cell
+        // size is 10x20, and of 100x29 cells at 16x32.
+        assert_eq!(cell((80, 23, 800, 460)), Some((10, 20)));
+        assert_eq!(cell((100, 29, 1600, 928)), Some((16, 32)));
+        // No size in pixels, or in cells, or less than a pixel per cell.
+        for size in [
+            (80, 23, 0, 0),
+            (80, 23, 800, 0),
+            (0, 0, 800, 460),
+            (80, 23, 40, 460),
+        ] {
+            assert_eq!(cell(size), None, "{size:?}");
         }
     }
 

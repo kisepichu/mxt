@@ -840,12 +840,14 @@ list, so mxt does not offer an event-level mention list.
   - `auto` inside tmux (`TMUX` set): sixel that tmux stores in the pane,
     or else half blocks, and no query of the terminal. The tui adapter asks
     tmux once, `tmux display -p '#{version} #{sixel_support}
-    #{window_cell_width} #{window_cell_height} #{client_termfeatures}'`,
-    read by position (a variable an older tmux does not know expands to
-    nothing). tmux stores sixel when its version is 3.4 or later (or
-    `next-3.4` and later) and `#{sixel_support}` is `1`, which tmux reports
-    from 3.6; the client's terminal draws sixel when
-    `#{client_termfeatures}` has `sixel`. Without all of these, or when
+    #{window_cell_width} #{window_cell_height} #{client_cell_width}
+    #{client_cell_height} #{client_termfeatures}'`, read by position (a
+    variable an older tmux does not know expands to nothing). tmux stores
+    sixel when its version is 3.4 or later (or `next-3.4` and later) and
+    `#{sixel_support}` is `1`, which tmux reports from 3.6; tmux draws sixel
+    for its client when `#{client_termfeatures}` has `sixel` and
+    `#{client_cell_width}` and `#{client_cell_height}` are not 0, and shows
+    a placeholder otherwise (tmux's tty.c). Without all of these, or when
     tmux cannot be asked or read, images are half blocks: ratatui-image
     wraps its iTerm2 and kitty images, and sixel, in tmux passthrough,
     which tmux writes to the outer terminal at the outer cursor, without
@@ -857,13 +859,17 @@ list, so mxt does not offer an event-level mention list.
     the tui adapter encodes the sixel itself from ratatui-image's public
     parts: `Resize::size_for` and `Resize::resize` as `StatefulImage`
     uses them, `protocol::sixel::Sixel::new` with `is_tmux` false, and the
-    `Image` widget, again only when the image's size in cells changes. The
-    cell size is tmux's `#{window_cell_width}` and `#{window_cell_height}`,
-    with which tmux turns the image's pixels into cells, taken when mxt
-    starts. Only whole sixel bands of 6 pixel rows are kept (at most 5 rows
-    of pixels go): tmux counts an image's height in whole bands and its
-    cells rounded up (tmux's image-sixel.c), so a height that is not a
-    multiple of 6 takes a row more than the cells ratatui keeps for the
+    `Image` widget, again only when the image's size in cells or the cell
+    size changes. The cell size is tmux's, with which tmux turns the image's
+    pixels into cells: `#{window_cell_width}` and `#{window_cell_height}`
+    when mxt starts, and after each resize of mxt's pane the pane's size in
+    pixels over its size in cells, which tmux sets to exactly its cell size
+    times the pane's columns and rows (tmux's window.c), so no tmux runs
+    (tmux's answer again when the pane has no size in pixels). Only whole
+    sixel bands of 6 pixel rows are kept (at most 5 rows of pixels go):
+    tmux counts an image's height in whole bands and its cells rounded up
+    (tmux's image-sixel.c), so a height that is not a multiple of 6 takes a
+    row more than the cells ratatui keeps for the
     image. tmux drops an image when ASCII text, a blank too, or an erase is
     written over any of its cells, which the view's blanks below the image
     did in its first frame, and an image that reaches past the pane's last
@@ -910,12 +916,24 @@ list, so mxt does not offer an event-level mention list.
     and may be misplaced, as the user documentation says.
   - `"off"` shows only the file name and size in the view, and mxt then
     never queries the terminal for its graphics protocol.
-  - Under tmux with several clients attached, `#{client_termfeatures}` is
-    the client tmux takes for the session, and tmux draws a sixel image
-    only for clients whose terminal draws sixel, a text placeholder for the
-    others; `#{window_cell_*}` follows the client with the largest cells.
-    With forced protocols through passthrough, the cell size comes from
-    whichever terminal answers ratatui-image's query first.
+  - Under tmux with several clients attached, `#{client_termfeatures}` and
+    `#{client_cell_*}` are those of the client tmux takes for the session,
+    and tmux draws a sixel image only for clients whose terminal draws
+    sixel, a text placeholder for the others. tmux's cell size is that of
+    the client that sets the window's size: with tmux's default
+    `window-size latest`, the client that attached or typed last (with
+    `largest` or `smallest`, the largest cells among the clients). When a
+    client with another window size takes over, tmux resizes the window and
+    takes that client's cell size (with the same window size, it keeps
+    both). mxt's pane then resizes, so mxt takes the new cell size, ratatui
+    redraws every cell, tmux drops the pane's images, and the image is
+    encoded again in the new cell size. A take-over that leaves mxt's pane
+    at its size, which can happen in a window split into panes, leaves mxt
+    with the old cell size until the pane resizes again: an image then
+    takes more or fewer rows than its area, and one that reaches past the
+    pane's last row scrolls the pane. With forced protocols through
+    passthrough, the cell size comes from whichever terminal answers
+    ratatui-image's query first.
 
 ### Clipboard and terminal focus
 

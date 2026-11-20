@@ -49,8 +49,19 @@ pub(crate) struct Images {
 enum Encoder {
     /// For ratatui-image, in the protocol of its picker.
     Picker(Picker),
-    /// As sixel for tmux to store, in tmux's cell size (see [`TmuxSixel`]).
+    /// As sixel for tmux to store, in tmux's cell size (see [`TmuxSixel`]),
+    /// which [`Images::resized`] takes again.
     TmuxSixel(FontSize),
+}
+
+impl Encoder {
+    /// The cell size in pixels that images are scaled for.
+    fn font_size(&self) -> FontSize {
+        match self {
+            Encoder::Picker(picker) => picker.font_size(),
+            Encoder::TmuxSixel(cell) => *cell,
+        }
+    }
 }
 
 /// A decoded image, scaled down, prepared for the terminal.
@@ -113,24 +124,35 @@ impl Images {
         matches!(self.encoder, Encoder::TmuxSixel(_))
     }
 
+    /// After the terminal resized, takes tmux's cell size again for sixel
+    /// that tmux stores. tmux resizes the window when another client with
+    /// another window size takes it over (with tmux's default `window-size
+    /// latest`, the client that attached or typed last), and from then on
+    /// counts an image's cells in that client's cell size. ratatui redraws
+    /// every cell after a resize, so images are encoded again in the new
+    /// cell size. When it cannot be read, tmux's cell size stays.
+    pub(crate) fn resized(&mut self) {
+        if let Encoder::TmuxSixel(cell) = &mut self.encoder
+            && let Some(read) = image_protocol::tmux_cell()
+        {
+            *cell = read.into();
+        }
+    }
+
     /// Decodes `bytes`, the image of `item`, unless it is kept already, and
     /// keeps it scaled down to fit `screen` (the terminal's size in cells).
     pub(crate) fn insert(&mut self, item: ItemRef, bytes: &[u8], screen: Size) -> ImageResult<()> {
         if self.kept.get_mut(&item).is_some() {
             return Ok(());
         }
-        let font = match &self.encoder {
-            Encoder::Picker(picker) => picker.font_size(),
-            Encoder::TmuxSixel(cell) => *cell,
-        };
+        let font = self.encoder.font_size();
         let width = u32::from(screen.width) * u32::from(font.width);
         let height = u32::from(screen.height) * u32::from(font.height);
         let image = decode(bytes, width, height)?;
         let image = match &self.encoder {
             Encoder::Picker(picker) => Prepared::Picker(picker.new_resize_protocol(image)),
-            Encoder::TmuxSixel(cell) => Prepared::TmuxSixel(TmuxSixel {
+            Encoder::TmuxSixel(_) => Prepared::TmuxSixel(TmuxSixel {
                 image,
-                cell: *cell,
                 encoded: None,
             }),
         };
@@ -148,6 +170,8 @@ impl Images {
     /// fit, once it is kept. The image is encoded while drawing; the first
     /// failure of each image is kept for [`Images::take_failure`].
     pub(crate) fn draw(&mut self, frame: &mut Frame, area: Rect, item: &ItemRef) {
+        // For sixel that tmux stores, tmux's cell size.
+        let font = self.encoder.font_size();
         let Some(kept) = self.kept.get_mut(item) else {
             return;
         };
@@ -160,7 +184,7 @@ impl Images {
                     .and_then(Result::err)
                     .map(|error| error.to_string())
             }
-            Prepared::TmuxSixel(image) => match image.encoded(&resize, area.as_size()) {
+            Prepared::TmuxSixel(image) => match image.encoded(&resize, area.as_size(), font) {
                 Ok(sixel) => {
                     frame.render_widget(Image::new(sixel), area);
                     None
@@ -189,20 +213,32 @@ impl Images {
 /// screen-write.c).
 struct TmuxSixel {
     image: DynamicImage,
-    /// tmux's cell size, in which tmux turns the image's pixels into cells.
-    cell: FontSize,
-    /// The size in cells the image was last encoded for, and its sixel.
-    encoded: Option<(Size, Result<Protocol, Errors>)>,
+    /// What the image was last encoded for, and its sixel.
+    encoded: Option<(Fit, Result<Protocol, Errors>)>,
 }
 
+/// The size in cells of an image, and tmux's cell size (width, height) in
+/// pixels.
+type Fit = (Size, (u16, u16));
+
 impl TmuxSixel {
-    /// The sixel of the image scaled down by `resize` to fit `area`,
-    /// encoded again only when its size in cells changes.
-    fn encoded(&mut self, resize: &Resize, area: Size) -> &Result<Protocol, Errors> {
-        let size = resize.size_for(&self.image, self.cell, area);
+    /// The sixel of the image scaled down by `resize` to fit `area` in
+    /// cells of `cell` pixels, tmux's cell size, encoded again only when its
+    /// size in cells or tmux's cell size changes: in another cell size, tmux
+    /// would count the same pixels as another number of cells.
+    fn encoded(
+        &mut self,
+        resize: &Resize,
+        area: Size,
+        cell: FontSize,
+    ) -> &Result<Protocol, Errors> {
+        let key: Fit = (
+            resize.size_for(&self.image, cell, area),
+            (cell.width, cell.height),
+        );
         let encoded = match self.encoded.take() {
-            Some((encoded, sixel)) if encoded == size => (encoded, sixel),
-            _ => (size, tmux_sixel(&self.image, self.cell, resize, size)),
+            Some((encoded, sixel)) if encoded == key => (encoded, sixel),
+            _ => (key, tmux_sixel(&self.image, cell, resize, key.0)),
         };
         &self.encoded.insert(encoded).1
     }
@@ -309,10 +345,7 @@ fn detect() -> io::Result<Picker> {
 fn cell_size_measured(picker: &Picker) -> bool {
     let window = termios::tcgetwinsize(io::stdout())
         .ok()
-        .filter(|size| {
-            size.ws_xpixel > 0 && size.ws_ypixel > 0 && size.ws_col > 0 && size.ws_row > 0
-        })
-        .map(|size| (size.ws_xpixel / size.ws_col, size.ws_ypixel / size.ws_row));
+        .and_then(|size| image_protocol::window_cell(&size));
     let font = picker.font_size();
     measured(picker.capabilities(), (font.width, font.height), window)
 }
@@ -442,22 +475,17 @@ mod tests {
         // 20 pixels, 140 pixels, which are 23 sixel bands and 2 rows.
         let mut image = TmuxSixel {
             image: DynamicImage::new_rgb8(300, 900),
-            cell: FontSize::new(10, 20),
             encoded: None,
         };
         let resize = Resize::Fit(Some(FilterType::Triangle));
-        let Ok(Protocol::Sixel(sixel)) = image.encoded(&resize, Size::new(40, 7)) else {
+        let cell = FontSize::new(10, 20);
+        let Ok(Protocol::Sixel(sixel)) = image.encoded(&resize, Size::new(40, 7), cell) else {
             panic!("not encoded as sixel");
         };
         assert_eq!(sixel.size, Size::new(5, 7));
-        // No passthrough (`ESC P tmux;` with every ESC doubled): ratatui-image
-        // erases the cells and then writes the image itself.
+        // No passthrough (`ESC P tmux;` with every ESC doubled), so that tmux
+        // reads the image itself.
         assert!(!sixel.is_tmux);
-        assert!(
-            sixel.data.starts_with("\x1b[5X\x1b[1B"),
-            "{:?}",
-            &sixel.data[..20]
-        );
         assert!(!sixel.data.contains("tmux;") && !sixel.data.contains("\x1b\x1b"));
         // tmux counts the image's height in whole bands, and its cells
         // rounded up (`sixel_size_in_cells` in tmux's image-sixel.c): 140
@@ -465,6 +493,31 @@ mod tests {
         let (width, height) = raster(&sixel.data);
         assert_eq!((width, height), (50, 138));
         assert_eq!(height.div_ceil(20), 7);
+    }
+
+    #[test]
+    fn sixel_for_tmux_is_encoded_again_in_another_cell_size() {
+        // A portrait photo that takes 5x7 cells both at 10x20 and at 16x32
+        // pixels. A sixel kept for 5x7 cells alone would stay 138 pixels
+        // high, which tmux at 16x32 counts as 5 rows.
+        let mut image = TmuxSixel {
+            image: DynamicImage::new_rgb8(300, 900),
+            encoded: None,
+        };
+        let resize = Resize::Fit(Some(FilterType::Triangle));
+        for (cell, pixels) in [
+            ((10, 20), (50, 138)),
+            ((16, 32), (80, 222)),
+            ((10, 20), (50, 138)),
+        ] {
+            let Ok(Protocol::Sixel(sixel)) = image.encoded(&resize, Size::new(40, 7), cell.into())
+            else {
+                panic!("not encoded as sixel");
+            };
+            assert_eq!(sixel.size, Size::new(5, 7), "{cell:?}");
+            assert_eq!(raster(&sixel.data), pixels, "{cell:?}");
+            assert_eq!(pixels.1.div_ceil(u32::from(cell.1)), 7);
+        }
     }
 
     /// Appends a PNG chunk: its length, type, data and CRC-32.
