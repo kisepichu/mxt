@@ -82,7 +82,6 @@ enum Motion {
 }
 
 /// What the full-screen view shows (design, "Help views").
-#[derive(Clone, Debug, PartialEq, Eq)]
 enum View {
     /// A message's text or image: the item under the cursor when it opened.
     Message(ItemRef),

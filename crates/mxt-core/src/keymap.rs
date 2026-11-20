@@ -679,8 +679,21 @@ mod tests {
             .lines()
             .filter(|line| line.starts_with("[keymap."))
             .collect();
-        let names = TableId::ALL.map(|id| format!("[keymap.{}]", id.config_name()));
-        assert_eq!(headers, names);
+        assert_eq!(
+            headers,
+            [
+                "[keymap.normal]",
+                "[keymap.room_list]",
+                "[keymap.timeline]",
+                "[keymap.composer.normal]",
+                "[keymap.composer.visual]",
+                "[keymap.composer.insert]",
+                "[keymap.composer.completion]",
+                "[keymap.message_view]",
+                "[keymap.picker]",
+                "[keymap.command_line]",
+            ]
+        );
 
         let normal = section(&text, "normal");
         for line in [

@@ -322,7 +322,7 @@ impl App {
     }
 
     /// Whether the open view is the message view of `item`.
-    fn views(&self, item: &ItemRef) -> bool {
+    fn shows_message(&self, item: &ItemRef) -> bool {
         matches!(&self.view, Some(View::Message(viewed)) if viewed == item)
     }
 
@@ -334,7 +334,7 @@ impl App {
         bytes: MediaBytes,
         effects: &mut Vec<Effect>,
     ) {
-        if self.views(&item) {
+        if self.shows_message(&item) {
             effects.push(Effect::Ui(UiEffect::ShowImage { item, bytes }));
         }
     }
@@ -343,7 +343,7 @@ impl App {
     /// Info, because the reason is expected (the file is too large to
     /// preview); a failed fetch comes as `Msg::EffectFailed`.
     pub(super) fn image_unavailable(&mut self, item: &ItemRef, reason: &str) {
-        if self.views(item) {
+        if self.shows_message(item) {
             self.set_status(StatusKind::Info, format!("No image preview: {reason}"));
         }
     }
