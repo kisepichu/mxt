@@ -404,9 +404,10 @@ impl App {
     /// the text would go, a paste larger than [`PASTE_LIMIT`] goes nowhere,
     /// and the status line says so. Pending keys end first, as on their
     /// timeout, so they keep their order with the text; keys pending in
-    /// another input context are dropped, as a key there would drop them.
-    /// Like any key but `y`, a paste cancels a question, and it never
-    /// answers one that a binding ending before it asks.
+    /// another input context end or are dropped as a key would end or drop
+    /// them (see [`App::enter_context`]). Like any key but `y`, a paste
+    /// cancels a question, and it never answers one that a binding ending
+    /// before it asks.
     fn paste(&mut self, text: String, editor: Option<EditorMode>, effects: &mut Vec<Effect>) {
         self.status = None;
         self.editor = editor;
@@ -430,16 +431,14 @@ impl App {
                 return;
             }
             let context = self.input_context(self.editor);
-            if context != self.key_context {
-                self.resolver.reset();
-                self.key_context = context;
-            }
-            let ended = self.resolver.interrupt(self.keymap.effective(context));
-            if ended.is_empty() {
-                break context;
-            }
-            for next in ended {
-                self.resolved(context.sink(), next, effects);
+            if !self.enter_context(context, effects) {
+                let ended = self.resolver.interrupt(self.keymap.effective(context));
+                if ended.is_empty() {
+                    break context;
+                }
+                for next in ended {
+                    self.resolved(context.sink(), next, effects);
+                }
             }
             if self.confirm.is_some() {
                 return;
@@ -491,9 +490,13 @@ impl App {
             return self.type_secret(key, effects);
         }
         let context = self.input_context(self.editor);
-        if context != self.key_context {
-            self.resolver.reset();
-            self.key_context = context;
+        if self.enter_context(context, effects) {
+            // As after keys fed again, a question drops `key`, and a binding
+            // that ran may have changed the context again.
+            if self.confirm.is_none() {
+                self.feed(key, effects);
+            }
+            return;
         }
         let resolved = self.resolver.feed(
             self.keymap.effective(context),
@@ -504,6 +507,31 @@ impl App {
         for next in resolved {
             self.resolved(context.sink(), next, effects);
         }
+    }
+
+    /// Makes `context` the input context keys are resolved in. Keys pending
+    /// in another context are dropped, with the count, except between two
+    /// contexts whose keys go to the editor: there a key released to the
+    /// editor changed its mode while they waited, as the first `g` of `gg`
+    /// makes edtui wait for its next key while the second waits for a
+    /// binding such as `gt`. They end as on their timeout then, in the
+    /// context they started in. Whether keys ended.
+    fn enter_context(&mut self, context: InputContext, effects: &mut Vec<Effect>) -> bool {
+        let started = self.key_context;
+        self.key_context = context;
+        if started == context {
+            return false;
+        }
+        if started.sink() != KeySink::Editor || context.sink() != KeySink::Editor {
+            self.resolver.reset();
+            return false;
+        }
+        let ended = self.resolver.interrupt(self.keymap.effective(started));
+        let any = !ended.is_empty();
+        for next in ended {
+            self.resolved(KeySink::Editor, next, effects);
+        }
+        any
     }
 
     /// `y` runs the confirmed action; any other key cancels it.

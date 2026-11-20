@@ -16,9 +16,9 @@ pub enum EditorMode {
     Search,
     /// Normal or visual mode while a key waits for the next one: `f`, `t`
     /// or `r` for its character, an operator (`d`, `c`, `y`) for the rest
-    /// of its command, a text object's `i` or `a` for the object. The next
-    /// key goes to the editor without the keymap. Only keys carry it; the
-    /// status line shows the editor's own mode.
+    /// of its command, a text object's `i` or `a` for the object, `g` for
+    /// `gg`. The next key goes to the editor without the keymap. Only keys
+    /// carry it; the status line shows the editor's own mode.
     AwaitingChar,
 }
 

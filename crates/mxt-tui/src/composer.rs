@@ -797,4 +797,37 @@ mod tests {
         assert_eq!(row(&composers), (0, EditorMode::Normal));
         assert_eq!(app.focus(), Focus::Composer);
     }
+
+    #[test]
+    fn keys_typed_quickly_after_gg_or_dd_run_with_a_binding_that_starts_with_g_or_d() {
+        // The second `g` or `d` waits for the binding, while the editor,
+        // which has the first one, waits for its next key. The second one
+        // then ends as on its timeout, before the key typed after it.
+        let keymap = |typed: &str| {
+            let keys = KeySeq::parse(typed, &leader()).unwrap();
+            let binding = Binding::single(Action::FocusTimeline);
+            Keymap::new(&leader(), [(TableId::Normal, keys, binding)])
+        };
+        let row = |composers: &Composers| {
+            let composer = composers.get(&RoomId::new("!a:example.org")).unwrap();
+            composer.editor.state.cursor.row
+        };
+        // `gg` keeps the column, as in nvim, so `x` deletes the `e`.
+        let (mut app, mut composers) = composing_with(keymap("gt"), "one<C-j>two");
+        run(&mut app, &mut composers, "ggx");
+        assert_eq!(
+            (row(&composers), text_of(&composers)),
+            (0, "on\ntwo".into())
+        );
+        assert!(app.pending_keys().is_empty());
+
+        // `dd` deletes the first line, and `j` moves down.
+        let (mut app, mut composers) = composing_with(keymap("dq"), "one<C-j>two<C-j>three");
+        run(&mut app, &mut composers, "kkddj");
+        assert_eq!(
+            (row(&composers), text_of(&composers)),
+            (1, "two\nthree".into())
+        );
+        assert_eq!(app.focus(), Focus::Composer);
+    }
 }
