@@ -26,8 +26,7 @@ A room in the list shows at most one badge, the first that applies:
 | `3`, dim | unread messages that do not notify you, as in muted rooms |
 | `U` | marked as unread |
 
-Counts above 99 show as `99+`. Muted rooms also show `Muted`, and rooms set
-to notify only for mentions and keywords show `Mentions only`.
+Counts above 99 show as `99+`. Muted rooms also show `Muted`.
 
 In the timeline, each message has a header with its time, the sender, and
 `(edited)`, `sending…` or `failed` when they apply. A reply's header is
@@ -78,8 +77,13 @@ visual mode.
 | `<leader><leader>` | `picker.rooms` | the room picker |
 | `<leader>m` | `picker.rooms` with `filter = "mentions"` | the room picker, rooms with unread mentions only |
 | `<leader>e` | `sidebar.toggle` | hide or show the room list |
-| `<C-w>h` | `focus.room_list` | focus the room list (and show it) |
-| `<C-w>l` | `focus.timeline` | focus the timeline |
+| `<C-w>h`, `<C-w><C-h>` | `focus.room_list` | focus the room list (and show it) |
+| `<C-w>l`, `<C-w><C-l>` | `focus.timeline` | focus the timeline |
+| `<C-w>j`, `<C-w><C-j>` | `composer.focus` with `mode = "keep"` | focus the composer below the timeline, in the mode it was left in |
+| `<C-w>k`, `<C-w><C-k>` | `focus.timeline` | focus the timeline above the composer |
+| `]u` / `[u` | `room.open` with `filter = "unread"` and `pick = "next"` / `"prev"` | open the next or previous unread room, wrapping around |
+
+As in nvim, ctrl can stay held for the key after `<C-w>`.
 
 ### `room_list` and `timeline`
 
@@ -128,9 +132,9 @@ goes out by itself once the sync is back; `R` is for the others.
 | `composer.insert` | `<CR>` | `composer.send` | send |
 | `composer.insert` | `<C-j>` | `composer.newline` | a line break (many terminals send Shift+Enter as `<CR>`) |
 | `composer.insert`, `composer.normal` | `<C-x><C-e>` | `composer.external_editor` | edit in `$VISUAL` or `$EDITOR` |
-| `composer.normal` | `<Esc>` | `focus.timeline` | back to the timeline; the text stays |
+| `composer.normal` | `<Esc>` | `composer.leave` | back to the timeline; the text stays, and a reply or an edit without text ends |
 | `composer.normal` | `<C-c>` | `composer.cancel` | end a reply (the text stays) or an edit (the text goes) |
-| `composer.completion` | `<C-n>` / `<C-p>` | `completion.next` / `completion.prev` | select a mention |
+| `composer.completion` | `<C-n>`, `<Down>` / `<C-p>`, `<Up>` | `completion.next` / `completion.prev` | select a mention |
 | `composer.completion` | `<C-y>`, `<Tab>`, `<CR>` | `completion.accept` | insert it |
 | `composer.completion` | `<C-e>` | `completion.cancel` | close the mention menu |
 
@@ -141,7 +145,7 @@ second `<Esc>` returns to the timeline.
 
 | Table | Key | Action |
 |---|---|---|
-| `picker` | `<C-n>` / `<C-p>` | `picker.next` / `picker.prev` |
+| `picker` | `<C-n>`, `<Down>`, `<Tab>` / `<C-p>`, `<Up>`, `<S-Tab>` | `picker.next` / `picker.prev` |
 | `picker` | `<CR>` / `<Esc>` | `picker.accept` / `picker.cancel` |
 | `command_line` | `<CR>` / `<Esc>` / `<Tab>` | `command_line.execute` / `command_line.cancel` / `command_line.complete` |
 | `message_view` | `q`, `<Esc>` | `view.close` |
@@ -153,7 +157,7 @@ use the commands below:
 
 | Action | Command |
 |---|---|
-| `room.open` with `filter`, `pick` or `query`, for example "open the next unread room" | `:open <room>` |
+| `room.open` with other arguments than `]u` and `[u`, for example a `query` | `:open <room>` |
 | `room.mark_read` | |
 | `room.mute`, `room.unmute` | `:mute`, `:unmute` |
 | `file.upload` | `:upload <path>` |
@@ -217,7 +221,9 @@ The composer:
   first); typing narrows it. The inserted `@name` is plain text: delete or
   change it, and it is no longer a mention.
 - `r` and `e` in the timeline label the composer `Reply to <name>` or `Edit`.
-  `<C-c>` in normal mode ends the reply or the edit.
+  `<C-c>` in normal mode ends the reply or the edit. `<Esc>` in normal mode
+  ends it too when the composer is empty (a space counts as text), so a
+  reply started by mistake ends with `<Esc>` and nothing typed is lost.
 
 The message view (`<CR>` on a message) holds the message's text in an
 editor, so motions, `/` search, visual selection and yanks work on messages
@@ -241,11 +247,18 @@ breaks included, and runs no keys.
   replaces the character under the cursor in normal mode, as one undo step.
   `h`, `l`, `<Left>` and `<Right>` step over whole grapheme clusters.
 - The key after `f`, `F`, `t`, `T` or `r` goes to the editor without the
-  keymap: `f:` finds a colon, and `<Esc>` cancels.
+  keymap: `f:` finds a colon, and `<Esc>` cancels. As in nvim's
+  operator-pending mode, so does the key after an operator (`d`, `c`, `y`)
+  and after a text object's `i` or `a` (`ci[`, `vi"`): `d<Esc>` cancels the
+  `d`, and a binding in `normal` such as `]u` never takes the `]` of `ci]`.
 - `df`, `dt`, `cf` and `ct` work, and `;` and `,` repeat their find. Other
   operators with these motions (`dF`, `cT`, `yf`, `d;`) do nothing, and the
   character after `dF` or `yf` is dropped, as is the one after `r` in visual
   mode.
+- The text objects are `i` with `w`, `W`, a quote or a bracket, after `d`
+  and `c` and in visual mode (`viW` excepted). There are no `a` objects and
+  no `yi`: `da(`, `yi"` and visual `a(` do nothing, and the key after them
+  is dropped.
 - `w`, `e`, `b`, `dw`, `cw` and `iw` group characters as vim does: kanji,
   hiragana and katakana are separate words, full-width punctuation is
   punctuation, and the ideographic space is a space. Emoji count as

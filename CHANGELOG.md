@@ -8,6 +8,28 @@ marked **Breaking:**.
 
 ## [Unreleased]
 
+### Added
+
+- Default keys: `]u` and `[u` open the next and previous unread room;
+  `<C-w>j` focuses the composer in the mode it was left in and `<C-w>k` the
+  timeline, and `<C-w>` works with ctrl held for `h`, `j`, `k` and `l`, as
+  in nvim; `<Down>`, `<Tab>`, `<Up>` and `<S-Tab>` move through pickers, and
+  `<Down>` and `<Up>` through the mention menu. Bindings of the same keys to
+  the same actions in a configuration stay valid.
+- The action `composer.leave`, which returns to the timeline and ends a
+  reply or an edit whose text is empty.
+
+### Changed
+
+- The room list no longer labels rooms set to notify only for mentions and
+  keywords `Mentions only`; muted rooms keep `Muted`.
+- With the mention menu open, `<Down>` and `<Up>` select the next and
+  previous candidate instead of moving the editor's cursor.
+- `<Esc>` in the composer's normal mode runs `composer.leave`: it also ends
+  a reply or an edit without text, so a reply started by mistake ends with
+  `<Esc>`. Any text stays with its reply or edit. Binding `<Esc>` in
+  `composer.normal` to `focus.timeline` keeps the old behavior.
+
 ### Fixed
 
 - After the timeline cursor moved up from the newest message (to reply to
@@ -16,6 +38,14 @@ marked **Breaking:**.
   opened again. Now they appear at the bottom while the pane shows the
   newest message's last row, and whenever the cursor's message and every
   message after it fit on the pane.
+- As in nvim's operator-pending mode, the key after `ci`, `di` and visual
+  `i`, after `ca`, `da`, `yi`, `ya` and visual `a`, and after a bare `d`,
+  `c` or `y` goes to the editor without the keymap. Bindings in `normal`
+  that start with `[`, `]`, `(`, `"` and similar keys, the new `]u` and `[u`
+  among them, no longer delay or take over text objects in the composer:
+  `ci[` no longer waits for the next key, and a `u` typed after it no
+  longer opens another room. `d<Esc>` cancels the `d` instead of leaving
+  the composer.
 
 ## [0.1.2] - 2026-11-20
 

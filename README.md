@@ -17,8 +17,8 @@ user interface around it. It runs on Linux and macOS.
   `Discord / Alice`) and shows one unread badge per room: mentions,
   notifications, unread messages (in muted rooms too) or the manual unread
   mark.
-- A fuzzy room picker, the same picker for rooms with unread mentions, and an
-  action that opens the next unread room.
+- A fuzzy room picker, the same picker for rooms with unread mentions, and
+  `]u` and `[u`, which open the next or previous unread room.
 - A timeline with formatted messages, replies, edits, reactions and read
   receipts, and a full-screen view for long messages and images.
 - A composer with vim modes, Markdown, `@` mention completion, replies and

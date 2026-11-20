@@ -464,6 +464,11 @@ covered by unit tests.
   `mode = "keep"` it keeps edtui's previous mode.
 - `composer.cancel`: a reply draft becomes `New` and keeps its text. An edit
   draft becomes `New` and the composer is cleared.
+- `composer.leave` (`<Esc>` in the composer's normal mode): when the draft
+  is a reply or an edit and the composer is empty, it ends the draft as
+  `composer.cancel` does; then the timeline gets the focus. Any text, also
+  whitespace alone (the composer is empty only without a character), keeps
+  its draft, so nothing typed is lost. `focus.timeline` never ends a draft.
 - Mention completion:
   - After each edit in insert mode, the tui adapter looks for an `@` token at
     the cursor (an `@` at the start of the text or after whitespace, followed
@@ -486,10 +491,19 @@ covered by unit tests.
     `composer.completion`, then in `composer.insert`. Otherwise look it up in
     `composer.insert`. If it is not bound, pass it to edtui.
   - edtui in search mode: every key goes to edtui, including `<Esc>`.
-  - edtui in normal or visual mode while a key waits for its character
-    (after `f`, `F`, `t`, `T` or `r`, also after an operator, as in `df` or
-    `yt`): the next key goes to edtui without the keymap (see "edtui
-    differences from vim").
+  - edtui in normal or visual mode while a key waits for the next one: the
+    next key goes to edtui without the keymap (see "edtui differences from
+    vim"), as in nvim, whose operator-pending mode sees no normal-mode
+    mappings. This is the key after:
+    - `f`, `F`, `t`, `T` or `r`: its character, also after an operator, as
+      in `df` or `yt`;
+    - an operator, `d`, `c` or `y` in normal mode: `dw`, `yy`, and
+      `d<Esc>`, which cancels the `d`;
+    - a text object's `i` or `a` after an operator (`ci[`, `da(`, `yi"`) or
+      in visual mode (`vi[`): the object.
+    So bindings in `normal` that start with `[`, `]`, `(`, `"` and similar
+    keys, the default `]u` and `[u` among them, neither delay these
+    commands nor take their keys.
 - Pasted text, wherever the keys go: mxt turns on bracketed paste, so the
   terminal reports a paste as one event, which the tui adapter sends as
   `Msg::Paste` with its line breaks as `\n` (terminals and tmux send `\r`).
@@ -616,7 +630,7 @@ why, and exits. The next start logs in as a new device with fresh stores.
 | composer modes | the composer has focus; the status line shows edtui's mode (`INSERT`, `NORMAL`, `VISUAL`, `SEARCH`) | see "Input routing" above |
 | `COMMAND` | the `:` command line is open | `command_line` table, then text input |
 | `PICKER` | the room picker, the emoji picker or the link picker is open | `picker` table, then text input |
-| `VIEW` | the message view or a help view is open; the status line shows `VIEW` and the view editor's mode (`VIEW NORMAL`, `VIEW INSERT`, `VIEW VISUAL`, `VIEW SEARCH`) | `message_view` table while its editor is in normal or visual mode and no key waits for its character (see "Input routing" above), then edtui |
+| `VIEW` | the message view or a help view is open; the status line shows `VIEW` and the view editor's mode (`VIEW NORMAL`, `VIEW INSERT`, `VIEW VISUAL`, `VIEW SEARCH`) | `message_view` table while its editor is in normal or visual mode and no key waits for the next one (see "Input routing" above), then edtui |
 | `CONFIRM` | an action asks for confirmation | `y` confirms, any other key cancels |
 | `SECRET` | the recovery key is being entered | masked text input, `<CR>` submits, `<Esc>` cancels |
 
@@ -652,8 +666,8 @@ A room shows at most one badge, chosen by the first rule that matches:
 | `messages > 0` | `<messages>` | dim (typical for muted rooms) |
 | `marked` | `U` | marked style |
 
-Counts above 99 show as `99+`. Muted rooms also show a `Muted` label, and
-rooms set to mentions and keywords only show a `Mentions only` label.
+Counts above 99 show as `99+`. Muted rooms also show a `Muted` label. Rooms
+set to mentions and keywords only show no label.
 
 ### Room list
 
@@ -671,7 +685,7 @@ instead, and it never takes more than half of the width.
 - `"inline"` (default): one row per room, `network / room` as in "Room names".
 - `"below"`: a room with a network part takes two rows. The first row has the
   room part (bold when the room is open) and, right-aligned, the badge and
-  the notification mode label. The second row has the network part, dim,
+  the `Muted` label. The second row has the network part, dim,
   indented two columns and cut with `…` at its end when it does not fit. A
   Discord DM reads `Alice` over `  Discord`. A room without a network part
   takes one row. The cursor covers both rows of a room, and half-page moves
@@ -716,6 +730,10 @@ instead, and it never takes more than half of the width.
 | `normal` | `<leader>e` | `sidebar.toggle` | file explorer toggle |
 | `normal` | `<leader>m` | `{ action = "picker.rooms", filter = "mentions" }` | |
 | `normal` | `<C-w>h` / `<C-w>l` | `focus.room_list` / `focus.timeline` | window movement |
+| `normal` | `<C-w><C-h>` / `<C-w><C-l>` | `focus.room_list` / `focus.timeline` | the same with ctrl held |
+| `normal` | `<C-w>j`, `<C-w><C-j>` | `{ action = "composer.focus", mode = "keep" }` | window below |
+| `normal` | `<C-w>k`, `<C-w><C-k>` | `focus.timeline` | window above |
+| `normal` | `]u` / `[u` | `{ action = "room.open", filter = "unread", pick = "next" }` / `pick = "prev"` | `]` / `[` motions |
 | `room_list`, `timeline` | `j` / `k` | `cursor.down` / `cursor.up` | same |
 | `room_list`, `timeline` | `gg` / `G` | `cursor.first` / `cursor.last` | same |
 | `room_list`, `timeline` | `<C-d>` / `<C-u>` | `cursor.half_page_down` / `cursor.half_page_up` | same |
@@ -734,18 +752,22 @@ instead, and it never takes more than half of the width.
 | `composer.insert` | `<CR>` | `composer.send` | |
 | `composer.insert` | `<C-j>` | `composer.newline` | |
 | `composer.insert`, `composer.normal` | `<C-x><C-e>` | `composer.external_editor` | shell edit-command-line |
-| `composer.normal` | `<Esc>` | `focus.timeline`; the draft is kept | |
+| `composer.normal` | `<Esc>` | `composer.leave`: back to the timeline; a reply or an edit without text ends | |
 | `composer.normal` | `<C-c>` | `composer.cancel` | |
 | `composer.completion` | `<C-n>` / `<C-p>` | `completion.next` / `completion.prev` | completion menu |
+| `composer.completion` | `<Down>` / `<Up>` | `completion.next` / `completion.prev` | completion menu |
 | `composer.completion` | `<C-y>` / `<Tab>` / `<CR>` | `completion.accept` | completion menu |
 | `composer.completion` | `<C-e>` | `completion.cancel` | completion menu |
 | `picker` | `<C-n>` / `<C-p>` | `picker.next` / `picker.prev` | completion menu |
+| `picker` | `<Down>`, `<Tab>` / `<Up>`, `<S-Tab>` | `picker.next` / `picker.prev` | completion menu |
 | `picker` | `<CR>` / `<Esc>` | `picker.accept` / `picker.cancel` | |
 | `command_line` | `<CR>` / `<Esc>` / `<Tab>` | `command_line.execute` / `command_line.cancel` / `command_line.complete` | same |
 | `message_view` | `q` / `<Esc>` | `view.close` | close window |
 
 `<Esc>` in the composer's insert mode is not bound: edtui switches to its
-normal mode and the draft is kept.
+normal mode and the draft is kept. A user binding of `<Esc>` in
+`composer.normal`, such as `"<Esc>" = "focus.timeline"`, replaces
+`composer.leave` like any other default.
 
 `<C-j>` inserts a newline because many terminals cannot tell Shift+Enter apart
 from Enter.
@@ -754,11 +776,10 @@ The emoji picker lists, for an empty query, the user's own reactions on the
 message first, then the most common reactions, then every other emoji; a
 query is matched against shortcodes and names.
 
-There is no default binding for "open the next unread room". The action exists
-and users bind it themselves, for example
-`"]u" = { action = "room.open", filter = "unread", pick = "next" }`.
-`room.mark_read` has no default binding either; the configuration example
-binds it to `<leader>x` together with opening the next unread room.
+`]u` and `[u` open the next and previous unread room, wrapping around
+(`filter = "unread"`). `room.mark_read` has no default binding; the
+configuration example binds it to `<leader>x` together with opening the
+next unread room.
 
 ### Search and jumps
 
@@ -1092,7 +1113,7 @@ download_dir = "~/Downloads"
 opener = ["xdg-open"]           # for example ["wslview"] on WSL
 
 [keymap.normal]                 # outside text input, in every pane
-"]u" = { action = "room.open", filter = "unread", pick = "next" }
+"]n" = { action = "room.open", filter = "notify", pick = "next" }
 "<leader>x" = ["room.mark_read", { action = "room.open", filter = "unread", pick = "next" }]
 
 [keymap.timeline]               # only while the timeline has focus
@@ -1136,10 +1157,10 @@ Settings:
 |---|---|---|
 | `room_list` | the room list has focus | look in `normal` |
 | `timeline` | the timeline has focus | look in `normal` |
-| `composer.normal`, `composer.visual` | the composer has focus, edtui is in normal or visual mode, and no key waits for its character (see "Input routing") | look in `normal`, then pass the key to edtui |
+| `composer.normal`, `composer.visual` | the composer has focus, edtui is in normal or visual mode, and no key waits for the next one (see "Input routing") | look in `normal`, then pass the key to edtui |
 | `composer.insert` | the composer has focus and edtui is in insert mode | pass the key to edtui |
 | `composer.completion` | the mention menu is open in insert mode | look in `composer.insert`, then pass the key to edtui |
-| `message_view` | the message view is open, its editor is in normal or visual mode, and no key waits for its character | pass the key to edtui |
+| `message_view` | the message view is open, its editor is in normal or visual mode, and no key waits for the next one | pass the key to edtui |
 | `picker` | a picker is open | type it into the query |
 | `command_line` | the command line is open | type it into the command line |
 | `normal` | fallback for the tables above that name it | ignore the key |
@@ -1161,6 +1182,7 @@ Actions are named `<target>.<verb>`. The first release has:
   `message.resend`, `message.view`
 - composer: `composer.focus` (`mode = "insert" | "keep"`, default
   `"insert"`), `composer.send`, `composer.newline`, `composer.cancel`,
+  `composer.leave` (added after the first release),
   `composer.external_editor`, `completion.next`, `completion.prev`,
   `completion.accept`, `completion.cancel`
 - pickers: `picker.rooms`, `picker.next`, `picker.prev`, `picker.accept`,
@@ -1549,23 +1571,30 @@ asking for the recovery key ("Startup").
   `r{char}` in normal mode, one undo step; and `h`, `l`, `<Left>` and
   `<Right>` over whole grapheme clusters (skin tones, ZWJ sequences, VS16).
   The key after `f`, `t` or `r` goes to the editor without the keymap (`f:`
-  finds a colon, `<Esc>` cancels). edtui's own `df`, `dt`, `cf` and `ct`
-  still work, and `;` and `,` repeat their find. Other operators with these
-  motions (`dF`, `cT`, `yf`, `d;`) are not supported and do nothing; the
-  character after `dF` or `yf` is dropped, as is the one after `r` in visual
-  mode. mxt's edtui fork (see "Nix flake") draws the cursor and wraps lines
-  by grapheme cluster, and groups characters for `w`, `e`, `b`, `dw`, `cw`
-  and `iw` into vim's classes: kanji, hiragana and katakana are separate
-  words, full-width punctuation is punctuation, and the ideographic space is
-  a space; emoji count as punctuation, where vim gives them a class of their
-  own. Still needing edtui patches, or accepted for the first release: `x`,
-  `r`, `a`, insert-mode arrows and visual selections that work on single
-  characters inside a cluster, `e` stopping on the last character of a
-  cluster (the variation selector of `❤️`, drawn on the emoji's cell),
-  edtui's `df`, `dt`, `cf` and `ct`, which work on single characters and can
-  split a cluster (`df👍` leaves the skin tone), `df<Tab>`, which cancels
-  where `f<Tab>` finds a tab, operators with `F`, `T`, `;` and `,`, a
-  linewise `p` on the last line, `.` repeating `r`, and `r` in visual mode.
+  finds a colon, `<Esc>` cancels), and so does the key after an operator or
+  a text object's `i` or `a` (see "Input routing"). edtui's own `df`, `dt`,
+  `cf` and `ct` still work, and `;` and `,` repeat their find. Other
+  operators with these motions (`dF`, `cT`, `yf`, `d;`) are not supported
+  and do nothing; the character after `dF` or `yf` is dropped, as is the
+  one after `r` in visual mode. edtui's text objects are `i` with `w`, `W`,
+  a quote or a bracket, after `d` and `c` and in visual mode (there without
+  `iW`). It has no `a` objects and no `yi`: `da(`, `ya"`, `yi"` and visual
+  `a(` do nothing, and the object's key is dropped. A text object edtui
+  does not know (`dif`) drops its keys. mxt's edtui fork (see "Nix flake")
+  draws the cursor and wraps lines by grapheme cluster, and groups
+  characters for `w`, `e`, `b`, `dw`, `cw` and `iw` into vim's classes:
+  kanji, hiragana and katakana are separate words, full-width punctuation
+  is punctuation, and the ideographic space is a space; emoji count as
+  punctuation, where vim gives them a class of their own. Still needing
+  edtui patches, or accepted for the first release: `x`, `r`, `a`,
+  insert-mode arrows and visual selections that work on single characters
+  inside a cluster, `e` stopping on the last character of a cluster (the
+  variation selector of `❤️`, drawn on the emoji's cell), edtui's `df`,
+  `dt`, `cf` and `ct`, which work on single characters and can split a
+  cluster (`df👍` leaves the skin tone), `df<Tab>`, which cancels where
+  `f<Tab>` finds a tab, operators with `F`, `T`, `;` and `,`, `a` text
+  objects and `yi`, a linewise `p` on the last line, `.` repeating `r`, and
+  `r` in visual mode.
 - **Mentions on the remote network.** mxt relies on bridges turning
   `matrix.to` user links and `m.mentions` into remote mentions. Phase 0
   confirmed it for the Discord bridge in both directions; other bridges are

@@ -6,7 +6,7 @@ use std::ops::Bound;
 
 use crate::action::{Action, Binding, FocusMode};
 use crate::keys::{Key, KeySeq};
-use crate::rooms::RoomFilter;
+use crate::rooms::{Pick, RoomFilter, RoomTarget};
 
 /// A keymap table of the configuration (design, "Tables and resolution").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -70,7 +70,8 @@ pub enum InputContext {
     /// The message view's editor in normal or visual mode.
     MessageView,
     /// An editor in a mode where every key goes to it (search mode; the message
-    /// view's editor in insert mode; a key waiting for its character).
+    /// view's editor in insert mode; a key waiting for the next one, as after
+    /// `f` or an operator).
     EditorPassthrough,
     Picker,
     CommandLine,
@@ -151,6 +152,16 @@ const _: () = {
 /// The tables that share the movement and search defaults.
 const LISTS: &[TableId] = &[TableId::RoomList, TableId::Timeline];
 
+/// `]u` and `[u`: the next or previous unread room.
+const UNREAD_NEXT: Action = Action::RoomOpen(RoomTarget::Pick {
+    filter: RoomFilter::Unread,
+    pick: Pick::Next,
+});
+const UNREAD_PREV: Action = Action::RoomOpen(RoomTarget::Pick {
+    filter: RoomFilter::Unread,
+    pick: Pick::Prev,
+});
+
 /// The default keymap (design, "Default keymap"): tables, key notation with
 /// `<leader>`, and the action.
 const DEFAULTS: &[(&[TableId], &str, Action)] = &[
@@ -166,8 +177,26 @@ const DEFAULTS: &[(&[TableId], &str, Action)] = &[
         "<leader>m",
         Action::PickerRooms(RoomFilter::Mentions),
     ),
+    // nvim's window keys, ctrl held after `<C-w>` too. The composer is
+    // below the timeline.
     (&[TableId::Normal], "<C-w>h", Action::FocusRoomList),
+    (&[TableId::Normal], "<C-w><C-h>", Action::FocusRoomList),
     (&[TableId::Normal], "<C-w>l", Action::FocusTimeline),
+    (&[TableId::Normal], "<C-w><C-l>", Action::FocusTimeline),
+    (
+        &[TableId::Normal],
+        "<C-w>j",
+        Action::ComposerFocus(FocusMode::Keep),
+    ),
+    (
+        &[TableId::Normal],
+        "<C-w><C-j>",
+        Action::ComposerFocus(FocusMode::Keep),
+    ),
+    (&[TableId::Normal], "<C-w>k", Action::FocusTimeline),
+    (&[TableId::Normal], "<C-w><C-k>", Action::FocusTimeline),
+    (&[TableId::Normal], "]u", UNREAD_NEXT),
+    (&[TableId::Normal], "[u", UNREAD_PREV),
     (LISTS, "j", Action::CursorDown),
     (LISTS, "k", Action::CursorUp),
     (LISTS, "gg", Action::CursorFirst),
@@ -204,7 +233,7 @@ const DEFAULTS: &[(&[TableId], &str, Action)] = &[
         "<C-x><C-e>",
         Action::ComposerExternalEditor,
     ),
-    (&[TableId::ComposerNormal], "<Esc>", Action::FocusTimeline),
+    (&[TableId::ComposerNormal], "<Esc>", Action::ComposerLeave),
     (&[TableId::ComposerNormal], "<C-c>", Action::ComposerCancel),
     (
         &[TableId::ComposerCompletion],
@@ -213,7 +242,17 @@ const DEFAULTS: &[(&[TableId], &str, Action)] = &[
     ),
     (
         &[TableId::ComposerCompletion],
+        "<Down>",
+        Action::CompletionNext,
+    ),
+    (
+        &[TableId::ComposerCompletion],
         "<C-p>",
+        Action::CompletionPrev,
+    ),
+    (
+        &[TableId::ComposerCompletion],
+        "<Up>",
         Action::CompletionPrev,
     ),
     (
@@ -237,7 +276,11 @@ const DEFAULTS: &[(&[TableId], &str, Action)] = &[
         Action::CompletionCancel,
     ),
     (&[TableId::Picker], "<C-n>", Action::PickerNext),
+    (&[TableId::Picker], "<Down>", Action::PickerNext),
+    (&[TableId::Picker], "<Tab>", Action::PickerNext),
     (&[TableId::Picker], "<C-p>", Action::PickerPrev),
+    (&[TableId::Picker], "<Up>", Action::PickerPrev),
+    (&[TableId::Picker], "<S-Tab>", Action::PickerPrev),
     (&[TableId::Picker], "<CR>", Action::PickerAccept),
     (&[TableId::Picker], "<Esc>", Action::PickerCancel),
     (&[TableId::CommandLine], "<CR>", Action::CommandLineExecute),

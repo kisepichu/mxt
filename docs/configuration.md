@@ -35,7 +35,7 @@ download_dir = "~/Downloads"
 opener = ["xdg-open"]           # ["open"] on macOS, for example ["wslview"] on WSL
 
 [keymap.normal]                 # outside text input, in every pane
-"]u" = { action = "room.open", filter = "unread", pick = "next" }
+"]n" = { action = "room.open", filter = "notify", pick = "next" }
 "<leader>x" = ["room.mark_read", { action = "room.open", filter = "unread", pick = "next" }]
 
 [keymap.timeline]               # only while the timeline has focus
@@ -149,13 +149,14 @@ movement keys are in `room_list` and `timeline`, so `j` and `k` still reach
 the composer's editor. Only `room_list` and `timeline` take a count prefix
 (`5j`).
 
-A table that is checked first wins: with `"]"` in `timeline` and `"]u"` in
-`normal`, `]` in the timeline waits for the next key, as in nvim, and runs
-the `timeline` binding when the next key is not `u` or when `timeoutlen`
-passes. Some keys never reach the keymap: in the editors' search mode, after
-a key that waits for its character (`f`, `F`, `t`, `T`, `r`), and in the
-message view's insert mode, every key goes to the editor (see
-[Keys](keys.md#the-editors)).
+A table that is checked first wins: with `"]"` in `timeline` and the default
+`"]u"` in `normal`, `]` in the timeline waits for the next key, as in nvim,
+and runs the `timeline` binding when the next key is not `u` or when
+`timeoutlen` passes. Some keys never reach the keymap: in the editors' search
+mode, after a key that waits for its character (`f`, `F`, `t`, `T`, `r`),
+after an operator (`d`, `c`, `y`) and after a text object's `i` or `a`, as in
+nvim's operator-pending mode, and in the message view's insert mode, every
+key goes to the editor (see [Keys](keys.md#the-editors)).
 
 ### Binding values
 
@@ -173,9 +174,9 @@ A binding with arguments can also be a section of its own:
 [account]
 user_id = "@alice:example.org"
 
-[keymap.normal."]u"]
+[keymap.normal."]n"]
 action = "room.open"
-filter = "unread"
+filter = "notify"
 pick = "next"
 ```
 
@@ -205,17 +206,16 @@ Bind the key that arrives.
 
 ### Examples
 
-Open the next room with unread messages with `]u`, the previous one with
-`[u`, and the next one that notifies you with `]n`:
+`]u` and `[u` open the next and previous unread room by default. Open the
+next room that notifies you with `]n`, and the previous one with `[n`:
 
 ```toml
 [account]
 user_id = "@alice:example.org"
 
 [keymap.normal]
-"]u" = { action = "room.open", filter = "unread", pick = "next" }
-"[u" = { action = "room.open", filter = "unread", pick = "prev" }
 "]n" = { action = "room.open", filter = "notify", pick = "next" }
+"[n" = { action = "room.open", filter = "notify", pick = "prev" }
 ```
 
 Mark the current room as read and open the next unread room with
@@ -289,6 +289,7 @@ message under the timeline cursor.
 | `composer.send` | | Sends the composer's text as Markdown. A blank text does nothing. |
 | `composer.newline` | | Inserts a line break. |
 | `composer.cancel` | | Ends a reply (the text stays) or an edit (the composer is cleared). |
+| `composer.leave` | | Moves the focus to the timeline. When the composer is empty, a reply or an edit ends first, as with `composer.cancel`; any text, even a space, stays with its reply or edit. `focus.timeline` leaves the reply or edit as it is. |
 | `composer.external_editor` | | Edits the composer's text in `$VISUAL` or `$EDITOR`. |
 | `completion.next`, `completion.prev` | | Selects the next or previous member in the mention menu. |
 | `completion.accept` | | Inserts the selected mention. |

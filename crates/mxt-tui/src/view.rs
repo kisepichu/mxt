@@ -1054,15 +1054,15 @@ pub(crate) mod tests {
         let room = summary(
             name(Some("Discord"), "plain-room"),
             mentions(3),
-            NotificationMode::MentionsAndKeywords,
+            NotificationMode::Mute,
         );
         assert_eq!(
             row_text(&room, 40, NetworkPlacement::Inline),
-            "Discord / plain-room    @3 Mentions only"
+            "Discord / plain-room            @3 Muted"
         );
         assert_eq!(
-            row_text(&room, 22, NetworkPlacement::Inline),
-            "Disco… / plain-room @3"
+            row_text(&room, 14, NetworkPlacement::Inline),
+            "… / plain-… @3"
         );
         // A short name keeps the label while it fits whole.
         let short = summary(name(None, "ops"), mentions(3), NotificationMode::Mute);

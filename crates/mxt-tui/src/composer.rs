@@ -303,6 +303,13 @@ mod tests {
     use super::*;
     use crate::editor::tests::keys;
     use edtui::system_editor;
+    use mxt_core::app::{App, Focus};
+    use mxt_core::effect::{Effect, UiEffect};
+    use mxt_core::ids::{Timestamp, UserId};
+    use mxt_core::keymap::Keymap;
+    use mxt_core::keys::KeySeq;
+    use mxt_core::room::{NotificationMode, RoomKind, RoomName, RoomSummary, UnreadCounts};
+    use mxt_core::settings::Settings;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -346,6 +353,9 @@ mod tests {
         let mut composer = focused("");
         assert_eq!(type_keys(&mut composer, "ab"), [edited(false)]);
         assert_eq!(type_keys(&mut composer, "<BS>"), []);
+        assert_eq!(type_keys(&mut composer, "<BS>"), [edited(true)]);
+        // Whitespace is text: `composer.leave` keeps a reply of spaces.
+        assert_eq!(type_keys(&mut composer, "<Space>"), [edited(false)]);
         assert_eq!(type_keys(&mut composer, "<BS>"), [edited(true)]);
         let mut msgs = Vec::new();
         composer.insert_newline(&mut msgs);
@@ -612,5 +622,124 @@ mod tests {
             let cursor = terminal.get_cursor_position().unwrap();
             assert_eq!((cursor.x, cursor.y), (3, 0), "{text:?}");
         }
+    }
+
+    /// The app with the default keymap and the unread rooms `!a` and `!b`,
+    /// `!a` open and its composer focused, after typing `text` there in
+    /// insert mode and `<Esc>`.
+    fn composing(text: &str) -> (App, Composers) {
+        let leader = KeySeq::parse("<Space>", &KeySeq::default()).unwrap();
+        let mut app = App::new(
+            Keymap::new(&leader, []),
+            Settings::default(),
+            UserId::new("@me:example.org"),
+        );
+        for (room, at) in [("!a:example.org", 20), ("!b:example.org", 10)] {
+            app.update(Msg::RoomUpserted(RoomSummary {
+                id: RoomId::new(room),
+                name: RoomName {
+                    network: None,
+                    room: room.to_owned(),
+                },
+                kind: RoomKind::Group,
+                unread: UnreadCounts {
+                    messages: 1,
+                    ..UnreadCounts::default()
+                },
+                mode: NotificationMode::Default,
+                latest_activity: Some(Timestamp::from_millis(at)),
+            }));
+        }
+        let mut composers = Composers::new(SharedRegister::default());
+        run(&mut app, &mut composers, &format!("<CR>i{text}<Esc>"));
+        assert_eq!(
+            (app.focus(), app.open_room()),
+            (Focus::Composer, Some(&RoomId::new("!a:example.org")))
+        );
+        (app, composers)
+    }
+
+    /// Types `text` as the terminal does: each key goes to the core with
+    /// the open room's composer's key mode while the composer has focus,
+    /// and `FocusComposer` and `ReplayKeys` go to the composers.
+    fn run(app: &mut App, composers: &mut Composers, text: &str) {
+        for key in keys(text) {
+            let editor = (app.focus() == Focus::Composer)
+                .then(|| app.open_room().and_then(|room| composers.get(room)))
+                .flatten()
+                .map(Composer::key_mode);
+            let mut msgs = Vec::new();
+            for effect in app.update(Msg::Key { key, editor }) {
+                match effect {
+                    Effect::Ui(UiEffect::FocusComposer { room, mode }) => {
+                        composers.focus(room, mode, &mut msgs);
+                    }
+                    Effect::Ui(UiEffect::ReplayKeys(keys)) => {
+                        if let Some(composer) = composers.focused_mut() {
+                            composer.replay(&keys, &mut msgs);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for msg in msgs {
+                app.update(msg);
+            }
+        }
+    }
+
+    fn text_of(composers: &Composers) -> String {
+        composers
+            .get(&RoomId::new("!a:example.org"))
+            .unwrap()
+            .text()
+    }
+
+    #[test]
+    fn operators_and_text_objects_never_run_the_default_unread_keys() {
+        // `]u` and `[u` are in `normal`, where the composer's normal and
+        // visual modes look too. The key after an operator, or after a text
+        // object's `i` or `a`, goes to the editor: it neither waits for a
+        // `u` nor opens the next unread room with it.
+        let markdown = r#"[link](url)<Space>"quoted""#;
+        let unchanged = r#"[link](url) "quoted""#;
+        for (typed, expected) in [
+            ("0lci[text<Esc>", r#"[text](url) "quoted""#),
+            ("0ldi[", r#"[](url) "quoted""#),
+            ("0f(ldi(", r#"[link]() "quoted""#),
+            ("0lvi[", unchanged),
+            ("0lca]", unchanged),
+            (r#"0f"lyi""#, unchanged),
+            ("0d]", unchanged),
+            ("0c[", unchanged),
+            ("0y]", unchanged),
+        ] {
+            let (mut app, mut composers) = composing(markdown);
+            run(&mut app, &mut composers, typed);
+            assert_eq!(text_of(&composers), expected, "{typed}");
+            assert!(app.pending_keys().is_empty(), "{typed}");
+            run(&mut app, &mut composers, "u");
+            assert_eq!(
+                (app.focus(), app.open_room()),
+                (Focus::Composer, Some(&RoomId::new("!a:example.org"))),
+                "{typed}"
+            );
+        }
+
+        // `ci[` ends in insert mode, where `u` is typed; after `di[` it
+        // undoes.
+        let (mut app, mut composers) = composing(markdown);
+        run(&mut app, &mut composers, "0lci[u");
+        assert_eq!(text_of(&composers), r#"[u](url) "quoted""#);
+        let (mut app, mut composers) = composing(markdown);
+        run(&mut app, &mut composers, "0ldi[u");
+        assert_eq!(text_of(&composers), unchanged);
+
+        // `]u` itself still opens the next unread room from normal mode.
+        run(&mut app, &mut composers, "]u");
+        assert_eq!(
+            (app.focus(), app.open_room()),
+            (Focus::Timeline, Some(&RoomId::new("!b:example.org")))
+        );
     }
 }

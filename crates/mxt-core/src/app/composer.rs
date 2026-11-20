@@ -201,6 +201,22 @@ impl App {
         }
     }
 
+    /// `composer.leave`: back to the timeline. A reply or an edit ends
+    /// first, as with `composer.cancel`, when the composer is empty, so
+    /// nothing typed is lost: any text keeps its draft, whitespace alone
+    /// too, as the tui reports a composer empty only without a character.
+    pub(super) fn leave_composer(&mut self, effects: &mut Vec<Effect>) {
+        if let Some(room) = &self.open_room
+            && self
+                .composers
+                .get(room)
+                .is_some_and(|composer| composer.empty && composer.draft != Draft::New)
+        {
+            self.cancel_draft(effects);
+        }
+        self.focus = Focus::Timeline;
+    }
+
     /// Empties the room's composer: a new draft without mentions or menu.
     fn clear_composer(&mut self, room: RoomId, effects: &mut Vec<Effect>) {
         let composer = self.composers.entry(room.clone()).or_default();

@@ -88,7 +88,7 @@ download_dir = "~/Downloads"
 opener = ["xdg-open"]
 
 [keymap.normal]
-"]u" = { action = "room.open", filter = "unread", pick = "next" }
+"]n" = { action = "room.open", filter = "notify", pick = "next" }
 "<leader>x" = ["room.mark_read", { action = "room.open", filter = "unread", pick = "next" }]
 
 [keymap.timeline]
@@ -99,7 +99,7 @@ opener = ["xdg-open"]
 "<C-s>" = "composer.send"
 "#);
     assert_eq!(
-        lookup(&c, InputContext::Timeline, "]u"),
+        lookup(&c, InputContext::Timeline, "]n"),
         Some(vec!["room.open"])
     );
     assert_eq!(
@@ -401,6 +401,60 @@ fn two_spellings_of_one_key_sequence_are_rejected() {
         lookup(&c, InputContext::RoomList, "<C-a>"),
         Some(vec!["nop"])
     );
+}
+
+#[test]
+fn a_binding_identical_to_a_default_is_accepted() {
+    // Bindings that configurations had before they became defaults.
+    let bindings = r#"
+[keymap.normal]
+"<C-w><C-h>" = "focus.room_list"
+"<C-w><C-l>" = "focus.timeline"
+"<C-w>j" = { action = "composer.focus", mode = "keep" }
+"<C-w><C-j>" = { action = "composer.focus", mode = "keep" }
+"<C-w>k" = "focus.timeline"
+"<C-w><C-k>" = "focus.timeline"
+"]u" = { action = "room.open", filter = "unread", pick = "next" }
+"[u" = { action = "room.open", filter = "unread", pick = "prev" }
+
+[keymap.picker]
+"<Down>" = "picker.next"
+"<Tab>" = "picker.next"
+"<Up>" = "picker.prev"
+"<S-Tab>" = "picker.prev"
+
+[keymap.composer.completion]
+"<Down>" = "completion.next"
+"<Up>" = "completion.prev"
+"#;
+    let c = ok(&format!("{MINIMAL}{bindings}"));
+    let defaults = ok(MINIMAL);
+    let leader = KeySeq::parse("<Space>", &KeySeq::default()).unwrap();
+    for (ctx, keys) in [
+        (InputContext::RoomList, "<C-w><C-h>"),
+        (InputContext::Timeline, "<C-w><C-l>"),
+        (InputContext::Timeline, "<C-w>j"),
+        (InputContext::Timeline, "<C-w><C-j>"),
+        (InputContext::ComposerNormal, "<C-w>k"),
+        (InputContext::ComposerNormal, "<C-w><C-k>"),
+        (InputContext::Timeline, "]u"),
+        (InputContext::RoomList, "[u"),
+        (InputContext::Picker, "<Down>"),
+        (InputContext::Picker, "<Tab>"),
+        (InputContext::Picker, "<Up>"),
+        (InputContext::Picker, "<S-Tab>"),
+        (InputContext::ComposerCompletion, "<Down>"),
+        (InputContext::ComposerCompletion, "<Up>"),
+    ] {
+        let seq = KeySeq::parse(keys, &leader).unwrap();
+        let binding = c.keymap.effective(ctx).get(seq.keys());
+        assert!(binding.is_some(), "{keys}");
+        assert_eq!(
+            binding,
+            defaults.keymap.effective(ctx).get(seq.keys()),
+            "{keys}"
+        );
+    }
 }
 
 #[test]

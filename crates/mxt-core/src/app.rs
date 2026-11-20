@@ -606,6 +606,7 @@ impl App {
                 self.composer_effect(UiEffect::ExternalEditor, effects);
             }
             Action::ComposerCancel => self.cancel_draft(effects),
+            Action::ComposerLeave => self.leave_composer(effects),
             Action::CompletionNext => self.move_completion(true),
             Action::CompletionPrev => self.move_completion(false),
             Action::CompletionAccept => self.accept_completion(effects),

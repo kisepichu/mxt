@@ -55,12 +55,12 @@ pub enum NotificationMode {
 }
 
 impl NotificationMode {
-    /// "Muted" for `Mute`, "Mentions only" for `MentionsAndKeywords`, else None.
+    /// The room list's label: "Muted" for `Mute`, else None. Rooms that
+    /// notify only for mentions and keywords have no label.
     pub fn label(self) -> Option<&'static str> {
         match self {
-            NotificationMode::Default => None,
-            NotificationMode::MentionsAndKeywords => Some("Mentions only"),
             NotificationMode::Mute => Some("Muted"),
+            NotificationMode::Default | NotificationMode::MentionsAndKeywords => None,
         }
     }
 }
@@ -220,10 +220,7 @@ mod tests {
     #[test]
     fn mode_labels() {
         assert_eq!(NotificationMode::Mute.label(), Some("Muted"));
-        assert_eq!(
-            NotificationMode::MentionsAndKeywords.label(),
-            Some("Mentions only")
-        );
+        assert_eq!(NotificationMode::MentionsAndKeywords.label(), None);
         assert_eq!(NotificationMode::Default.label(), None);
     }
 
