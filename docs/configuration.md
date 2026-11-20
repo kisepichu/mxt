@@ -289,6 +289,7 @@ message under the timeline cursor.
 | `composer.send` | | Sends the composer's text as Markdown. A blank text does nothing. |
 | `composer.newline` | | Inserts a line break. |
 | `composer.cancel` | | Ends a reply (the text stays) or an edit (the composer is cleared). |
+| `composer.leave` | | Moves the focus to the timeline. When the composer is empty, a reply or an edit ends first, as with `composer.cancel`; any text, even a space, stays with its reply or edit. `focus.timeline` leaves the reply or edit as it is. |
 | `composer.external_editor` | | Edits the composer's text in `$VISUAL` or `$EDITOR`. |
 | `completion.next`, `completion.prev` | | Selects the next or previous member in the mention menu. |
 | `completion.accept` | | Inserts the selected mention. |

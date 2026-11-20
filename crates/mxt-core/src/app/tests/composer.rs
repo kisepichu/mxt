@@ -246,6 +246,58 @@ fn composer_cancel_keeps_a_reply_text_and_clears_an_edit() {
 }
 
 #[test]
+fn composer_leave_ends_a_reply_without_text() {
+    let mut app = opened();
+    reset(&mut app, vec![msg(1)]);
+    keys(&mut app, "r");
+    assert_eq!(normal(&mut app, "<Esc>"), vec![]);
+    assert_eq!(app.draft(&id(C)), Some(&Draft::New));
+    assert_eq!(app.focus(), Focus::Timeline);
+}
+
+#[test]
+fn composer_leave_ends_an_edit_without_text_and_leaves_the_message_alone() {
+    let mut app = opened();
+    reset(&mut app, vec![own(remote(1), "mine")]);
+    keys(&mut app, "e");
+    // The user deleted the loaded text.
+    edited(&mut app, C, true);
+    // Nothing is sent: the message keeps its text.
+    assert_eq!(normal(&mut app, "<Esc>"), vec![clear(C)]);
+    assert_eq!(app.draft(&id(C)), Some(&Draft::New));
+    assert_eq!(app.focus(), Focus::Timeline);
+}
+
+#[test]
+fn composer_leave_keeps_any_text_with_its_draft() {
+    let mut app = opened();
+    reset(&mut app, vec![own(remote(1), "mine"), msg(2)]);
+    // A reply with text, also whitespace alone, which the tui reports as
+    // text.
+    keys(&mut app, "r");
+    edited(&mut app, C, false);
+    assert_eq!(normal(&mut app, "<Esc>"), vec![]);
+    assert_eq!(app.draft(&id(C)), Some(&Draft::Reply { to: event(2) }));
+    assert_eq!(app.focus(), Focus::Timeline);
+
+    // A new draft with text: the text stays, so an edit is refused.
+    keys(&mut app, "i");
+    normal(&mut app, "<C-c>");
+    assert_eq!(normal(&mut app, "<Esc>"), vec![]);
+    assert_eq!(app.draft(&id(C)), Some(&Draft::New));
+    assert_eq!(app.focus(), Focus::Timeline);
+    keys(&mut app, "ke");
+    assert_eq!(status(&app), Some("Clear the composer first"));
+
+    // An edit with its loaded text.
+    edited(&mut app, C, true);
+    keys(&mut app, "e");
+    assert_eq!(normal(&mut app, "<Esc>"), vec![]);
+    assert_eq!(edit_target(&app, C), Some(&remote(1)));
+    assert_eq!(app.focus(), Focus::Timeline);
+}
+
+#[test]
 fn message_edit_loads_the_plain_body_of_an_own_text_message_with_its_mentions() {
     let alice = UserId::new(ALICE);
     let italic = Style {

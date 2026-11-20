@@ -464,6 +464,11 @@ covered by unit tests.
   `mode = "keep"` it keeps edtui's previous mode.
 - `composer.cancel`: a reply draft becomes `New` and keeps its text. An edit
   draft becomes `New` and the composer is cleared.
+- `composer.leave` (`<Esc>` in the composer's normal mode): when the draft
+  is a reply or an edit and the composer is empty, it ends the draft as
+  `composer.cancel` does; then the timeline gets the focus. Any text, also
+  whitespace alone (the composer is empty only without a character), keeps
+  its draft, so nothing typed is lost. `focus.timeline` never ends a draft.
 - Mention completion:
   - After each edit in insert mode, the tui adapter looks for an `@` token at
     the cursor (an `@` at the start of the text or after whitespace, followed
@@ -723,7 +728,7 @@ instead, and it never takes more than half of the width.
 | `composer.insert` | `<CR>` | `composer.send` | |
 | `composer.insert` | `<C-j>` | `composer.newline` | |
 | `composer.insert`, `composer.normal` | `<C-x><C-e>` | `composer.external_editor` | shell edit-command-line |
-| `composer.normal` | `<Esc>` | `focus.timeline`; the draft is kept | |
+| `composer.normal` | `<Esc>` | `composer.leave`; text and its draft are kept | |
 | `composer.normal` | `<C-c>` | `composer.cancel` | |
 | `composer.completion` | `<C-n>` / `<C-p>` | `completion.next` / `completion.prev` | completion menu |
 | `composer.completion` | `<Down>` / `<Up>` | `completion.next` / `completion.prev` | completion menu |
@@ -736,7 +741,9 @@ instead, and it never takes more than half of the width.
 | `message_view` | `q` / `<Esc>` | `view.close` | close window |
 
 `<Esc>` in the composer's insert mode is not bound: edtui switches to its
-normal mode and the draft is kept.
+normal mode and the draft is kept. A user binding of `<Esc>` in
+`composer.normal`, such as `"<Esc>" = "focus.timeline"`, replaces
+`composer.leave` like any other default.
 
 `]u` and `[u` are in `normal`, so `[` and `]` wait for the next key in the
 composer's normal and visual modes too: edtui's `di[`, `ci]` and `vi[` run
@@ -1087,6 +1094,7 @@ Actions are named `<target>.<verb>`. The first release has:
   `message.resend`, `message.view`
 - composer: `composer.focus` (`mode = "insert" | "keep"`, default
   `"insert"`), `composer.send`, `composer.newline`, `composer.cancel`,
+  `composer.leave` (added after the first release),
   `composer.external_editor`, `completion.next`, `completion.prev`,
   `completion.accept`, `completion.cancel`
 - pickers: `picker.rooms`, `picker.next`, `picker.prev`, `picker.accept`,

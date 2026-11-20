@@ -347,6 +347,9 @@ mod tests {
         assert_eq!(type_keys(&mut composer, "ab"), [edited(false)]);
         assert_eq!(type_keys(&mut composer, "<BS>"), []);
         assert_eq!(type_keys(&mut composer, "<BS>"), [edited(true)]);
+        // Whitespace is text: `composer.leave` keeps a reply of spaces.
+        assert_eq!(type_keys(&mut composer, "<Space>"), [edited(false)]);
+        assert_eq!(type_keys(&mut composer, "<BS>"), [edited(true)]);
         let mut msgs = Vec::new();
         composer.insert_newline(&mut msgs);
         // A line break is text.

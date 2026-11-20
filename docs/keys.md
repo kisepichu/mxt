@@ -137,7 +137,7 @@ goes out by itself once the sync is back; `R` is for the others.
 | `composer.insert` | `<CR>` | `composer.send` | send |
 | `composer.insert` | `<C-j>` | `composer.newline` | a line break (many terminals send Shift+Enter as `<CR>`) |
 | `composer.insert`, `composer.normal` | `<C-x><C-e>` | `composer.external_editor` | edit in `$VISUAL` or `$EDITOR` |
-| `composer.normal` | `<Esc>` | `focus.timeline` | back to the timeline; the text stays |
+| `composer.normal` | `<Esc>` | `composer.leave` | back to the timeline; the text stays, and a reply or an edit without text ends |
 | `composer.normal` | `<C-c>` | `composer.cancel` | end a reply (the text stays) or an edit (the text goes) |
 | `composer.completion` | `<C-n>`, `<Down>` / `<C-p>`, `<Up>` | `completion.next` / `completion.prev` | select a mention |
 | `composer.completion` | `<C-y>`, `<Tab>`, `<CR>` | `completion.accept` | insert it |
@@ -226,7 +226,9 @@ The composer:
   first); typing narrows it. The inserted `@name` is plain text: delete or
   change it, and it is no longer a mention.
 - `r` and `e` in the timeline label the composer `Reply to <name>` or `Edit`.
-  `<C-c>` in normal mode ends the reply or the edit.
+  `<C-c>` in normal mode ends the reply or the edit. `<Esc>` in normal mode
+  ends it too when the composer is empty (a space counts as text), so a
+  reply started by mistake ends with `<Esc>` and nothing typed is lost.
 
 The message view (`<CR>` on a message) holds the message's text in an
 editor, so motions, `/` search, visual selection and yanks work on messages

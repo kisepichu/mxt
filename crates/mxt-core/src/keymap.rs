@@ -232,7 +232,7 @@ const DEFAULTS: &[(&[TableId], &str, Action)] = &[
         "<C-x><C-e>",
         Action::ComposerExternalEditor,
     ),
-    (&[TableId::ComposerNormal], "<Esc>", Action::FocusTimeline),
+    (&[TableId::ComposerNormal], "<Esc>", Action::ComposerLeave),
     (&[TableId::ComposerNormal], "<C-c>", Action::ComposerCancel),
     (
         &[TableId::ComposerCompletion],
