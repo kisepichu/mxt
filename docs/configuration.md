@@ -140,7 +140,7 @@ table, and every other default stays.
 | `composer.normal`, `composer.visual` | the composer has focus and its editor is in normal or visual mode | look in `normal`, then pass the key to the editor |
 | `composer.insert` | the composer's editor is in insert mode | pass the key to the editor |
 | `composer.completion` | the mention menu is open in insert mode | look in `composer.insert`, then pass the key to the editor |
-| `message_view` | the message view is open and its editor is in normal or visual mode | pass the key to the editor |
+| `message_view` | the message view (also `:help` and `:map`) is open and its editor is in normal or visual mode | pass the key to the editor |
 | `picker` | a picker (rooms, emoji or links) is open | type the key into the query |
 | `command_line` | the `:` command line or a `/` search line is open | type the key into the line |
 
@@ -280,7 +280,7 @@ message under the timeline cursor.
 | `message.edit` | | Loads your own text message into the composer to edit it. The composer must be empty. |
 | `message.delete` | | Deletes your own message after you confirm with `y`. |
 | `message.yank` | | Copies the message's text to the clipboard (see [Terminal setup](terminal.md#clipboard)). |
-| `message.react` | | Opens the emoji picker. Choosing an emoji you already reacted with removes your reaction. |
+| `message.react` | `emoji` | Without `emoji`, opens the emoji picker; choosing an emoji you already reacted with removes your reaction. With `emoji`, an emoji (`"👍"`) or a shortcode with colons on both sides or none (`"thumbsup"`, `":+1:"`), toggles that reaction: adds it, or removes yours. An unknown or empty `emoji` is an error. With no open room, on an empty timeline or on a deleted message, it says so and does nothing. |
 | `message.open` | | Downloads an attachment to `files.download_dir` and opens it with `files.opener`, or opens the message's web link with `files.opener`, or offers a link picker when there are several. Only `http://` and `https://` links. |
 | `message.goto_reply` | | Moves the cursor to the message this one replies to, if it is loaded. |
 | `message.resend` | | Sends a failed message again. |
@@ -301,13 +301,15 @@ message under the timeline cursor.
 | `command_line.open` | | Opens the `:` command line. |
 | `command_line.execute` | | Runs the command, or searches with a `/` line. |
 | `command_line.cancel` | | Closes the line. |
-| `command_line.complete` | | Completes command names, and room names after `:open`; pressing it again cycles through the candidates. |
+| `command_line.complete` | | Completes command names, room names after `:open`, and emoji shortcodes after `:react`; pressing it again cycles through the candidates. |
 | `cursor.down`, `cursor.up` | | Moves the cursor of the focused list by one room or message, or by the count. |
 | `cursor.first`, `cursor.last` | | Moves it to the first or last room or message. |
 | `cursor.half_page_down`, `cursor.half_page_up` | | Moves it by half of the visible rooms or messages, times the count. |
 | `search.start` | | Opens a `/` line that searches the focused list. |
 | `search.next`, `search.prev` | | Repeats the last search forwards or backwards. |
-| `view.close` | | Closes the message view. |
+| `view.close` | | Closes the message view, also when it shows `:help` or `:map`. |
+| `help.commands` | | Shows the commands with a one-line description each in the full-screen view, as `:help` does. |
+| `help.keymap` | | Shows the bindings of each keymap table after your configuration in the full-screen view, as `:map` does: `keys -> action` or `keys -> action (arguments)`, with `<leader>` written as its key. |
 | `sidebar.toggle` | | Shows or hides the room list. |
 | `focus.room_list` | | Moves the focus to the room list, and shows it if it is hidden. |
 | `focus.timeline` | | Moves the focus to the timeline. |
