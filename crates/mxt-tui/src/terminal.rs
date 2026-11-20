@@ -56,6 +56,9 @@ pub struct Tui {
     timeline: TimelinePane,
     /// The message view while it is open.
     view: Option<View>,
+    /// Whether the next draw clears the screen first and writes every cell
+    /// (see [`Tui::close_view`]).
+    repaint: bool,
     /// `None` with `ui.image_preview = "off"`, where the terminal is never
     /// asked for its graphics protocol.
     images: Option<Images>,
@@ -112,6 +115,7 @@ impl Tui {
                     room_list_viewport: None,
                     timeline: TimelinePane::new(),
                     view: None,
+                    repaint: false,
                     images,
                     opener: Opener::new(opener),
                     composers: Composers::new(register.clone()),
@@ -141,14 +145,15 @@ impl Tui {
     }
 
     /// Sends the last copy to the terminal clipboard if it has not reached
-    /// it yet, draws the frame, and returns `Msg::Viewport` for the room
-    /// list when its visible range changed since the last draw, and for the
-    /// timeline when its visible range is not the one the core has (see
-    /// `timeline_report`). An image that failed to encode while drawing
-    /// becomes `Msg::EffectFailed`, once per image. Fails once the terminal
-    /// has been restored, which while the UI runs only the panic hook does,
-    /// so a panic in any task ends the event loop instead of drawing onto
-    /// the main screen.
+    /// it yet, draws the frame (on a cleared screen after an image that
+    /// tmux stores, see `Tui::close_view`), and returns `Msg::Viewport`
+    /// for the room list when its visible range changed since the last
+    /// draw, and for the timeline when its visible range is not the one the
+    /// core has (see `timeline_report`). An image that failed to encode
+    /// while drawing becomes `Msg::EffectFailed`, once per image. Fails once
+    /// the terminal has been restored, which while the UI runs only the
+    /// panic hook does, so a panic in any task ends the event loop instead
+    /// of drawing onto the main screen.
     pub fn draw(&mut self, app: &App) -> io::Result<Vec<Msg>> {
         if !ACTIVE.load(Ordering::SeqCst) {
             return Err(io::Error::other("the terminal was restored after a panic"));
@@ -157,6 +162,9 @@ impl Tui {
             let backend = self.terminal.backend_mut();
             backend.write_all(sequence.as_bytes())?;
             backend.flush()?;
+        }
+        if std::mem::take(&mut self.repaint) {
+            repaint(&mut self.terminal)?;
         }
         let Tui {
             terminal,
@@ -216,8 +224,9 @@ impl Tui {
     /// dropped), both with the key mode (see `Editor::key_mode`) of the
     /// editor that has the keys: the message view's while it is open,
     /// otherwise the open room's composer's while it has focus. Focus events
-    /// become `Msg::TerminalFocus`; resizes produce nothing (the loop redraws
-    /// after every event anyway). Mouse events are not enabled.
+    /// become `Msg::TerminalFocus`. A resize produces nothing (the loop
+    /// redraws after every event anyway) but takes tmux's cell size again
+    /// for images (see [`Images::resized`]). Mouse events are not enabled.
     pub fn handle_event(&mut self, app: &App, event: Event) -> Vec<Msg> {
         let msg = match event {
             Event::Key(event) => key_from_crossterm(event).map(|key| Msg::Key {
@@ -231,7 +240,13 @@ impl Tui {
             }),
             Event::FocusGained => Some(Msg::TerminalFocus(true)),
             Event::FocusLost => Some(Msg::TerminalFocus(false)),
-            Event::Resize(..) | Event::Mouse(_) => None,
+            Event::Resize(..) => {
+                if let Some(images) = &mut self.images {
+                    images.resized();
+                }
+                None
+            }
+            Event::Mouse(_) => None,
         };
         msg.into_iter().collect()
     }
@@ -295,6 +310,7 @@ impl Tui {
                 }
             }
             UiEffect::OpenView(content) => {
+                self.close_view();
                 self.view = Some(View::new(content, self.register.clone()));
             }
             UiEffect::ShowImage { item, bytes } => {
@@ -316,7 +332,7 @@ impl Tui {
             UiEffect::OpenUrl(_) => msgs.push(Msg::EffectFailed {
                 error: "Not opening the link: only http and https links are opened".to_owned(),
             }),
-            UiEffect::CloseView => self.view = None,
+            UiEffect::CloseView => self.close_view(),
             UiEffect::Yank(text) => self.register.copy(text),
             UiEffect::FocusComposer { room, mode } => self.composers.focus(room, mode, &mut msgs),
             UiEffect::RequestSubmit(room) => {
@@ -347,6 +363,17 @@ impl Tui {
             UiEffect::Quit => self.should_quit = true,
         }
         msgs
+    }
+
+    /// Drops the message view. tmux drops a sixel image it stores once
+    /// ASCII text or an erase is written over it, but the frame after the
+    /// view may write only other characters there, such as CJK text, and
+    /// tmux would draw the image again on its next redraw of the pane. So
+    /// after an image that tmux stores, the next draw clears the screen,
+    /// which drops every image.
+    fn close_view(&mut self) {
+        let image = self.view.take().is_some_and(|view| view.has_image());
+        self.repaint |= image && self.images.as_ref().is_some_and(Images::stored_by_tmux);
     }
 
     /// Runs the external editor on the room's composer.

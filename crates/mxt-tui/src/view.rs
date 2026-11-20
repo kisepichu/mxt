@@ -158,6 +158,11 @@ impl View {
         }
     }
 
+    /// Whether the view is an image's.
+    pub(crate) fn has_image(&self) -> bool {
+        self.image.is_some()
+    }
+
     /// Over `area`: the editor, and for an image the image a row below
     /// the details, once `images` keeps it.
     fn draw(&mut self, frame: &mut Frame, area: Rect, images: Option<&mut Images>) {

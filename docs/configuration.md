@@ -339,5 +339,5 @@ the room list's order:
 | `XDG_CONFIG_HOME` | the configuration file's directory, see above |
 | `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME`, `HOME` | where mxt keeps its data, see [Files](../README.md#files) |
 | `MXT_LOG` | the log filter, see [Files](../README.md#files) |
-| `TMUX`, `WSL_DISTRO_NAME`, `SSH_CONNECTION`, `SSH_TTY` | how `ui.image_preview = "auto"` chooses the graphics protocol, see [Images](terminal.md#images) |
+| `TMUX`, `WSL_DISTRO_NAME`, `SSH_CONNECTION`, `SSH_TTY` | how `ui.image_preview = "auto"` chooses the graphics protocol, and whether `"sixel"` goes to tmux, see [Images](terminal.md#images) |
 | `VISUAL`, `EDITOR` | the external editor (`<C-x><C-e>`); a platform default when neither is set |
