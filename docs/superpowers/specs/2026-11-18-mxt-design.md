@@ -701,6 +701,10 @@ instead, and it never takes more than half of the width.
 | `normal` | `<leader>e` | `sidebar.toggle` | file explorer toggle |
 | `normal` | `<leader>m` | `{ action = "picker.rooms", filter = "mentions" }` | |
 | `normal` | `<C-w>h` / `<C-w>l` | `focus.room_list` / `focus.timeline` | window movement |
+| `normal` | `<C-w><C-h>` / `<C-w><C-l>` | `focus.room_list` / `focus.timeline` | the same with ctrl held |
+| `normal` | `<C-w>j`, `<C-w><C-j>` | `{ action = "composer.focus", mode = "keep" }` | window below |
+| `normal` | `<C-w>k`, `<C-w><C-k>` | `focus.timeline` | window above |
+| `normal` | `]u` / `[u` | `{ action = "room.open", filter = "unread", pick = "next" }` / `pick = "prev"` | `]` / `[` motions |
 | `room_list`, `timeline` | `j` / `k` | `cursor.down` / `cursor.up` | same |
 | `room_list`, `timeline` | `gg` / `G` | `cursor.first` / `cursor.last` | same |
 | `room_list`, `timeline` | `<C-d>` / `<C-u>` | `cursor.half_page_down` / `cursor.half_page_up` | same |
@@ -722,15 +726,23 @@ instead, and it never takes more than half of the width.
 | `composer.normal` | `<Esc>` | `focus.timeline`; the draft is kept | |
 | `composer.normal` | `<C-c>` | `composer.cancel` | |
 | `composer.completion` | `<C-n>` / `<C-p>` | `completion.next` / `completion.prev` | completion menu |
+| `composer.completion` | `<Down>` / `<Up>` | `completion.next` / `completion.prev` | completion menu |
 | `composer.completion` | `<C-y>` / `<Tab>` / `<CR>` | `completion.accept` | completion menu |
 | `composer.completion` | `<C-e>` | `completion.cancel` | completion menu |
 | `picker` | `<C-n>` / `<C-p>` | `picker.next` / `picker.prev` | completion menu |
+| `picker` | `<Down>`, `<Tab>` / `<Up>`, `<S-Tab>` | `picker.next` / `picker.prev` | completion menu |
 | `picker` | `<CR>` / `<Esc>` | `picker.accept` / `picker.cancel` | |
 | `command_line` | `<CR>` / `<Esc>` / `<Tab>` | `command_line.execute` / `command_line.cancel` / `command_line.complete` | same |
 | `message_view` | `q` / `<Esc>` | `view.close` | close window |
 
 `<Esc>` in the composer's insert mode is not bound: edtui switches to its
 normal mode and the draft is kept.
+
+`]u` and `[u` are in `normal`, so `[` and `]` wait for the next key in the
+composer's normal and visual modes too: edtui's `di[`, `ci]` and `vi[` run
+when the next key arrives or `ui.timeoutlen` passes, and a `u` typed within
+that time after `ci[` runs `[u`. nvim's operator-pending and visual modes do
+not see normal-mode mappings; mxt's composer tables fall back to `normal`.
 
 `<C-j>` inserts a newline because many terminals cannot tell Shift+Enter apart
 from Enter.
@@ -739,11 +751,10 @@ The emoji picker lists, for an empty query, the user's own reactions on the
 message first, then the most common reactions, then every other emoji; a
 query is matched against shortcodes and names.
 
-There is no default binding for "open the next unread room". The action exists
-and users bind it themselves, for example
-`"]u" = { action = "room.open", filter = "unread", pick = "next" }`.
-`room.mark_read` has no default binding either; the configuration example
-binds it to `<leader>x` together with opening the next unread room.
+`]u` and `[u` open the next and previous room with a badge, wrapping around
+(`filter = "unread"`). `room.mark_read` has no default binding; the
+configuration example binds it to `<leader>x` together with opening the
+next unread room.
 
 ### Search and jumps
 
@@ -1007,7 +1018,7 @@ download_dir = "~/Downloads"
 opener = ["xdg-open"]           # for example ["wslview"] on WSL
 
 [keymap.normal]                 # outside text input, in every pane
-"]u" = { action = "room.open", filter = "unread", pick = "next" }
+"]n" = { action = "room.open", filter = "notify", pick = "next" }
 "<leader>x" = ["room.mark_read", { action = "room.open", filter = "unread", pick = "next" }]
 
 [keymap.timeline]               # only while the timeline has focus

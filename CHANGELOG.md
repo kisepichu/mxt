@@ -8,6 +8,15 @@ marked **Breaking:**.
 
 ## [Unreleased]
 
+### Added
+
+- Default keys: `]u` and `[u` open the next and previous unread room;
+  `<C-w>j` focuses the composer in the mode it was left in and `<C-w>k` the
+  timeline, and `<C-w>` works with ctrl held for `h`, `j`, `k` and `l`, as
+  in nvim; `<Down>`, `<Tab>`, `<Up>` and `<S-Tab>` move through pickers, and
+  `<Down>` and `<Up>` through the mention menu. Bindings of the same keys to
+  the same actions in a configuration stay valid.
+
 ## [0.1.2] - 2026-11-20
 
 ### Changed

@@ -78,8 +78,18 @@ visual mode.
 | `<leader><leader>` | `picker.rooms` | the room picker |
 | `<leader>m` | `picker.rooms` with `filter = "mentions"` | the room picker, rooms with unread mentions only |
 | `<leader>e` | `sidebar.toggle` | hide or show the room list |
-| `<C-w>h` | `focus.room_list` | focus the room list (and show it) |
-| `<C-w>l` | `focus.timeline` | focus the timeline |
+| `<C-w>h`, `<C-w><C-h>` | `focus.room_list` | focus the room list (and show it) |
+| `<C-w>l`, `<C-w><C-l>` | `focus.timeline` | focus the timeline |
+| `<C-w>j`, `<C-w><C-j>` | `composer.focus` with `mode = "keep"` | focus the composer below the timeline, in the mode it was left in |
+| `<C-w>k`, `<C-w><C-k>` | `focus.timeline` | focus the timeline above the composer |
+| `]u` / `[u` | `room.open` with `filter = "unread"` and `pick = "next"` / `"prev"` | open the next or previous room with a badge, wrapping around |
+
+As in nvim, ctrl can stay held for the key after `<C-w>`.
+
+In the composer's normal and visual modes `[` and `]` start `[u` and `]u`
+too, so they wait for the next key: the editor's `di[`, `ci]` and `vi[` run
+when it arrives or after `ui.timeoutlen`, and a `u` typed within that time
+after `ci[` opens a room instead.
 
 ### `room_list` and `timeline`
 
@@ -130,7 +140,7 @@ goes out by itself once the sync is back; `R` is for the others.
 | `composer.insert`, `composer.normal` | `<C-x><C-e>` | `composer.external_editor` | edit in `$VISUAL` or `$EDITOR` |
 | `composer.normal` | `<Esc>` | `focus.timeline` | back to the timeline; the text stays |
 | `composer.normal` | `<C-c>` | `composer.cancel` | end a reply (the text stays) or an edit (the text goes) |
-| `composer.completion` | `<C-n>` / `<C-p>` | `completion.next` / `completion.prev` | select a mention |
+| `composer.completion` | `<C-n>`, `<Down>` / `<C-p>`, `<Up>` | `completion.next` / `completion.prev` | select a mention |
 | `composer.completion` | `<C-y>`, `<Tab>`, `<CR>` | `completion.accept` | insert it |
 | `composer.completion` | `<C-e>` | `completion.cancel` | close the mention menu |
 
@@ -141,7 +151,7 @@ second `<Esc>` returns to the timeline.
 
 | Table | Key | Action |
 |---|---|---|
-| `picker` | `<C-n>` / `<C-p>` | `picker.next` / `picker.prev` |
+| `picker` | `<C-n>`, `<Down>`, `<Tab>` / `<C-p>`, `<Up>`, `<S-Tab>` | `picker.next` / `picker.prev` |
 | `picker` | `<CR>` / `<Esc>` | `picker.accept` / `picker.cancel` |
 | `command_line` | `<CR>` / `<Esc>` / `<Tab>` | `command_line.execute` / `command_line.cancel` / `command_line.complete` |
 | `message_view` | `q`, `<Esc>` | `view.close` |
@@ -153,7 +163,7 @@ use the commands below:
 
 | Action | Command |
 |---|---|
-| `room.open` with `filter`, `pick` or `query`, for example "open the next unread room" | `:open <room>` |
+| `room.open` with other arguments than `]u` and `[u`, for example a `query` | `:open <room>` |
 | `room.mark_read` | |
 | `room.mute`, `room.unmute` | `:mute`, `:unmute` |
 | `file.upload` | `:upload <path>` |
