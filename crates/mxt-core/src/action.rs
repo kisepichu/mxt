@@ -23,6 +23,18 @@ pub enum FocusMode {
     Keep,
 }
 
+impl FocusMode {
+    pub const ALL: [FocusMode; 2] = [FocusMode::Insert, FocusMode::Keep];
+
+    /// The value of the `mode` argument: "insert", "keep".
+    pub fn config_name(self) -> &'static str {
+        match self {
+            FocusMode::Insert => "insert",
+            FocusMode::Keep => "keep",
+        }
+    }
+}
+
 /// An action with checked arguments. [`Action::name`] is its registry name,
 /// `<target>.<verb>`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,7 +126,7 @@ impl Action {
             }
             "composer.focus" => {
                 let args = Args::new("composer.focus", &["mode"], args)?;
-                let mode = args.choice("mode", &MODE_NAMES, MODES)?;
+                let mode = args.choice("mode", &FocusMode::ALL, FocusMode::config_name)?;
                 return Ok(Action::ComposerFocus(mode.unwrap_or_default()));
             }
             "file.upload" => return file_upload(Args::new("file.upload", &["path"], args)?),
@@ -242,13 +254,11 @@ impl Action {
     /// `emoji`. An emoji is the emoji itself, not a shortcode.
     pub fn arguments(&self) -> Vec<(&'static str, &str)> {
         let filter = |filter: RoomFilter| {
-            (filter != RoomFilter::default())
-                .then(|| ("filter", name_of(&FILTER_NAMES, &FILTERS, filter)))
+            (filter != RoomFilter::default()).then(|| ("filter", filter.config_name()))
         };
         match self {
             Action::RoomOpen(RoomTarget::Pick { filter: f, pick }) => {
-                let pick = (*pick != Pick::default())
-                    .then(|| ("pick", name_of(&PICK_NAMES, &PICKS, *pick)));
+                let pick = (*pick != Pick::default()).then(|| ("pick", pick.config_name()));
                 filter(*f).into_iter().chain(pick).collect()
             }
             Action::RoomOpen(RoomTarget::Fuzzy { filter: f, query }) => filter(*f)
@@ -257,7 +267,7 @@ impl Action {
                 .collect(),
             Action::PickerRooms(f) => filter(*f).into_iter().collect(),
             Action::ComposerFocus(mode) if *mode != FocusMode::default() => {
-                vec![("mode", name_of(&MODE_NAMES, &MODES, *mode))]
+                vec![("mode", mode.config_name())]
             }
             Action::FileUpload { path } => vec![("path", path.as_str())],
             Action::MessageReact(Some(emoji)) => vec![("emoji", emoji.as_str())],
@@ -278,34 +288,6 @@ impl Action {
     }
 }
 
-/// The values of `filter`, `pick` and `mode`: `*_NAMES[i]` stands for the
-/// value at `i`.
-const FILTER_NAMES: [&str; 4] = ["all", "unread", "notify", "mentions"];
-const FILTERS: [RoomFilter; 4] = [
-    RoomFilter::All,
-    RoomFilter::Unread,
-    RoomFilter::Notify,
-    RoomFilter::Mentions,
-];
-const PICK_NAMES: [&str; 3] = ["first", "next", "prev"];
-const PICKS: [Pick; 3] = [Pick::First, Pick::Next, Pick::Prev];
-const MODE_NAMES: [&str; 2] = ["insert", "keep"];
-const MODES: [FocusMode; 2] = [FocusMode::Insert, FocusMode::Keep];
-
-/// The name of `value`, the inverse of [`Args::choice`].
-///
-/// # Panics
-///
-/// If `values` lacks `value`; the tables above list every value.
-fn name_of<T: PartialEq, const N: usize>(
-    names: &[&'static str; N],
-    values: &[T; N],
-    value: T,
-) -> &'static str {
-    let index = values.iter().position(|known| *known == value);
-    names[index.expect("the value tables list every value")]
-}
-
 fn room_open(args: Args<'_>) -> Result<Action, ActionError> {
     if args.has("pick") && args.has("query") {
         return Err(ActionError::Conflict {
@@ -320,7 +302,7 @@ fn room_open(args: Args<'_>) -> Result<Action, ActionError> {
             query: query.to_owned(),
         },
         None => {
-            let pick = args.choice("pick", &PICK_NAMES, PICKS)?;
+            let pick = args.choice("pick", &Pick::ALL, Pick::config_name)?;
             RoomTarget::Pick {
                 filter,
                 pick: pick.unwrap_or_default(),
@@ -405,36 +387,35 @@ impl<'a> Args<'a> {
                 action: self.action,
                 arg,
                 value: String::new(),
-                allowed: &[],
+                allowed: Vec::new(),
             }),
             value => Ok(value),
         }
     }
 
-    /// A string argument with a fixed set of values: `names[i]` stands for
-    /// `values[i]`.
-    fn choice<T: Copy, const N: usize>(
+    /// A string argument with a fixed set of values, each named by `name`.
+    fn choice<T: Copy>(
         &self,
         arg: &'static str,
-        names: &'static [&'static str; N],
-        values: [T; N],
+        values: &[T],
+        name: fn(T) -> &'static str,
     ) -> Result<Option<T>, ActionError> {
         let Some(value) = self.string(arg)? else {
             return Ok(None);
         };
-        match names.iter().position(|name| *name == value) {
-            Some(index) => Ok(Some(values[index])),
+        match values.iter().copied().find(|known| name(*known) == value) {
+            Some(known) => Ok(Some(known)),
             None => Err(ActionError::InvalidValue {
                 action: self.action,
                 arg,
                 value: value.to_owned(),
-                allowed: names,
+                allowed: values.iter().copied().map(name).collect(),
             }),
         }
     }
 
     fn filter(&self) -> Result<RoomFilter, ActionError> {
-        let filter = self.choice("filter", &FILTER_NAMES, FILTERS)?;
+        let filter = self.choice("filter", &RoomFilter::ALL, RoomFilter::config_name)?;
         Ok(filter.unwrap_or_default())
     }
 }
@@ -459,7 +440,7 @@ pub enum ActionError {
         action: &'static str,
         arg: &'static str,
         value: String,
-        allowed: &'static [&'static str],
+        allowed: Vec<&'static str>,
     },
     Conflict {
         action: &'static str,
@@ -739,14 +720,12 @@ mod tests {
                 expected: "string"
             })
         );
-        assert!(matches!(
-            Action::from_spec("room.open", &[s("filter", "unreads")]),
-            Err(ActionError::InvalidValue {
-                action: "room.open",
-                arg: "filter",
-                ..
-            })
-        ));
+        let unknown_filter = Action::from_spec("room.open", &[s("filter", "unreads")]).unwrap_err();
+        assert_eq!(
+            unknown_filter.to_string(),
+            "room.open: invalid \"filter\" value \"unreads\"; \
+             expected one of \"all\", \"unread\", \"notify\", \"mentions\""
+        );
         assert_eq!(
             Action::from_spec("file.upload", &[]),
             Err(ActionError::MissingArgument {
@@ -765,7 +744,7 @@ mod tests {
                 action: "room.open",
                 arg: "query",
                 value: String::new(),
-                allowed: &[]
+                allowed: Vec::new()
             }
         );
         assert!(
