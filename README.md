@@ -23,12 +23,13 @@ user interface around it. It runs on Linux and macOS.
   receipts, and a full-screen view for long messages and images.
 - A composer with vim modes, Markdown, `@` mention completion, replies and
   edits, and an external editor for long text.
-- Reactions from an emoji picker, editing and deleting your own messages, and
-  resending messages that failed.
+- Reactions from an emoji picker or with `:react <emoji>`, editing and
+  deleting your own messages, and resending messages that failed.
 - Muting rooms, downloading and opening attachments, uploading files, and
   image previews in sixel, kitty or iTerm2 graphics, or in half blocks.
 - A keymap in the configuration file: every key can be rebound, and a key can
-  run any action or a sequence of actions.
+  run any action or a sequence of actions. `:map` shows the bindings in
+  effect, and `:help` the commands.
 
 Not included: threads, desktop and typing notifications, SSO login, logout,
 several accounts in one process, and setting up cross-signing or recovery for
