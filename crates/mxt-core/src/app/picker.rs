@@ -108,26 +108,38 @@ impl App {
         self.picker = Some(OpenPicker { picker, source });
     }
 
-    /// `message.react`: the emoji picker for the item under the cursor,
-    /// unless it is deleted.
-    pub(super) fn react(&mut self) {
-        let (Some(room), Some(item)) = (&self.open_room, self.timeline.cursor_item()) else {
-            return;
+    /// `message.react` on the item under the open room's timeline cursor,
+    /// whichever pane has focus: with `emoji`, toggles that reaction;
+    /// without, opens the emoji picker. Refused without an open room, on an
+    /// empty timeline and on a deleted item.
+    pub(super) fn react(&mut self, emoji: Option<Emoji>, effects: &mut Vec<Effect>) {
+        let Some(room) = &self.open_room else {
+            return self.set_status(StatusKind::Error, "No room is open");
+        };
+        let Some(item) = self.timeline.cursor_item() else {
+            return self.set_status(StatusKind::Error, "No message to react to");
         };
         if item.content == MessageContent::Redacted {
             return self.set_status(StatusKind::Error, "The message is deleted");
         }
-        let reacted: Vec<String> = item
+        let reacted = item
             .reactions
             .iter()
             .filter(|group| group.mine)
-            .map(|group| group.key.clone())
-            .collect();
-        let kind = PickerKind::Emoji {
-            room: room.clone(),
-            item: item.id.clone(),
-        };
-        self.open_picker(kind, Source::Emoji { reacted });
+            .map(|group| group.key.as_str());
+        let (room, id) = (room.clone(), item.id.clone());
+        match emoji {
+            Some(emoji) => effects.push(Effect::Matrix(MatrixEffect::ToggleReaction {
+                room,
+                item: id,
+                key: reaction_key(reacted, emoji),
+            })),
+            None => {
+                let reacted = reacted.map(str::to_owned).collect();
+                let kind = PickerKind::Emoji { room, item: id };
+                self.open_picker(kind, Source::Emoji { reacted });
+            }
+        }
     }
 
     /// `picker.rooms`: the room picker over the rooms that pass `filter`.
@@ -251,16 +263,9 @@ fn link_items(urls: &[String], query: &str) -> Vec<PickerItem> {
 
 /// The emoji for `query`. An empty query lists the user's reactions on the
 /// item first, then the most common reactions, then every other emoji in
-/// `emojis` order. An emoji the user reacted with keeps the key they used,
-/// which may lack the variation selector, so accepting it removes their
-/// reaction instead of adding a second one.
+/// `emojis` order. Each item's key comes from [`reaction_key`].
 fn emoji_items(query: &str, reacted: &[String]) -> Vec<PickerItem> {
-    let key = |emoji: Emoji| {
-        reacted
-            .iter()
-            .find(|key| Emoji::get(key) == Some(emoji))
-            .map_or_else(|| emoji.as_str().to_owned(), Clone::clone)
-    };
+    let key = |emoji: Emoji| reaction_key(reacted.iter().map(String::as_str), emoji);
     let item = |emoji: Emoji| PickerItem {
         label: emoji.label(),
         badge: None,
@@ -290,4 +295,15 @@ fn emoji_items(query: &str, reacted: &[String]) -> Vec<PickerItem> {
         }
     }
     items
+}
+
+/// The key a reaction with `emoji` toggles: the key of the user's own
+/// reaction (`reacted`) with the same emoji, which may lack the variation
+/// selector (`❤` for `❤️`), so toggling removes their reaction instead of
+/// adding a second one; otherwise the emoji itself.
+fn reaction_key<'a>(mut reacted: impl Iterator<Item = &'a str>, emoji: Emoji) -> String {
+    reacted
+        .find(|key| Emoji::get(key) == Some(emoji))
+        .unwrap_or(emoji.as_str())
+        .to_owned()
 }

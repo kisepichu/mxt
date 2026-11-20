@@ -986,6 +986,104 @@ fn the_emoji_picker_lists_reacted_and_common_emoji_first_and_toggles_one() {
     assert_eq!(app.timeline_cursor(), Some(0));
 }
 
+fn toggle(n: u32, key: &str) -> Effect {
+    matrix(MatrixEffect::ToggleReaction {
+        room: id(C),
+        item: remote(n),
+        key: key.into(),
+    })
+}
+fn command(app: &mut App, line: &str) -> Vec<Effect> {
+    no_timers(keys(app, &format!(":{line}<CR>")))
+}
+
+#[test]
+fn react_with_an_emoji_toggles_it_with_the_users_own_key() {
+    let mut app = opened();
+    reset(&mut app, vec![msg(1)]);
+    for argument in ["👍", "thumbsup", ":+1:"] {
+        assert_eq!(
+            command(&mut app, &format!("react {argument}")),
+            vec![toggle(1, "👍")]
+        );
+    }
+    // Without the user's own reaction (another user's does not count), the
+    // emoji itself.
+    let heart = |mine: bool| ReactionGroup {
+        key: "\u{2764}".into(),
+        count: 1,
+        mine,
+    };
+    reset(
+        &mut app,
+        vec![with(msg(1), |item| item.reactions = vec![heart(false)])],
+    );
+    assert_eq!(
+        command(&mut app, "react heart"),
+        vec![toggle(1, "\u{2764}\u{fe0f}")]
+    );
+    // The user reacted with `❤`, without the variation selector: its key, so
+    // the reaction goes instead of a second one coming.
+    reset(
+        &mut app,
+        vec![with(msg(1), |item| item.reactions = vec![heart(true)])],
+    );
+    assert_eq!(
+        command(&mut app, "react heart"),
+        vec![toggle(1, "\u{2764}")]
+    );
+    // Unknown: a status, and nothing is sent.
+    for argument in [":+1", "nonsense"] {
+        assert_eq!(command(&mut app, &format!("react {argument}")), vec![]);
+        assert_eq!(app.status().unwrap().kind, StatusKind::Error);
+        let unknown = format!("unknown emoji \"{argument}\"");
+        assert_eq!(status(&app), Some(unknown.as_str()));
+    }
+}
+
+#[test]
+fn react_acts_on_the_open_rooms_timeline_cursor_from_the_room_list_too() {
+    let mut app = opened();
+    reset(&mut app, vec![msg(1), msg(2)]);
+    keys(&mut app, "k<C-w>h");
+    assert_eq!(app.focus(), Focus::RoomList);
+    assert_eq!(command(&mut app, "react 👍"), vec![toggle(1, "👍")]);
+    // Without an argument, the emoji picker.
+    assert_eq!(command(&mut app, "react"), vec![]);
+    let picker = app.picker().unwrap();
+    assert_eq!(
+        picker.kind,
+        PickerKind::Emoji {
+            room: id(C),
+            item: remote(1),
+        }
+    );
+}
+
+#[test]
+fn react_and_plus_say_why_they_do_nothing() {
+    let react = |app: &mut App| {
+        assert_eq!(command(app, "react 👍"), vec![]);
+        let said = status(app).map(str::to_owned);
+        assert_eq!(no_timers(keys(app, "+")), vec![]);
+        assert!(app.picker().is_none());
+        assert_eq!(app.status().unwrap().kind, StatusKind::Error);
+        assert_eq!(status(app).map(str::to_owned), said);
+        said
+    };
+    let mut app = app();
+    // `+` is bound in the timeline, which has focus without an open room.
+    keys(&mut app, "<C-w>l");
+    assert_eq!(react(&mut app).as_deref(), Some("No room is open"));
+    keys(&mut app, "<C-w>h<CR>");
+    assert_eq!(react(&mut app).as_deref(), Some("No message to react to"));
+    reset(
+        &mut app,
+        vec![with(msg(1), |item| item.content = MessageContent::Redacted)],
+    );
+    assert_eq!(react(&mut app).as_deref(), Some("The message is deleted"));
+}
+
 /// `R`, bound by default, resends the failed local echo under the cursor.
 #[test]
 fn capital_r_resends_a_failed_local_echo() {

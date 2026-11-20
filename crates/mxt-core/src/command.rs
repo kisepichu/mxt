@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::fmt::{self, Write as _};
 
 use crate::action::Action;
+use crate::emoji::Emoji;
 use crate::rooms::{RoomFilter, RoomTarget};
 
 /// What a command takes after its name.
@@ -14,6 +15,9 @@ pub enum Argument {
     /// Without an argument the command shows this usage, such as
     /// `:open <room>`.
     Required(&'static str),
+    /// The argument may be left out; `:help` shows this usage, such as
+    /// `:react [<emoji>]`.
+    Optional(&'static str),
 }
 
 /// A command of the registry.
@@ -32,7 +36,7 @@ impl Command {
     pub fn usage(&self) -> Cow<'static, str> {
         match self.argument {
             Argument::None => Cow::Owned(format!(":{}", self.name)),
-            Argument::Required(usage) => Cow::Borrowed(usage),
+            Argument::Required(usage) | Argument::Optional(usage) => Cow::Borrowed(usage),
         }
     }
 }
@@ -71,6 +75,22 @@ pub static COMMANDS: &[Command] = &[
             Ok(Action::FileUpload {
                 path: path.to_owned(),
             })
+        },
+    },
+    Command {
+        name: "react",
+        argument: Argument::Optional(":react [<emoji>]"),
+        description: "Toggle a reaction on the message under the timeline's cursor, or pick one",
+        action: |emoji| {
+            if emoji.is_empty() {
+                return Ok(Action::MessageReact(None));
+            }
+            match Emoji::parse(emoji) {
+                Some(emoji) => Ok(Action::MessageReact(Some(emoji))),
+                None => Err(CommandError::UnknownEmoji {
+                    emoji: emoji.to_owned(),
+                }),
+            }
         },
     },
     Command {
@@ -159,6 +179,10 @@ pub enum CommandError {
     UnexpectedArgument {
         command: &'static str,
     },
+    /// `:react`'s argument as typed, which names no emoji.
+    UnknownEmoji {
+        emoji: String,
+    },
 }
 
 impl fmt::Display for CommandError {
@@ -169,6 +193,7 @@ impl fmt::Display for CommandError {
             CommandError::UnexpectedArgument { command } => {
                 write!(f, ":{command} takes no argument")
             }
+            CommandError::UnknownEmoji { emoji } => write!(f, "unknown emoji \"{emoji}\""),
         }
     }
 }
@@ -227,6 +252,25 @@ mod tests {
             parse_command("mute now").map_err(|error| error.to_string()),
             Err(":mute takes no argument".to_owned())
         );
+        assert_eq!(
+            parse_command("react :+1").map_err(|error| error.to_string()),
+            Err("unknown emoji \":+1\"".to_owned())
+        );
+    }
+
+    #[test]
+    fn react_takes_an_emoji_or_a_shortcode_or_nothing() {
+        let thumbs = Ok(Some(Action::MessageReact(Emoji::get("👍"))));
+        assert_eq!(parse_command("react 👍"), thumbs);
+        assert_eq!(parse_command("react  thumbsup "), thumbs);
+        assert_eq!(parse_command("react :+1:"), thumbs);
+        assert_eq!(parse_command("react"), Ok(Some(Action::MessageReact(None))));
+        assert_eq!(
+            parse_command("react nonsense"),
+            Err(CommandError::UnknownEmoji {
+                emoji: "nonsense".into()
+            })
+        );
     }
 
     #[test]
@@ -264,6 +308,10 @@ mod tests {
                     );
                     assert!(usage.starts_with(&format!(":{name} ")), "{usage}");
                 }
+                Argument::Optional(usage) => {
+                    assert!(matches!(without, Ok(Some(_))), "{name}");
+                    assert!(usage.starts_with(&format!(":{name} [")), "{usage}");
+                }
             }
         }
     }
@@ -287,7 +335,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                ":open", ":mute", ":unmute", ":upload", ":recover", ":help", ":map", ":q"
+                ":open", ":mute", ":unmute", ":upload", ":react", ":recover", ":help", ":map", ":q"
             ]
         );
         // The descriptions start two columns after the longest usage.

@@ -4,6 +4,7 @@
 use super::{App, StatusKind};
 use crate::command::{Argument, COMMANDS, parse_command};
 use crate::effect::Effect;
+use crate::emoji;
 use crate::fuzzy;
 use crate::keys::{Key, KeyCode, Modifiers};
 use crate::msg::Pane;
@@ -190,7 +191,9 @@ impl App {
 
 /// Without whitespace in `text`: the commands that start with it, with a
 /// space after those that take an argument. For `open <query>`: the
-/// displayed room names ranked against the query, as `open <name>`.
+/// displayed room names ranked against the query, as `open <name>`. For
+/// `react <prefix>`: the shortcodes that start with the prefix, a leading
+/// `:` ignored, in alphabetical order, as `react <shortcode>`.
 fn candidates(text: &str, rooms: &RoomList) -> Vec<String> {
     match text.split_once(char::is_whitespace) {
         None => COMMANDS
@@ -198,7 +201,7 @@ fn candidates(text: &str, rooms: &RoomList) -> Vec<String> {
             .filter(|command| command.name.starts_with(text))
             .map(|command| match command.argument {
                 Argument::None => command.name.to_owned(),
-                Argument::Required(_) => format!("{} ", command.name),
+                Argument::Required(_) | Argument::Optional(_) => format!("{} ", command.name),
             })
             .collect(),
         Some(("open", query)) => {
@@ -210,6 +213,14 @@ fn candidates(text: &str, rooms: &RoomList) -> Vec<String> {
             fuzzy::rank(query.trim(), &names)
                 .into_iter()
                 .map(|index| format!("open {}", names[index]))
+                .collect()
+        }
+        Some(("react", prefix)) => {
+            let prefix = prefix.trim();
+            let prefix = prefix.strip_prefix(':').unwrap_or(prefix);
+            emoji::shortcodes_starting_with(prefix)
+                .iter()
+                .map(|shortcode| format!("react {shortcode}"))
                 .collect()
         }
         Some(_) => Vec::new(),

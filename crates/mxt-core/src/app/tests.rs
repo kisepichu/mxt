@@ -817,10 +817,33 @@ fn completes_command_names_and_cycles_back() {
 }
 
 #[test]
-fn a_command_name_with_one_candidate_completes_at_once() {
+fn react_completes_with_a_space_before_recover() {
     let mut app = app();
     keys(&mut app, ":re<Tab>");
+    assert_eq!(line(&app), Some((LineKind::Command, "react ")));
+    keys(&mut app, "<Tab>");
     assert_eq!(line(&app), Some((LineKind::Command, "recover")));
+    keys(&mut app, "<Tab>");
+    assert_eq!(line(&app), Some((LineKind::Command, "re")));
+}
+
+#[test]
+fn completes_shortcodes_for_react_without_colons() {
+    for typed in ["thu", ":thu"] {
+        let mut app = app();
+        keys(&mut app, &format!(":react {typed}"));
+        for shown in ["react thumbsdown", "react thumbsup"] {
+            keys(&mut app, "<Tab>");
+            assert_eq!(line(&app), Some((LineKind::Command, shown)));
+        }
+        keys(&mut app, "<Tab>");
+        let back = format!("react {typed}");
+        assert_eq!(line(&app), Some((LineKind::Command, back.as_str())));
+    }
+    // Shortcodes are lower case.
+    let mut app = app();
+    keys(&mut app, ":react Thu<Tab>");
+    assert_eq!(line(&app), Some((LineKind::Command, "react Thu")));
 }
 
 #[test]

@@ -3,6 +3,7 @@
 
 use std::fmt;
 
+use crate::emoji::Emoji;
 use crate::rooms::{Pick, RoomFilter, RoomTarget};
 
 /// A neutral argument value; the configuration loader converts TOML values into it.
@@ -35,7 +36,8 @@ pub enum Action {
     MessageEdit,
     MessageDelete,
     MessageYank,
-    MessageReact,
+    /// With an emoji, toggles that reaction; without, the emoji picker.
+    MessageReact(Option<Emoji>),
     MessageOpen,
     MessageGotoReply,
     MessageResend,
@@ -96,6 +98,8 @@ impl Action {
     /// - `picker.rooms`: `filter`, as for `room.open`
     /// - `composer.focus`: `mode` (`insert` or `keep`; default `insert`)
     /// - `file.upload`: `path` (non-empty), required
+    /// - `message.react`: `emoji` (an emoji or a shortcode, see
+    ///   [`Emoji::parse`])
     ///
     /// Argument names are unique in a configuration table; if one repeats
     /// anyway, its last value counts.
@@ -114,6 +118,9 @@ impl Action {
                 return Ok(Action::ComposerFocus(mode.unwrap_or_default()));
             }
             "file.upload" => return file_upload(Args::new("file.upload", &["path"], args)?),
+            "message.react" => {
+                return message_react(Args::new("message.react", &["emoji"], args)?);
+            }
             "room.open_selected" => Action::RoomOpenSelected,
             "room.mark_read" => Action::RoomMarkRead,
             "room.mute" => Action::RoomMute,
@@ -122,7 +129,6 @@ impl Action {
             "message.edit" => Action::MessageEdit,
             "message.delete" => Action::MessageDelete,
             "message.yank" => Action::MessageYank,
-            "message.react" => Action::MessageReact,
             "message.open" => Action::MessageOpen,
             "message.goto_reply" => Action::MessageGotoReply,
             "message.resend" => Action::MessageResend,
@@ -184,7 +190,7 @@ impl Action {
             Action::MessageEdit => "message.edit",
             Action::MessageDelete => "message.delete",
             Action::MessageYank => "message.yank",
-            Action::MessageReact => "message.react",
+            Action::MessageReact(_) => "message.react",
             Action::MessageOpen => "message.open",
             Action::MessageGotoReply => "message.goto_reply",
             Action::MessageResend => "message.resend",
@@ -232,7 +238,8 @@ impl Action {
 
     /// The arguments [`Action::from_spec`] builds this action from, as
     /// names and string values: those at their default are left out, the
-    /// others follow in the order `filter`, `pick`, `query`, `mode`, `path`.
+    /// others follow in the order `filter`, `pick`, `query`, `mode`, `path`,
+    /// `emoji`. An emoji is the emoji itself, not a shortcode.
     pub fn arguments(&self) -> Vec<(&'static str, &str)> {
         let filter = |filter: RoomFilter| {
             (filter != RoomFilter::default())
@@ -253,6 +260,7 @@ impl Action {
                 vec![("mode", name_of(&MODE_NAMES, &MODES, *mode))]
             }
             Action::FileUpload { path } => vec![("path", path.as_str())],
+            Action::MessageReact(Some(emoji)) => vec![("emoji", emoji.as_str())],
             _ => Vec::new(),
         }
     }
@@ -332,6 +340,21 @@ fn file_upload(args: Args<'_>) -> Result<Action, ActionError> {
     Ok(Action::FileUpload {
         path: path.to_owned(),
     })
+}
+
+/// An unknown or empty `emoji` is rejected, so a binding never reacts with
+/// something no client shows as an emoji.
+fn message_react(args: Args<'_>) -> Result<Action, ActionError> {
+    let Some(value) = args.string("emoji")? else {
+        return Ok(Action::MessageReact(None));
+    };
+    match Emoji::parse(value) {
+        Some(emoji) => Ok(Action::MessageReact(Some(emoji))),
+        None => Err(ActionError::UnknownEmoji {
+            action: args.action,
+            value: value.to_owned(),
+        }),
+    }
 }
 
 /// The arguments of one action, checked against the names it accepts.
@@ -446,6 +469,12 @@ pub enum ActionError {
         action: &'static str,
         arg: &'static str,
     },
+    /// An `emoji` that is neither an emoji nor a shortcode, the empty one
+    /// included.
+    UnknownEmoji {
+        action: &'static str,
+        value: String,
+    },
 }
 
 impl fmt::Display for ActionError {
@@ -486,6 +515,11 @@ impl fmt::Display for ActionError {
             ActionError::MissingArgument { action, arg } => {
                 write!(f, "{action}: \"{arg}\" is required")
             }
+            ActionError::UnknownEmoji { action, value } => write!(
+                f,
+                "{action}: unknown emoji \"{value}\"; expected an emoji or a shortcode, \
+                 such as \"👍\", \"thumbsup\" or \":+1:\""
+            ),
         }
     }
 }
@@ -630,6 +664,11 @@ mod tests {
                 Action::from_spec("file.upload", &[s("path", "/tmp/a b.png")]),
                 vec![("path", "/tmp/a b.png")],
             ),
+            (Action::from_spec("message.react", &[]), vec![]),
+            (
+                Action::from_spec("message.react", &[s("emoji", "thumbsup")]),
+                vec![("emoji", "👍")],
+            ),
         ];
         for (action, arguments) in cases {
             let action = action.unwrap();
@@ -737,6 +776,40 @@ mod tests {
             Action::from_spec("file.upload", &[s("path", "")]),
             Err(ActionError::InvalidValue { arg: "path", .. })
         ));
+    }
+
+    #[test]
+    fn message_react_takes_an_emoji_or_a_shortcode() {
+        let thumbs = Action::MessageReact(Emoji::get("👍"));
+        for emoji in ["👍", "thumbsup", ":+1:"] {
+            assert_eq!(
+                Action::from_spec("message.react", &[s("emoji", emoji)]),
+                Ok(thumbs.clone())
+            );
+        }
+        assert_eq!(
+            Action::from_spec("message.react", &[]),
+            Ok(Action::MessageReact(None))
+        );
+    }
+
+    #[test]
+    fn an_unknown_or_empty_emoji_is_rejected() {
+        for emoji in ["nonsense", "", ":+1"] {
+            let error = Action::from_spec("message.react", &[s("emoji", emoji)]).unwrap_err();
+            assert_eq!(
+                error,
+                ActionError::UnknownEmoji {
+                    action: "message.react",
+                    value: emoji.into()
+                }
+            );
+            let message = error.to_string();
+            assert!(
+                message.starts_with(&format!("message.react: unknown emoji \"{emoji}\"; ")),
+                "{message}"
+            );
+        }
     }
 
     #[test]

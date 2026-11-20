@@ -223,7 +223,7 @@ const DEFAULTS: &[(&[TableId], &str, Action)] = &[
     (&[TableId::Timeline], "e", Action::MessageEdit),
     (&[TableId::Timeline], "dd", Action::MessageDelete),
     (&[TableId::Timeline], "yy", Action::MessageYank),
-    (&[TableId::Timeline], "+", Action::MessageReact),
+    (&[TableId::Timeline], "+", Action::MessageReact(None)),
     (&[TableId::Timeline], "gx", Action::MessageOpen),
     (&[TableId::Timeline], "gd", Action::MessageGotoReply),
     (&[TableId::Timeline], "R", Action::MessageResend),
@@ -666,6 +666,11 @@ mod tests {
                 (TableId::Timeline, seq("<leader>x"), both),
                 (TableId::Timeline, seq("dd"), one(Action::Nop)),
                 (TableId::Timeline, seq("gr"), one(all_first)),
+                (
+                    TableId::Timeline,
+                    seq("<leader>t"),
+                    one(spec("message.react", &[("emoji", ":+1:")])),
+                ),
             ],
         );
         let text = keymap_text(&km);
@@ -696,6 +701,8 @@ mod tests {
             ",x -> room.mark_read; room.open (filter = \"unread\", pick = \"next\")",
             "dd -> nop",
             "gr -> room.open",
+            ",t -> message.react (emoji = \"👍\")",
+            "+ -> message.react",
             "i -> composer.focus",
             "j -> cursor.down",
         ] {

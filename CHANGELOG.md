@@ -23,6 +23,13 @@ marked **Breaking:**.
   `keys -> action (arguments)`. Both open in the full-screen view, like a
   message, and `q` or `<Esc>` closes them. The actions `help.commands` and
   `help.keymap` open them from a key; they have no default key.
+- `:react <emoji>` toggles a reaction on the message under the timeline's
+  cursor, also from the room list. The argument is an emoji (`:react 👍`)
+  or a shortcode (`:react thumbsup`, `:react :+1:`), and `<Tab>` completes
+  shortcodes; `:react` without one opens the emoji picker, as `+` does.
+- `message.react` takes an optional `emoji`, so a key can react with one
+  emoji: `{ action = "message.react", emoji = "thumbsup" }`. An unknown or
+  empty emoji is an error when the configuration is loaded.
 
 ### Changed
 
@@ -34,6 +41,8 @@ marked **Breaking:**.
   a reply or an edit without text, so a reply started by mistake ends with
   `<Esc>`. Any text stays with its reply or edit. Binding `<Esc>` in
   `composer.normal` to `focus.timeline` keeps the old behavior.
+- `+` with no open room or on an empty timeline now says why it does
+  nothing: `No room is open` or `No message to react to`.
 
 ### Fixed
 

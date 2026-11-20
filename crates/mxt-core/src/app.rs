@@ -609,7 +609,7 @@ impl App {
             Action::MessageReply => self.reply(effects),
             Action::MessageEdit => self.edit_message(effects),
             Action::MessageDelete => self.delete_message(),
-            Action::MessageReact => self.react(),
+            Action::MessageReact(emoji) => self.react(*emoji, effects),
             Action::MessageResend => self.resend_message(effects),
             Action::ComposerFocus(mode) => self.focus_composer(*mode, effects),
             Action::ComposerSend => self.composer_effect(UiEffect::RequestSubmit, effects),
