@@ -17,6 +17,11 @@ marked **Breaking:**.
   `<Down>` and `<Up>` through the mention menu. Bindings of the same keys to
   the same actions in a configuration stay valid.
 
+### Changed
+
+- The room list no longer labels rooms set to notify only for mentions and
+  keywords `Mentions only`; muted rooms keep `Muted`.
+
 ## [0.1.2] - 2026-11-20
 
 ### Changed

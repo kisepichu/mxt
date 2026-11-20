@@ -26,8 +26,7 @@ A room in the list shows at most one badge, the first that applies:
 | `3`, dim | unread messages that do not notify you, as in muted rooms |
 | `U` | marked as unread |
 
-Counts above 99 show as `99+`. Muted rooms also show `Muted`, and rooms set
-to notify only for mentions and keywords show `Mentions only`.
+Counts above 99 show as `99+`. Muted rooms also show `Muted`.
 
 In the timeline, each message has a header with its time, the sender, and
 `(edited)`, `sending…` or `failed` when they apply. A reply's header is

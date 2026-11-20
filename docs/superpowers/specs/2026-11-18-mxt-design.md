@@ -646,8 +646,8 @@ A room shows at most one badge, chosen by the first rule that matches:
 | `messages > 0` | `<messages>` | dim (typical for muted rooms) |
 | `marked` | `U` | marked style |
 
-Counts above 99 show as `99+`. Muted rooms also show a `Muted` label, and
-rooms set to mentions and keywords only show a `Mentions only` label.
+Counts above 99 show as `99+`. Muted rooms also show a `Muted` label. Rooms
+set to mentions and keywords only show no label.
 
 ### Room list
 
@@ -665,7 +665,7 @@ instead, and it never takes more than half of the width.
 - `"inline"` (default): one row per room, `network / room` as in "Room names".
 - `"below"`: a room with a network part takes two rows. The first row has the
   room part (bold when the room is open) and, right-aligned, the badge and
-  the notification mode label. The second row has the network part, dim,
+  the `Muted` label. The second row has the network part, dim,
   indented two columns and cut with `…` at its end when it does not fit. A
   Discord DM reads `Alice` over `  Discord`. A room without a network part
   takes one row. The cursor covers both rows of a room, and half-page moves
