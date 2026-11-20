@@ -303,11 +303,13 @@ mod tests {
     use super::*;
     use crate::editor::tests::keys;
     use edtui::system_editor;
+    use mxt_core::action::{Action, Binding};
     use mxt_core::app::{App, Focus};
     use mxt_core::effect::{Effect, UiEffect};
     use mxt_core::ids::{Timestamp, UserId};
-    use mxt_core::keymap::Keymap;
+    use mxt_core::keymap::{Keymap, TableId};
     use mxt_core::keys::KeySeq;
+    use mxt_core::resolver::TimerId;
     use mxt_core::room::{NotificationMode, RoomKind, RoomName, RoomSummary, UnreadCounts};
     use mxt_core::settings::Settings;
     use ratatui::Terminal;
@@ -624,16 +626,20 @@ mod tests {
         }
     }
 
+    fn leader() -> KeySeq {
+        KeySeq::parse("<Space>", &KeySeq::default()).unwrap()
+    }
+
     /// The app with the default keymap and the unread rooms `!a` and `!b`,
     /// `!a` open and its composer focused, after typing `text` there in
     /// insert mode and `<Esc>`.
     fn composing(text: &str) -> (App, Composers) {
-        let leader = KeySeq::parse("<Space>", &KeySeq::default()).unwrap();
-        let mut app = App::new(
-            Keymap::new(&leader, []),
-            Settings::default(),
-            UserId::new("@me:example.org"),
-        );
+        composing_with(Keymap::new(&leader(), []), text)
+    }
+
+    /// [`composing`] with `keymap`.
+    fn composing_with(keymap: Keymap, text: &str) -> (App, Composers) {
+        let mut app = App::new(keymap, Settings::default(), UserId::new("@me:example.org"));
         for (room, at) in [("!a:example.org", 20), ("!b:example.org", 10)] {
             app.update(Msg::RoomUpserted(RoomSummary {
                 id: RoomId::new(room),
@@ -661,31 +667,49 @@ mod tests {
 
     /// Types `text` as the terminal does: each key goes to the core with
     /// the open room's composer's key mode while the composer has focus,
-    /// and `FocusComposer` and `ReplayKeys` go to the composers.
-    fn run(app: &mut App, composers: &mut Composers, text: &str) {
+    /// and the effects go to [`apply`]. The last timer the core started.
+    fn run(app: &mut App, composers: &mut Composers, text: &str) -> Option<TimerId> {
+        let mut timer = None;
         for key in keys(text) {
             let editor = (app.focus() == Focus::Composer)
                 .then(|| app.open_room().and_then(|room| composers.get(room)))
                 .flatten()
                 .map(Composer::key_mode);
-            let mut msgs = Vec::new();
-            for effect in app.update(Msg::Key { key, editor }) {
-                match effect {
-                    Effect::Ui(UiEffect::FocusComposer { room, mode }) => {
-                        composers.focus(room, mode, &mut msgs);
-                    }
-                    Effect::Ui(UiEffect::ReplayKeys(keys)) => {
-                        if let Some(composer) = composers.focused_mut() {
-                            composer.replay(&keys, &mut msgs);
-                        }
-                    }
-                    _ => {}
+            let effects = app.update(Msg::Key { key, editor });
+            timer = apply(app, composers, effects).or(timer);
+        }
+        timer
+    }
+
+    /// Runs `effects` as the terminal does: `FocusComposer`, `ReplayKeys`
+    /// and `InsertNewline` go to the composers, and what they report to the
+    /// core. The last timer started.
+    fn apply(app: &mut App, composers: &mut Composers, effects: Vec<Effect>) -> Option<TimerId> {
+        let mut msgs = Vec::new();
+        let mut timer = None;
+        for effect in effects {
+            match effect {
+                Effect::Ui(UiEffect::StartTimer { id, .. }) => timer = Some(id),
+                Effect::Ui(UiEffect::FocusComposer { room, mode }) => {
+                    composers.focus(room, mode, &mut msgs);
                 }
-            }
-            for msg in msgs {
-                app.update(msg);
+                Effect::Ui(UiEffect::ReplayKeys(keys)) => {
+                    if let Some(composer) = composers.focused_mut() {
+                        composer.replay(&keys, &mut msgs);
+                    }
+                }
+                Effect::Ui(UiEffect::InsertNewline(room)) => {
+                    if let Some(composer) = composers.get_mut(&room) {
+                        composer.insert_newline(&mut msgs);
+                    }
+                }
+                _ => {}
             }
         }
+        for msg in msgs {
+            app.update(msg);
+        }
+        timer
     }
 
     fn text_of(composers: &Composers) -> String {
@@ -698,9 +722,9 @@ mod tests {
     #[test]
     fn operators_and_text_objects_never_run_the_default_unread_keys() {
         // `]u` and `[u` are in `normal`, where the composer's normal and
-        // visual modes look too. The key after an operator, or after a text
-        // object's `i` or `a`, goes to the editor: it neither waits for a
-        // `u` nor opens the next unread room with it.
+        // visual modes look too. The key after an operator, after a text
+        // object's `i` or `a`, or after `g` goes to the editor: it neither
+        // waits for a `u` nor opens the next unread room with it.
         let markdown = r#"[link](url)<Space>"quoted""#;
         let unchanged = r#"[link](url) "quoted""#;
         for (typed, expected) in [
@@ -713,6 +737,9 @@ mod tests {
             ("0d]", unchanged),
             ("0c[", unchanged),
             ("0y]", unchanged),
+            ("0g]", unchanged),
+            // The composer keeps the focus.
+            ("0g<Esc>", unchanged),
         ] {
             let (mut app, mut composers) = composing(markdown);
             run(&mut app, &mut composers, typed);
@@ -741,5 +768,66 @@ mod tests {
             (app.focus(), app.open_room()),
             (Focus::Timeline, Some(&RoomId::new("!b:example.org")))
         );
+    }
+
+    #[test]
+    fn a_binding_in_normal_that_starts_with_g_runs_in_the_composer() {
+        // The keymap sees `g` before edtui does, so `g` waits for the
+        // binding's next key.
+        let keymap = || {
+            let gt = KeySeq::parse("gt", &leader()).unwrap();
+            let binding = Binding::single(Action::FocusTimeline);
+            Keymap::new(&leader(), [(TableId::Normal, gt, binding)])
+        };
+        let (mut app, mut composers) = composing_with(keymap(), "one<C-j>two");
+        run(&mut app, &mut composers, "gt");
+        assert_eq!(app.focus(), Focus::Timeline);
+
+        // `gg` matches no binding: the first `g` goes to edtui, and the
+        // second once `timeoutlen` passes.
+        let (mut app, mut composers) = composing_with(keymap(), "one<C-j>two");
+        let row = |composers: &Composers| {
+            let composer = composers.get(&RoomId::new("!a:example.org")).unwrap();
+            (composer.editor.state.cursor.row, composer.key_mode())
+        };
+        let timer = run(&mut app, &mut composers, "gg").unwrap();
+        assert_eq!(row(&composers), (1, EditorMode::AwaitingChar));
+        let effects = app.update(Msg::Timeout { id: timer });
+        apply(&mut app, &mut composers, effects);
+        assert_eq!(row(&composers), (0, EditorMode::Normal));
+        assert_eq!(app.focus(), Focus::Composer);
+    }
+
+    #[test]
+    fn keys_typed_quickly_after_gg_or_dd_run_with_a_binding_that_starts_with_g_or_d() {
+        // The second `g` or `d` waits for the binding, while the editor,
+        // which has the first one, waits for its next key. The second one
+        // then ends as on its timeout, before the key typed after it.
+        let keymap = |typed: &str| {
+            let keys = KeySeq::parse(typed, &leader()).unwrap();
+            let binding = Binding::single(Action::FocusTimeline);
+            Keymap::new(&leader(), [(TableId::Normal, keys, binding)])
+        };
+        let row = |composers: &Composers| {
+            let composer = composers.get(&RoomId::new("!a:example.org")).unwrap();
+            composer.editor.state.cursor.row
+        };
+        // `gg` keeps the column, as in nvim, so `x` deletes the `e`.
+        let (mut app, mut composers) = composing_with(keymap("gt"), "one<C-j>two");
+        run(&mut app, &mut composers, "ggx");
+        assert_eq!(
+            (row(&composers), text_of(&composers)),
+            (0, "on\ntwo".into())
+        );
+        assert!(app.pending_keys().is_empty());
+
+        // `dd` deletes the first line, and `j` moves down.
+        let (mut app, mut composers) = composing_with(keymap("dq"), "one<C-j>two<C-j>three");
+        run(&mut app, &mut composers, "kkddj");
+        assert_eq!(
+            (row(&composers), text_of(&composers)),
+            (1, "two\nthree".into())
+        );
+        assert_eq!(app.focus(), Focus::Composer);
     }
 }

@@ -60,6 +60,13 @@ marked **Breaking:**.
   `ci[` no longer waits for the next key, and a `u` typed after it no
   longer opens another room. `d<Esc>` cancels the `d` instead of leaving
   the composer.
+- In the composer and the message view, the key after `g` goes to the
+  editor without the keymap, as in nvim: `g]u` no longer opens another
+  room, `g<Esc>` cancels the `g` instead of leaving the composer, and `gq`
+  no longer closes the message view. Bindings in `normal` that start with
+  `g`, `d`, `c` or `y` work as before, also when `gg` or `dd` is typed
+  quickly before the next key: with `gt` bound, `ggx` runs `gg` and then
+  `x`, and with `dq` bound, `ddj` deletes a line and moves down.
 
 ## [0.1.2] - 2026-11-20
 

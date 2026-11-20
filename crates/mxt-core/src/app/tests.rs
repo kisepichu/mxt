@@ -679,6 +679,21 @@ fn keys_pending_before_a_paste_end_first() {
         ]
     );
     assert!(app.pending_keys().is_empty());
+
+    // Also once the editor waits for its next key, as edtui does after the
+    // first `g` of `gg` while the second waits for `gt`.
+    let gt = Binding::single(Action::FocusTimeline);
+    let mut app = app_with(vec![(TableId::Normal, seq("gt"), gt)]);
+    keys(&mut app, "<CR>i");
+    keys_in(&mut app, "g", Some(EditorMode::Normal));
+    assert_eq!(
+        paste(&mut app, "text", Some(EditorMode::AwaitingChar)),
+        vec![
+            Effect::Ui(UiEffect::ReplayKeys(seq("g").keys().to_vec())),
+            Effect::Ui(UiEffect::Paste("text".into())),
+        ]
+    );
+    assert!(app.pending_keys().is_empty());
 }
 
 #[test]

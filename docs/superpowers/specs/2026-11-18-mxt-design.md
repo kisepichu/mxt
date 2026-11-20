@@ -288,7 +288,10 @@ covered by unit tests.
   new key, in the second case) runs, and the keys after it are resolved
   afresh, one by one. When no prefix is a binding, only the first pending key
   is released, and the keys after it are resolved afresh. This is nvim's
-  behavior.
+  behavior. Keys that wait while a key released to the editor changes its
+  mode end the same way, before the next key or paste: with `gt` bound, the
+  second `g` of `gg` waits while edtui, which got the first, starts waiting
+  for its own next key.
 - Released keys go to the text input that would have received them: the
   composer's or the message view's editor through
   `Effect::Ui(ReplayKeys(keys))`, or the picker or command line query. In

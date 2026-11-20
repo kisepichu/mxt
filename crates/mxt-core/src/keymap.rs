@@ -72,7 +72,7 @@ pub enum InputContext {
     MessageView,
     /// An editor in a mode where every key goes to it (search mode; the message
     /// view's editor in insert mode; a key waiting for the next one, as after
-    /// `f` or an operator).
+    /// `f`, an operator or `g` for `gg`).
     EditorPassthrough,
     Picker,
     CommandLine,
