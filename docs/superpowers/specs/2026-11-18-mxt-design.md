@@ -256,9 +256,13 @@ The main types in `mxt-core`:
 - Room members: user ID and display name, loaded per room on demand, used for
   mention completion.
 - UI state: focus (room list, timeline, composer), mode, keymap resolver
-  state, picker state, the open view (a message's item, or a help view:
-  `:help` or `:map`), cursor positions, the last known viewport of each
-  pane, terminal focus (initially focused), the status message.
+  state, picker state, the line editors' texts and cursors (see "Line
+  editing"), the open view (a message's item, or a help view: `:help`,
+  `:map` or `:messages`), cursor positions, the last known viewport of each
+  pane, terminal focus (initially focused), the status message and the
+  history of status messages (`:messages`), the pending invites (for
+  `:join`'s completion), and the target of the latest `:join`, whose
+  answer the core waits for.
 
 ### Keymap resolver
 
@@ -289,6 +293,10 @@ covered by unit tests.
   composer's or the message view's editor through
   `Effect::Ui(ReplayKeys(keys))`, or the picker or command line query. In
   panes without text input they are dropped.
+- Keys resolved afresh after a binding or a release use the editor mode
+  reported with the last typed key: the core learns of a mode change that a
+  released key causes in the editor (`a` entering insert mode, `g` or `d`
+  making edtui wait for the next key) only with the next typed key.
 
 ### Matrix adapter
 
@@ -326,6 +334,12 @@ covered by unit tests.
   they first speak); phase 0 measured 0.4 to 2.1 KB per request. Mention
   completion loads the full list on the first composer focus, whatever the
   size.
+- Pending invites: with each sync response the room list task reads
+  `Client::invited_rooms()` and, when the set of room IDs and names
+  changed, sends `Msg::Invites` with each invite's room ID and display
+  name, for `:join`'s completion (see "Joining rooms and direct
+  messages"). Names count too, because an invite's name often resolves a
+  sync after the invite arrives. Invited rooms are not listed.
 - Network names, for every room including direct messages, first match wins:
   1. `network.displayname` of the room's `m.bridge` event (or
      `uk.half-shot.bridge`)
@@ -494,16 +508,36 @@ covered by unit tests.
   - edtui in normal or visual mode while a key waits for the next one: the
     next key goes to edtui without the keymap (see "edtui differences from
     vim"), as in nvim, whose operator-pending mode sees no normal-mode
-    mappings. This is the key after:
+    mappings and which reads the key after `g` without mappings too. This
+    is the key after:
     - `f`, `F`, `t`, `T` or `r`: its character, also after an operator, as
       in `df` or `yt`;
     - an operator, `d`, `c` or `y` in normal mode: `dw`, `yy`, and
       `d<Esc>`, which cancels the `d`;
     - a text object's `i` or `a` after an operator (`ci[`, `da(`, `yi"`) or
-      in visual mode (`vi[`): the object.
-    So bindings in `normal` that start with `[`, `]`, `(`, `"` and similar
+      in visual mode (`vi[`): the object;
+    - `g` in normal or visual mode: edtui has only `gg`, so `gg` runs, any
+      other key is dropped with the `g` (`g]`, `gx`, `g:`), and `g<Esc>`
+      cancels the `g`. In nvim `g]` is a command of its own, so the default
+      `]u` does not apply after `g` there either.
+
+    These are all the keys after which edtui 0.11.8 (mxt's fork at the
+    pinned commit) waits in normal and visual mode: `g` (`gg`), `d`, `c`
+    and `y`, `di`, `ci` and visual `i` (text objects), and `df`, `dt`, `cf`
+    and `ct` (a character); its insert mode has no key sequences. So
+    bindings in `normal` that start with `[`, `]`, `(`, `"` and similar
     keys, the default `]u` and `[u` among them, neither delay these
-    commands nor take their keys.
+    commands nor take their keys. The message view's editor routes keys
+    the same way: `gq` and `g<Esc>` do not close the view.
+  - A binding in `composer.normal`, `composer.visual` or `normal` that
+    starts with `g` (or with an operator) keeps working in the composer:
+    the keymap sees the key before edtui, so `g` waits there for the
+    binding's next key, and edtui gets `g` only when the resolver releases
+    it (the next key matched no binding, or `ui.timeoutlen` passed). Keys
+    resolved afresh with that release still go through the keymap (see
+    "Keymap resolver"); keys typed after it go to edtui. No default binding
+    in those tables starts with `g`: `gg`, `gx` and `gd` are in `room_list`
+    and `timeline`.
 - Pasted text, wherever the keys go: mxt turns on bracketed paste, so the
   terminal reports a paste as one event, which the tui adapter sends as
   `Msg::Paste` with its line breaks as `\n` (terminals and tmux send `\r`).
@@ -527,12 +561,14 @@ covered by unit tests.
     a paste, even one that ends in an `@` token; an open menu closes, and
     the next key looks for the token again.
   - the command line, the search line and the pickers, which hold one line:
-    the text up to the first line break; the rest is dropped.
+    the text up to the first line break, inserted at the cursor (see "Line
+    editing"); the rest is dropped.
   - `SECRET` mode, also when a binding that the paste ends enters it, as
-    for the keys typed after that binding: the first line too, added to the
-    key and masked like typed text. The rest is dropped, with the line break
-    a copied key ends in. The paste never submits the key and returns no
-    effect: the key leaves the core only in the `Recover` effect of `<CR>`.
+    for the keys typed after that binding: the first line too, inserted
+    into the key at the cursor and masked like typed text. The rest is
+    dropped, with the line break a copied key ends in. The paste never
+    submits the key and returns no effect: the key leaves the core only in
+    the `Recover` effect of `<CR>`.
   - the room list and the timeline: nowhere.
   - `CONFIRM` mode: nowhere, and the question is cancelled, as by any key
     but `y`.
@@ -555,8 +591,9 @@ covered by unit tests.
   `FetchImage`, decoded and scaled down with the `image` crate, and kept in
   the tui adapter's image cache) and the file name and size. Messages taller
   than the timeline pane show a `[+N lines]` marker at the cut-off.
-  The help views (`:help`, `:map`; see "Help views") use the same overlay
-  and editor for text the core generates. The core's open view is either a
+  The help views (`:help`, `:map`, `:messages`; see "Help views") use the
+  same overlay and editor for text the core generates. The core's open
+  view is either a
   message (its item, whose content it sends as today, `ViewContent::Text` or
   `ViewContent::Image`) or a help view (its generated text, sent as
   `ViewContent::Text`), so the image checks stay tied to a message view, and
@@ -572,7 +609,9 @@ Command line: `mxt [--config PATH]` and `mxt --version`.
    minimal example, and exit with a non-zero status. `HOME` must be an
    absolute path. A cache directory that contains the data or state
    directory is refused, because setting data aside deletes the cache
-   directory.
+   directory. Names this version does not know are ignored with a warning
+   (see "Layers"), which is logged once logging has started, after the
+   lock, and shown when the terminal UI starts.
 2. Take an exclusive lock on `$XDG_DATA_HOME/mxt/lock` (`std::fs::File::try_lock`).
    If another mxt holds it, exit with a non-zero status. Two processes must
    never share the crypto store.
@@ -613,14 +652,16 @@ why, and exits. The next start logs in as a new device with fresh stores.
 - Left: the room list, which can be hidden. `focus.room_list` shows it again.
 - Right: the timeline of the open room, with the composer below it. The
   composer's top rule is labelled "Reply to <name>" or "Edit" while the
-  room's draft is a reply or an edit.
+  room's draft is a reply or an edit, and ends with `↓ N newer` while newer
+  messages are below the timeline pane (see "Timeline").
 - Bottom line: status line showing the mode, the pending count and keys
   (like nvim's showcmd), the open room, the status message or the `CONFIRM`
   question, and the sync state. When they do not fit, the room name is cut
   first. Pressing `:` turns it into the command line.
 - Overlays: the fuzzy room picker, whose items show their unread badges, the
   emoji picker, the mention menu above the composer, and the full-screen
-  message view, which also shows the help views (`:help`, `:map`).
+  message view, which also shows the help views (`:help`, `:map`,
+  `:messages`).
 
 ### Modes
 
@@ -628,11 +669,11 @@ why, and exits. The next start logs in as a new device with fresh stores.
 |---|---|---|
 | `NORMAL` | the room list or the timeline has focus | keymap |
 | composer modes | the composer has focus; the status line shows edtui's mode (`INSERT`, `NORMAL`, `VISUAL`, `SEARCH`) | see "Input routing" above |
-| `COMMAND` | the `:` command line is open | `command_line` table, then text input |
-| `PICKER` | the room picker, the emoji picker or the link picker is open | `picker` table, then text input |
+| `COMMAND` | the `:` command line or a `/` search line is open | `command_line` table, then the line editor (see "Line editing") |
+| `PICKER` | the room picker, the emoji picker or the link picker is open | `picker` table, then the line editor of the query |
 | `VIEW` | the message view or a help view is open; the status line shows `VIEW` and the view editor's mode (`VIEW NORMAL`, `VIEW INSERT`, `VIEW VISUAL`, `VIEW SEARCH`) | `message_view` table while its editor is in normal or visual mode and no key waits for the next one (see "Input routing" above), then edtui |
-| `CONFIRM` | an action asks for confirmation | `y` confirms, any other key cancels |
-| `SECRET` | the recovery key is being entered | masked text input, `<CR>` submits, `<Esc>` cancels |
+| `CONFIRM` | an action asks for confirmation, or `:join` before it creates a direct message | `y` confirms, any other key cancels |
+| `SECRET` | the recovery key is being entered | the line editor, masked; `<CR>` submits, `<Esc>` cancels; no keymap |
 
 In `NORMAL`, the room list and the timeline have no character cursor. They
 move one room or one message at a time. Because of that, `<Space>` is free
@@ -673,8 +714,8 @@ set to mentions and keywords only show no label.
 
 The default order is by latest activity, newest first. `sort = "name"` sorts
 case-insensitively by the full displayed name (`network / room`), which groups
-rooms by network, whichever `network` layout is set. Spaces themselves are
-not listed.
+rooms by network, whichever `network` layout is set. Spaces themselves and
+pending invites are not listed (`:join` completes the invites).
 
 The list is `ui.room_list.width` columns wide, its border included (30 by
 default). Terminals narrower than 90 columns give it a third of their width
@@ -718,6 +759,26 @@ instead, and it never takes more than half of the width.
   entry after it fit on the pane, the newest entry is at the bottom too, so
   moving down near the end shows what arrived meanwhile. Otherwise the view
   stays put while entries arrive above or below it.
+- The newer-messages hint: while items exist after the last entry with a
+  row on the pane, the composer's top rule ends with a dim `↓ N newer`. `N`
+  counts those items: messages of every kind, deleted, undecryptable and
+  unsupported ones, the user's own and local echoes included; date
+  dividers, the read marker and hidden entries (state events) do not
+  count. Above 99 it reads `↓ 99+ newer`. The entry that the pane cuts at
+  its bottom edge has a row on the pane, so it does not count. The hint is
+  right-aligned on the rule with one `─` after it (`──── ↓ 3 newer ─`) and
+  keeps the draft label (`─ Reply to <name> `, `─ Edit `) and at least one
+  `─` before it; where that does not fit it shortens to `↓ N`, and where
+  that does not fit either it is left out, so the label is never cut for
+  it. Each frame computes it from what it draws, so it follows the cursor
+  and the entries that arrive, and is gone once the pane shows the newest
+  item. It covers what the rules above leave: a burst taller than the rows
+  below the cursor's message stays below the pane until the cursor moves
+  down. The tui adapter counts from its frame (`TimelinePane` knows the
+  last entry with a row, `App::timeline` the entries) and stops counting
+  at 100 items; the core is not involved. It reads "newer", not "new":
+  after the cursor moved up, the count includes messages the pane showed
+  before.
 - Messages taller than the pane show `[+N lines]`, and `message.view` shows
   them in full.
 
@@ -804,21 +865,22 @@ the registry, so a new command needs only its entry.
 | Command | Action |
 |---|---|
 | `:open <room>` | `room.open` with a fuzzy query, with completion over room names |
+| `:join <target>` | `room.join` with `target`, with completion over the names of pending invites (see "Joining rooms and direct messages") |
 | `:mute` / `:unmute` | `room.mute` / `room.unmute` |
 | `:upload <path>` | `file.upload` |
 | `:react [<emoji>]` | `message.react` with `emoji`, with completion over shortcodes; without an argument the emoji picker |
 | `:recover` | `account.recover` (asks for the recovery key in `SECRET` mode) |
 | `:help` | `help.commands`: the command list (see "Help views") |
 | `:map` | `help.keymap`: the effective key bindings (see "Help views") |
+| `:messages` | `status.messages`: the status line's message history (see "Help views") |
 | `:q` | `app.quit` |
 
-`:mute`, `:unmute`, `:recover`, `:help`, `:map` and `:q` reject an argument,
-and `:open` and `:upload` without one show their usage
-(`usage: :open <room>`). `:react` takes an optional argument. Command names
-match exactly: `:q` is the only short name, and `:h` is an unknown command.
-The command line, the `/` search line and picker queries take typed
-characters, `<BS>`, `<C-u>` (clear) and `<C-w>` (delete the last word);
-`<BS>` on an empty command or search line closes it.
+`:mute`, `:unmute`, `:recover`, `:help`, `:map`, `:messages` and `:q`
+reject an argument, and `:open`, `:join` and `:upload` without one show
+their usage (`usage: :open <room>`). `:react` takes an optional argument.
+Command names match exactly: `:q` is the only short name, and `:h` is an
+unknown command. The command line, the `/` search line and picker queries
+are edited with the line editor (see "Line editing").
 
 `:react` runs `message.react`, with `emoji` when an argument is given, on the
 open room's timeline cursor, whichever pane has focus (unlike `:mute`, which
@@ -833,14 +895,238 @@ ignored; shortcodes are lower case, so matching is case-sensitive), written
 without colons, in alphabetical order, cycling like `:open`'s completion.
 What `message.react` then does is in "Action registry".
 
+### Line editing
+
+The `:` command line, the `/` search lines, the pickers' queries and the
+`SECRET` prompt share one line editor in `mxt-core`: a text and a cursor,
+which sits between grapheme clusters, never inside one. A key reaches it
+after the `command_line` or `picker` table, as a key that table does not
+bind (see "Tables and resolution"), or directly in `SECRET` mode, which has
+no table. There is no history.
+
+| Key | Effect |
+|---|---|
+| a character (also with shift; not with ctrl or alt) | inserted at the cursor, which moves after it |
+| `<Left>` / `<Right>` | the cursor moves one grapheme cluster left / right; nothing at the start / end |
+| `<Home>`, `<C-b>` | the cursor moves to the start |
+| `<End>`, `<C-e>` | the cursor moves to the end |
+| `<S-Left>` | the cursor moves to the start of the word before it: back over blanks, then back over a run of one class |
+| `<S-Right>` | the cursor moves to the end of the word after it: forward over blanks, then forward over a run of one class |
+| `<BS>` | deletes the cluster before the cursor; at the start: nothing, except that an empty command or search line closes |
+| `<Del>` | deletes the cluster after the cursor; nothing at the end |
+| `<C-w>` | deletes from where `<S-Left>` would move the cursor up to the cursor |
+| `<C-u>` | deletes everything before the cursor |
+
+Any other key does nothing. Words: each grapheme cluster has the class of
+its first character, one of the classes of the editors' word motions
+(vim's character classes, as mxt's edtui fork has them; see "edtui
+differences from vim"): blanks (spaces, tabs, the no-break and the
+ideographic space); letters, digits and `_`; punctuation and symbols,
+full-width ones and emoji included; kanji; hiragana; katakana; hangul;
+and a few rarer ones (superscripts, subscripts, braille). A word is a run
+of clusters of one class other than blank. So `<C-w>` at the end of
+`日本語のテキスト` deletes `テキスト`, then `の`, then `日本語`, and at the end
+of `open foo.bar` it deletes `bar`, then `.`, then `foo`, then `open `.
+nvim's `<S-Left>` and `<S-Right>` on its command line move by
+blank-separated WORDs, which would make a line of Japanese one word; mxt
+uses the same words for all three keys. `mxt-core` keeps its own copy of
+the class table, since it cannot depend on edtui.
+
+- Typing, deleting and moving the cursor end a `<Tab>` completion cycle,
+  so the next `<Tab>` completes the text as it is then.
+  `command_line.complete` reads the whole text, wherever the cursor is,
+  and every completion step (a candidate, or the typed text again) leaves
+  the cursor at the end.
+- A picker ranks its items again, and selects the first, when an edit
+  changes the query; moving the cursor does not.
+- A paste inserts its first line at the cursor (see "Input routing").
+- The tui adapter draws the prompt (`:`, `/`, `> ` in a picker,
+  `Recovery key: `) and the text, and puts the terminal cursor on the
+  cursor's column: on the first column of the cluster after the cursor, or
+  after the text at its end. A text wider than the line is cut at its
+  start, by whole clusters, by as little as it takes for the cursor's cell
+  to fit; with the cursor at the end, the end of the text and the cursor
+  stay visible, as before the line had a cursor.
+- In `SECRET` mode the line shows one `*` per grapheme cluster of the key,
+  with the cursor among them; the core gives the tui adapter only the
+  number of clusters and the cursor's position among them. Editing in the
+  middle moves bytes within the key's buffer, which is allocated large
+  enough for a recovery key or a long passphrase, so it leaves no partial
+  copies in freed memory.
+- The `command_line` and `picker` tables come first: a user binding of one
+  of these keys there (`"<C-e>" = "picker.cancel"`) takes the key, and the
+  line editor never sees it. No default binding in those tables uses
+  them. The default `<C-e>` of `composer.completion` (`completion.cancel`)
+  belongs to the composer's mention menu, which is not a line.
+- The editors' own `/` search (edtui's search mode, in the composer and the
+  message view) is edtui's, not this line editor.
+
+### Joining rooms and direct messages
+
+`:join <target>` (`room.join` with `target`) joins a room, which also
+accepts a pending invite to it, or opens a direct message, for new users
+and for talking to bridge bots. The core reads the argument as:
+
+- a room alias, `#` and text with a `:` (`#mxt:example.org`), or a room ID,
+  `!` and text (`!abc:example.org`; newer room versions have IDs without a
+  server name);
+- a user ID, `@` and text with a `:` (`@alice:example.org`);
+- a matrix.to link to one of those, `https://matrix.to/#/` followed by it,
+  percent-encoded or not, optionally with `?via=<server>` parameters; a
+  link to an event (`https://matrix.to/#/!abc:example.org/$event`) stands
+  for its room;
+- anything else: the name of a pending invite, the best fuzzy match among
+  the pending invites' names, as `:open` matches room names; with no
+  match the status line says `No pending invite matches "<argument as
+  typed>"`. When another pending invite has the same name as the best
+  match, the status line says `More than one pending invite is named
+  "<name>"; <Tab> completes their room IDs`, and nothing is joined.
+
+The first three forms contain no whitespace; a name that has one of their
+forms is taken as that form. A room ID of a room in the room list opens it
+at once, without a request. Otherwise the core shows `Joining…` and sends
+`MatrixEffect::Join { target }`: the argument as typed, or for an invite
+its room ID. The matrix adapter parses it with ruma (`MatrixToUri::parse`,
+`OwnedRoomOrAliasId`, `OwnedUserId`) and answers with one of:
+
+- `Msg::Joined { target, room, how }`, where `how` is `Already` (the user
+  was in the room), `Joined` or `Created`;
+- `Msg::NoDirectMessage { target, user }`, for a user target whose direct
+  message the lookup below does not find, with the user ID;
+- `Msg::EffectFailed`.
+
+`target` is the effect's, so the core can tell the answer to its latest
+`:join` from an earlier one's.
+
+A room target:
+
+- A joined room with that ID, or whose canonical alias or one of whose
+  alternative aliases is that alias, is answered `Already`, without a
+  request.
+- Otherwise `Client::join_room_by_id_or_alias(target, via)`: the SDK
+  resolves an alias through the room directory, then sends `/join`, which
+  also accepts an invite. `via` is the link's `via` servers. Without them
+  it is the room ID's server name, when the ID has one, and, for a room
+  the store still has (one the user left, or an invite), the server names
+  of the room's creators (`Room::creators`): a homeserver that has left a
+  room can join it again only through a server in it, and room IDs of
+  newer room versions have no server name. With none of these there is no
+  `via`.
+- mxt does not list spaces, so a space is answered with an error, whether
+  the user was in it before or the join just entered it:
+  `The room is a space, which mxt does not list`, or `Joined, but the room
+  is a space, which mxt does not list`. The core then has no room to wait
+  for.
+
+A user target opens the direct message with that user. A new one is
+created only when none is found and the user answers `y`, because a new
+room invites the other person and, for a bridged user, may start a
+conversation on the remote network. The user's own ID is the error
+`Opening the direct message failed: that is your own user ID`. The
+adapter looks in this order, stops at the first step that finds a room,
+and takes the room with the latest activity when one step finds several:
+
+1. Direct messages: the rooms this session created with that user, while
+   the user is still in them (see below), and the joined rooms whose
+   `m.direct` targets are exactly that user (`Client::get_dm_rooms`),
+   except those where the store has that user's membership as left or
+   banned (`Room::get_member_no_sync`); a room where the store has no
+   member event of that user stays. The rooms' heroes are not used: they
+   carry no membership.
+2. A room the user shares with that user alone: joined, not a space, the
+   server's joined member count (`Room::joined_members_count`) is 2, and
+   that user is a joined member. The store decides when it has that
+   user's member event (`Room::get_member_no_sync`). Otherwise the room's
+   heroes (`Room::heroes`) decide when they are exactly that user and the
+   room has no invited members (`Room::invited_members_count` is 0),
+   since heroes list invited members as well as joined ones. Otherwise one
+   `/members` request for that room decides (`Room::get_member`). The room
+   has no bridge state (`m.bridge` or `uk.half-shot.bridge`), with one
+   exception: that user is the bridge's bot (`bridgebot`), the room has no
+   `m.room.name`, and the bridge declares no room type or `dm`. This finds
+   a bridge bot's management room, with or without bridge state, and
+   direct messages that `m.direct` lacks. Other bridged rooms are left
+   out, because a bridged channel that only the user and the bridge bot
+   have joined would look the same; the exception relies on mautrix
+   naming every channel it bridges, as "Room names" does.
+3. Bridged direct messages by the rule in "Room names": a room that the
+   rule takes for a direct message with that user, from the store, the
+   same check that names the room in the room list.
+4. A pending invite from that user to a room marked direct (the invite's
+   `is_direct`, `Room::is_direct` of an invited room): joining it accepts
+   it, answered `Joined`.
+5. Nothing found: the answer is `Msg::NoDirectMessage`, and the core asks
+   in `CONFIRM` mode `Create a direct message with <user ID>? (y/n)`. Any
+   key but `y` cancels, and nothing is created. `y` sends
+   `MatrixEffect::CreateDm { user }`, shows `Creating a direct message…`
+   and waits for the answer with the user ID as its target. The adapter
+   looks again, steps 1 to 4, and only when they still find nothing calls
+   `Client::create_dm(user)`, which creates a room with
+   `m.room.encryption` (the SDK's recommended settings) in its initial
+   state, `is_direct`, the `trusted_private_chat` preset and the user
+   invited, and adds it to the account's `m.direct`; answered `Created`,
+   or like the step that found a room.
+
+Opening an existing direct message and joining a room by its alias, ID or
+link never ask.
+
+User targets and `CreateDm` run one at a time in the adapter: each lookup,
+with its creation, ends before the next starts, so two quick `:join`s of
+one user, or a `y` and a `:join` of the same user right after it, never
+create two rooms. Room targets do not wait for them. The adapter keeps,
+for the session, the room `create_dm` returned for each user (step 1):
+`create_dm` writes `m.direct` to the server, but the store's `m.direct`
+(`Room::direct_targets`, which `get_dm_rooms` reads) changes only when a
+later sync brings the account data back, and step 2 misses the new room
+while the other person is only invited. The adapter logs at `info` which
+step found the room, or that none did (`direct message lookup: step 2
+found a room`, `direct message lookup: no step found a room`), without
+user IDs, names or room IDs.
+
+The core waits for the answer to its latest `:join` (or `y`) only, and
+opens the answered room when the room list has it, else when its
+`Msg::RoomUpserted` arrives. The first key or paste after the `:join` or
+the `y` ends the wait, before the key does anything else: the join goes
+on and its room appears in the room list, but a room never opens under a
+user who has moved on, also when a slow federated join ends much later,
+and an answer to an earlier `:join` changes nothing. The question of step
+5 is asked only while the wait is on, so a key typed before it appears
+never answers it. A `NoDirectMessage` that arrives while no `:join` is
+waited for sets the status `No direct message found; :join again to
+create one` instead, and one that arrives while a later `:join` is
+waited for changes nothing.
+When the room opens, the status line says `Joined <room>` after
+`Joined`, `Created a direct message` after `Created`, and nothing after
+`Already` (a `Joining…` still shown is cleared).
+
+Failures are status line errors, logged like every failure, and name
+neither the target nor the room, which can be an ID: `Joining failed: no
+room has this alias` when the room directory does not know the alias
+(`M_NOT_FOUND`); `Joining failed: not a room alias, room ID, user ID or
+matrix.to link` when ruma rejects the target; for a user target and
+`CreateDm` `Opening the direct message failed: <reason>`; otherwise
+`Joining failed: <reason>`, with the shortened reason other failures show
+(`the homeserver answered 403 M_FORBIDDEN` for a refused join). The
+`CONFIRM` question names the user, but it is neither logged nor kept in
+the status line's history.
+
+Pending invites come from `Msg::Invites` (see "Matrix adapter"): each
+invited room's ID and display name (`Room::display_name`; for an invite to
+a direct message, the inviter's name), sorted by name. `<Tab>` after
+`:join ` completes their names, ranked against the typed text as `:open`
+ranks room names and cycling like `:open`'s completion; an invite whose
+name another invite shares completes to its room ID instead, so each of
+them can be joined. Completing the name `join` adds a space.
+
 ### Help views
 
-`:help` and `:map` open a view over the whole screen, the same overlay and
-editor as the message view for a text message: `j`/`k`, `/` search, visual
-selection and `yy` work, changes are discarded as in the message view, and
-`q` or `<Esc>` closes it (the `message_view` table). The text is generated
-each time the view opens, so it shows the running mxt's commands and
-configuration; a long text scrolls and wraps like a long message. A help
+`:help`, `:map` and `:messages` open a view over the whole screen, the same
+overlay and editor as the message view for a text message: `j`/`k`, `/`
+search, visual selection and `yy` work, changes are discarded as in the
+message view, and `q` or `<Esc>` closes it (the `message_view` table). The
+text is generated each time the view opens, so it shows the running mxt's
+commands, configuration and messages; a long text scrolls and wraps like a
+long message. A help
 action while a view is open replaces that view. The view has no title: its
 first line says what it is.
 
@@ -851,9 +1137,9 @@ first line says what it is.
   ```
 
   then an empty line, then one line per registry entry in the order of the
-  Commands table above (`:open`, `:mute`, `:unmute`, `:upload`, `:react`,
-  `:recover`, `:help`, `:map`, `:q`): the usage, padded with spaces to the
-  longest usage plus two, then the description
+  Commands table above (`:open`, `:join`, `:mute`, `:unmute`, `:upload`,
+  `:react`, `:recover`, `:help`, `:map`, `:messages`, `:q`): the usage,
+  padded with spaces to the longest usage plus two, then the description
   (`:open <room>      Open a room by its name`). No other usage text.
 - `:map` (`help.keymap`): the bindings of each table after the user's
   bindings are merged over its defaults, before fallback: a table shows its
@@ -871,12 +1157,31 @@ first line says what it is.
   arguments at their default are left out (`room.open` with `filter = "all"`
   and `pick = "first"` is `room.open`; `composer.focus` with
   `mode = "insert"` is `composer.focus`), the others follow in the order
-  `filter`, `pick`, `query`, `mode`, `path`, `emoji`, as `name = value` with
-  TOML strings (quoted, with escapes), separated by `, `; `emoji` shows the
+  `filter`, `pick`, `query`, `mode`, `path`, `emoji`, `target`, as
+  `name = value` with TOML strings (quoted, with escapes), separated by
+  `, `; `emoji` shows the
   emoji itself (`emoji = "👍"`). An array of actions is written with `; `
   between them; a `nop` binding is listed as `nop`, since it hides a
   default. A table without bindings is listed with its header only.
-- Both have actions without a default key, so the user can bind them
+- `:messages` (`status.messages`): the first line is exactly
+
+  ```text
+  Status line messages, oldest first; the last 200 are kept.
+  ```
+
+  then an empty line, then the status line's messages, oldest first, one
+  per line as they were shown, without times (the core reads no clock;
+  the log has the times of failures and configuration warnings). The
+  history keeps every status message since mxt started, informational ones
+  and errors alike, also one shown again, at most 200, dropping the oldest
+  first. The `CONFIRM` question, the `SECRET` prompt, the mode, the
+  pending keys and the sync state are not status messages. At startup each
+  configuration warning comes first, as a message of its own that the
+  status line did not show, then the status message that counts them (see
+  "Layers"). With no messages the text is the first line alone. The view
+  opens at the first line like the other views; `G` goes to the newest
+  message.
+- All three have actions without a default key, so the user can bind them
   (`<leader>sk = "help.keymap"`).
 
 ### Mentions
@@ -1161,8 +1466,8 @@ Settings:
 | `composer.insert` | the composer has focus and edtui is in insert mode | pass the key to edtui |
 | `composer.completion` | the mention menu is open in insert mode | look in `composer.insert`, then pass the key to edtui |
 | `message_view` | the message view is open, its editor is in normal or visual mode, and no key waits for the next one | pass the key to edtui |
-| `picker` | a picker is open | type it into the query |
-| `command_line` | the command line is open | type it into the command line |
+| `picker` | a picker is open | the line editor of the query (see "Line editing") |
+| `command_line` | the `:` command line or a `/` search line is open | the line editor of the line (see "Line editing") |
 | `normal` | fallback for the tables above that name it | ignore the key |
 
 `normal` holds only bindings that make sense everywhere outside text input.
@@ -1176,7 +1481,7 @@ resolver"). Movement actions accept a count prefix (`5j`).
 Actions are named `<target>.<verb>`. The first release has:
 
 - rooms: `room.open`, `room.open_selected`, `room.mark_read`, `room.mute`,
-  `room.unmute`
+  `room.unmute`, `room.join` (`target`; added after the first release)
 - messages: `message.reply`, `message.edit`, `message.delete`,
   `message.yank`, `message.react`, `message.open`, `message.goto_reply`,
   `message.resend`, `message.view`
@@ -1194,6 +1499,8 @@ Actions are named `<target>.<verb>`. The first release has:
   `search.start`, `search.next`, `search.prev`
 - help: `help.commands` (`:help`), `help.keymap` (`:map`), both added after
   the first release; no default keys (see "Help views")
+- status line: `status.messages` (`:messages`), added after the first
+  release; no default key (see "Help views")
 - other: `view.close`, `sidebar.toggle`, `focus.room_list`, `focus.timeline`,
   `file.upload`, `account.recover`, `app.quit`, `nop`
 
@@ -1216,8 +1523,10 @@ with the same values.
 
 `message.react` takes an optional `emoji` (added after the first release): an
 emoji or a shortcode with colons on both sides or none, resolved with the
-`emojis` crate. In a binding, an unknown or empty emoji is rejected when the
-configuration is loaded; in `:react`, it is an error in the status line (see
+`emojis` crate. In a binding, an empty emoji is an error when the
+configuration is loaded and an unknown one a warning that ignores the
+binding (see "Layers"), since a newer `emojis` knows more shortcodes; in
+`:react`, an unknown one is an error in the status line (see
 "Commands"). Both forms act on the open room's timeline cursor and first
 check it, for `+` and `:react` alike: with no open room the status line says
 `No room is open`, with an empty timeline `No message to react to`, and on a
@@ -1231,21 +1540,112 @@ second `:react heart` removes the reaction rather than adding a second one.
 A binding such as `{ action = "message.react", emoji = "thumbsup" }` reacts
 with one key.
 
+`room.join` (added after the first release) takes `target`, a non-empty
+string, required: a room alias, a room ID, a user ID, a matrix.to link or
+the name of a pending invite, read as `:join` reads its argument when the
+action runs (see "Joining rooms and direct messages").
+
 ### Layers
 
-- `mxt` reads the file into serde DTOs and converts argument values into the
-  core's neutral `ArgValue` (string, integer, boolean).
+- `mxt` parses the file into a TOML document (`toml::de::DeTable`, which
+  keeps every key's and value's position), sets aside the keys and tables
+  it does not know (see below), reads the rest into serde DTOs, and
+  converts argument values into the core's neutral `ArgValue`: a string,
+  an integer, a boolean, or `Unsupported` for any other TOML value (a
+  float, an array, a table, a date-time), which no action takes. So every
+  argument is read whatever its value, and `Action::from_spec` decides
+  about it: an unknown argument with an array value is as unknown as one
+  with a string.
 - The core builds checked types with `Action::from_spec(name, args)`,
   `KeySeq::parse("<C-x><C-e>")` and `Keymap::new(..)`.
 - Errors are reported with the file, line, column and reason before the
-  terminal UI starts, and mxt exits with a non-zero status: unknown keys
-  (`deny_unknown_fields`), unknown actions, wrong or conflicting arguments,
-  invalid key notation, two spellings of one key sequence in a table
-  (`<leader>x` and `<Space>x`, `<C-a>` and `<C-A>`), a malformed
+  terminal UI starts, and mxt exits with a non-zero status: TOML syntax
+  errors; a value of the wrong type for a known key or for a known
+  argument of a known action (a binding that is not a string, a table or
+  an array, a binding table without `action`, `filter = 1`,
+  `filter = 3.5`); a missing `account.user_id`; conflicting arguments
+  (`pick` with `query`); a missing required argument (`file.upload`
+  without `path`); an empty string where a value is required (`query`,
+  `path`, `emoji`, `target`); an empty array as a binding; malformed key
+  notation (an empty key sequence, a `<` without `>`, `S-` on a key it
+  does not change, `<leader>` in `ui.leader`, `<leader>` with modifiers
+  such as `<C-leader>`); two spellings of one key sequence in a table
+  (`<leader>x` and `<Space>x`, `<C-a>` and `<C-A>`); a malformed
   `account.user_id`, an `account.homeserver` that is not an `http(s)` URL,
-  a `ui.room_list.width` outside 12 to 80, an empty or invalid
-  `ui.time_format`, a `files.download_dir` that is neither absolute nor
-  `~/…`, and an empty `files.opener`. A typo is never silently ignored.
+  a `ui.room_list.width` outside 12 to 80, an empty `ui.time_format`, a
+  `files.download_dir` that is neither absolute nor `~/…`, and an empty
+  `files.opener`.
+- Names this version does not know are warnings, not errors: dotfiles
+  share one configuration between machines that run different versions,
+  and a setting written for a newer mxt must not stop an older one. These
+  are unknown keys and tables anywhere (`ui.font`, `[notifications]`,
+  `[keymap.foo]`, `[keymap.composer.foo]`), whose contents are then not
+  checked; an unknown value of a setting with fixed values
+  (`ui.image_preview`, `ui.read_receipts`, `ui.room_list.sort`,
+  `ui.room_list.network`); a `ui.time_format` that jiff rejects (see the
+  last item); and in a binding an unknown action, an unknown argument,
+  whatever its value (`sort = ["name"]`, `ratio = 0.5`), an unknown value
+  of an argument with fixed values (`filter`, `pick`, `mode`), an unknown
+  emoji, or an unknown key name or modifier in its keys (`<F13>`,
+  `<D-s>`), also in `ui.leader`. The setting or binding is ignored and
+  the default applies: an ignored setting has its documented default
+  (`ui.leader` `<Space>`, `ui.time_format` `"%H:%M"`); an ignored binding
+  leaves the default binding of the same keys in its table, if there is
+  one; an array with one unknown action is ignored whole.
+- `ui.read_receipts` is the one exception: an unknown value falls back to
+  `"private"`, not to its default `"public"`. Receipts go out as soon as a
+  room opens; opening one takes a key, and a key clears the status line,
+  so public receipts could be sent before the user has seen the warning.
+  Its warning says what applies instead of ending in `(ignored)`:
+  `ui.read_receipts: unknown value "x", using "private"`.
+- While `ui.leader` is ignored, `<leader>` stands for `<Space>`, so two
+  bindings of one table that a newer version tells apart can become one
+  key sequence (`"<leader>x"` and `"<Space>x"` under `leader = "<F13>"`).
+  Such a duplicate, where one of the two spellings uses `<leader>` and the
+  fallback makes them the same, is a warning that ignores the later
+  binding in the file; every other duplicate stays an error.
+- Within one binding the checks run in order and the first problem
+  decides: its keys (malformed notation is an error, an unknown key name a
+  warning), the same keys spelled twice in the table, then each action in
+  turn, where the first error `Action::from_spec` returns decides. It
+  checks the action's name, then its arguments' names, then conflicts
+  between arguments, then each argument's type and value, and a missing
+  required argument, in the order the action reads them. So
+  `{ action = "room.open", sort = "name", pick = "next", query = "x" }` is
+  a warning (the unknown argument comes first), and
+  `{ action = "room.open", pick = "next", query = "x", filter = "dm" }` an
+  error (the conflict comes before the values).
+- A warning has the form of an error and ends in `(ignored)`:
+  `<file>:<line>:<column>: <setting>: <reason> (ignored)`, for example
+  `/home/alice/.config/mxt/config.toml:5:7: keymap.timeline.x: unknown action "message.dlete" (ignored)`;
+  other reasons are `unknown table`, `unknown key`, `unknown value "wezterm";
+  expected one of "auto", "off", …`, jiff's error for `ui.time_format`, the
+  action errors' texts (`room.open: unknown argument "sort"`,
+  `room.open: unknown "filter" value "dm"; expected one of …`) and the key
+  errors' texts (`invalid key "<F13>": unknown key <F13>`). mxt logs each
+  at `warn` with the target `mxt::config` once logging has started, so the
+  log line is the subscriber's UTC time, `WARN`, `mxt::config:` and the
+  warning. The binary then feeds them to the core with
+  `Msg::ConfigWarnings` right after `App::new`: the core puts each into
+  the status line's history and sets the status message, in the error
+  style so that it is not missed, `Ignored 1 setting in the configuration;
+  see :messages` (`Ignored 3 settings in the configuration; see :messages`
+  for more). Nothing is printed to the terminal.
+- A typo is never silently ignored: it is an error, or a warning that the
+  status line points to at every start. A configuration that loaded before
+  loads the same way, since every warning was an error before.
+- Later versions extend the configuration with new names only (keys,
+  tables, actions, arguments, values, key names) and keep the meaning of
+  the existing ones, so that older versions can skip what they do not
+  know. They never accept what the errors above reject: ranges, conflicts,
+  required arguments and values, key notation, and the forms of user IDs,
+  URLs and paths stay as they are, so no setting of a newer version is an
+  error in an older one. `ui.time_format` is the exception, and so a
+  warning: jiff, which checks it, may accept new directives in compatible
+  releases (its documentation says the set of rejected ones may shrink),
+  and its errors do not say whether a directive is unknown or malformed.
+  Giving an existing name another meaning is a breaking change (see
+  [Releasing](../../releasing.md)).
 
 ## Storage
 
@@ -1271,7 +1671,8 @@ platforms.
   printed before the terminal UI starts, and mxt exits with a non-zero status.
 - Runtime failures of effects come back as `Msg::EffectFailed`. They are shown
   in the status line and logged. They never panic. The status line shows only
-  the latest message, so the log is the place to look for earlier ones.
+  the latest message; `:messages` lists the last 200 of the run, and the log
+  keeps the failures with their times.
 - Sync state (`starting` until the first response, then `synced`,
   `offline`, `retrying`) is shown in the status line. The client's request
   configuration sends a request at most three times (`retry_limit(3)`), so
@@ -1321,6 +1722,9 @@ platforms.
 `tracing` writes daily files to `$XDG_STATE_HOME/mxt/` and keeps seven days.
 `MXT_LOG` takes an `EnvFilter` directive. The default is `info` for mxt and
 `warn` for matrix-rust-sdk.
+Configuration warnings are logged at `warn` (see "Layers"), and `:join`'s
+direct message lookup logs at `info` which step found a room (see
+"Joining rooms and direct messages").
 
 ## Testing
 
@@ -1342,6 +1746,16 @@ platforms.
     IDs are returned
   - rebuilding `MentionRef`s when editing a message
   - mention candidate ranking and the rule for duplicate display names
+  - the line editor: moving and deleting by grapheme cluster, words across
+    classes (CJK, punctuation, emoji), `<C-u>`, `<BS>` closing an empty
+    line, the cursor after completion and paste, and the masked `SECRET`
+    key
+  - the status message history and `:messages`, configuration warnings
+    included
+  - `:join`'s reading of targets and invite names (duplicate names
+    included), its completion, opening the answered room when the room
+    list has it or once it does, the wait ending at the next key, and the
+    `CONFIRM` question before a direct message is created
 - `mxt-matrix`: tests with constructed inputs for converting SDK values into
   domain types, HTML rendering, download file names, the dimensions of
   uploaded images and the session file. The send queue paths are tested
@@ -1354,14 +1768,26 @@ platforms.
   leaves nothing in the send queue, that an accepted edit is answered with
   `SendQueued`, that a refused upload is reported, stays in the send queue
   and shows as a failed local echo, and that a refused reaction is reported
-  and then dropped from the timeline and the send queue. The rest is covered
-  by phase 0 and by running mxt against a homeserver.
+  and then dropped from the timeline and the send queue. `room.join` is
+  tested the same way: its targets (an alias, a room ID with a pending
+  invite, a matrix.to link with `via`, a left room by its ID with its
+  creators' servers as `via`), each step of the direct message lookup
+  finding its room with no `createRoom` request (a bridge bot's room with
+  bridge state among them, and heroes that do or do not decide), an
+  answer that nothing was found, and the creation of an encrypted direct
+  message (`is_direct`, the invite, the preset and `m.room.encryption` in
+  the request, then `m.direct`), once only for two quick requests. The
+  rest is covered by phase 0 and by running mxt against a homeserver.
 - `mxt-tui`: unit tests, for example of key conversion, the editor keys
   `mxt-tui` handles itself, wrapping and the cursor by grapheme cluster, the
   composers' reports to the core, and the layout; some assert rendered rows
   and buffers drawn on ratatui's `TestBackend`. There are no rendering
   snapshots, which would pin incidental layout. The rest is verified by
   running mxt.
+- `mxt`: configuration loading from strings: each error and each warning
+  with its position and text, a document with every key and every table
+  loading without warnings, and the complete example of the user
+  documentation loading without warnings.
 - Continuous integration (GitHub Actions, Linux and macOS on Apple Silicon),
   with the flake's toolchain:
   - On every push and pull request, inside `nix develop` with the Cargo cache
@@ -1571,13 +1997,15 @@ asking for the recovery key ("Startup").
   `r{char}` in normal mode, one undo step; and `h`, `l`, `<Left>` and
   `<Right>` over whole grapheme clusters (skin tones, ZWJ sequences, VS16).
   The key after `f`, `t` or `r` goes to the editor without the keymap (`f:`
-  finds a colon, `<Esc>` cancels), and so does the key after an operator or
-  a text object's `i` or `a` (see "Input routing"). edtui's own `df`, `dt`,
-  `cf` and `ct` still work, and `;` and `,` repeat their find. Other
+  finds a colon, `<Esc>` cancels), and so does the key after an operator, a
+  text object's `i` or `a`, or `g` (see "Input routing"). edtui's own `df`,
+  `dt`, `cf` and `ct` still work, and `;` and `,` repeat their find. Other
   operators with these motions (`dF`, `cT`, `yf`, `d;`) are not supported
-  and do nothing; the character after `dF` or `yf` is dropped, as is the
-  one after `r` in visual mode. edtui's text objects are `i` with `w`, `W`,
-  a quote or a bracket, after `d` and `c` and in visual mode (there without
+  and do nothing; the character after `dF` or `yf` is dropped, as are the
+  one after `r` in visual mode and the key after `gf`, `gF`, `gt` or `gT`
+  (edtui's only `g` command is `gg`). edtui's text objects are `i` with
+  `w`, `W`, a quote or a bracket, after `d` and `c` and in visual mode
+  (there without
   `iW`). It has no `a` objects and no `yi`: `da(`, `ya"`, `yi"` and visual
   `a(` do nothing, and the object's key is dropped. A text object edtui
   does not know (`dif`) drops its keys. mxt's edtui fork (see "Nix flake")
@@ -1622,6 +2050,23 @@ asking for the recovery key ("Startup").
   levels fit) and leaves release builds (about 32,800 levels) little margin
   once other frames are on the stack. An iterative `Drop` in ruma-html would
   make this unnecessary.
+- **Finding an existing direct message.** `:join @user` creates a room only
+  when the lookup in "Joining rooms and direct messages" finds none and the
+  user answers `y` to the question that follows. Step 2 finds a bridge
+  bot's management room with or without bridge state, as long as the
+  bridge gives it no name and declares no room type other than `dm`; a
+  bridged direct message whose other person has not joined yet looks the
+  same, so `:join` with the bot's ID may open that room instead, which
+  creates nothing. The owner's account check (`:join` with a bridge bot's
+  user ID opens the existing room, and the log names the step that found
+  it) confirms it for the bridge checked. Members are lazy-loaded, so the
+  lookup reads the store and, in step 2, the rooms' heroes; a room that
+  neither decides costs one `/members` request in step 2.
+- **Ignored settings.** An ignored setting takes its documented default,
+  which can be the opposite of what the newer setting asked for. For
+  `ui.read_receipts`, whose default sends receipts that others see, mxt
+  falls back to `"private"` instead (see "Layers"). The status line says
+  at every start that settings were ignored, and `:messages` names them.
 
 ## Third-party licenses
 
