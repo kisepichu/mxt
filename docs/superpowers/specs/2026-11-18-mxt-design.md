@@ -261,7 +261,8 @@ The main types in `mxt-core`:
   `:map` or `:messages`), cursor positions, the last known viewport of each
   pane, terminal focus (initially focused), the status message and the
   history of status messages (`:messages`), the pending invites (for
-  `:join`'s completion), and the room a `:join` waits to open.
+  `:join`'s completion), and the target of the latest `:join`, whose
+  answer the core waits for.
 
 ### Keymap resolver
 
@@ -334,10 +335,11 @@ covered by unit tests.
   completion loads the full list on the first composer focus, whatever the
   size.
 - Pending invites: with each sync response the room list task reads
-  `Client::invited_rooms()` and, when the set changed, sends
-  `Msg::Invites` with each invite's room ID and display name, for
-  `:join`'s completion (see "Joining rooms and direct messages"). Invited
-  rooms are not listed.
+  `Client::invited_rooms()` and, when the set of room IDs and names
+  changed, sends `Msg::Invites` with each invite's room ID and display
+  name, for `:join`'s completion (see "Joining rooms and direct
+  messages"). Names count too, because an invite's name often resolves a
+  sync after the invite arrives. Invited rooms are not listed.
 - Network names, for every room including direct messages, first match wins:
   1. `network.displayname` of the room's `m.bridge` event (or
      `uk.half-shot.bridge`)
@@ -670,7 +672,7 @@ why, and exits. The next start logs in as a new device with fresh stores.
 | `COMMAND` | the `:` command line or a `/` search line is open | `command_line` table, then the line editor (see "Line editing") |
 | `PICKER` | the room picker, the emoji picker or the link picker is open | `picker` table, then the line editor of the query |
 | `VIEW` | the message view or a help view is open; the status line shows `VIEW` and the view editor's mode (`VIEW NORMAL`, `VIEW INSERT`, `VIEW VISUAL`, `VIEW SEARCH`) | `message_view` table while its editor is in normal or visual mode and no key waits for the next one (see "Input routing" above), then edtui |
-| `CONFIRM` | an action asks for confirmation | `y` confirms, any other key cancels |
+| `CONFIRM` | an action asks for confirmation, or `:join` before it creates a direct message | `y` confirms, any other key cancels |
 | `SECRET` | the recovery key is being entered | the line editor, masked; `<CR>` submits, `<Esc>` cancels; no keymap |
 
 In `NORMAL`, the room list and the timeline have no character cursor. They
@@ -976,16 +978,25 @@ and for talking to bridge bots. The core reads the argument as:
 - anything else: the name of a pending invite, the best fuzzy match among
   the pending invites' names, as `:open` matches room names; with no
   match the status line says `No pending invite matches "<argument as
-  typed>"`.
+  typed>"`. When another pending invite has the same name as the best
+  match, the status line says `More than one pending invite is named
+  "<name>"; <Tab> completes their room IDs`, and nothing is joined.
 
 The first three forms contain no whitespace; a name that has one of their
 forms is taken as that form. A room ID of a room in the room list opens it
 at once, without a request. Otherwise the core shows `Joining…` and sends
 `MatrixEffect::Join { target }`: the argument as typed, or for an invite
 its room ID. The matrix adapter parses it with ruma (`MatrixToUri::parse`,
-`OwnedRoomOrAliasId`, `OwnedUserId`) and answers
-`Msg::Joined { room, how }`, where `how` is `Already` (the user was in the
-room), `Joined` or `Created`, or `Msg::EffectFailed`.
+`OwnedRoomOrAliasId`, `OwnedUserId`) and answers with one of:
+
+- `Msg::Joined { target, room, how }`, where `how` is `Already` (the user
+  was in the room), `Joined` or `Created`;
+- `Msg::NoDirectMessage { target, user }`, for a user target whose direct
+  message the lookup below does not find, with the user ID;
+- `Msg::EffectFailed`.
+
+`target` is the effect's, so the core can tell the answer to its latest
+`:join` from an earlier one's.
 
 A room target:
 
@@ -994,65 +1005,118 @@ A room target:
   request.
 - Otherwise `Client::join_room_by_id_or_alias(target, via)`: the SDK
   resolves an alias through the room directory, then sends `/join`, which
-  also accepts an invite. `via` is the link's `via` servers, else the room
-  ID's server name when it has one, else none.
-- A space is not listed, so joining one is answered with the error
-  `Joined, but the room is a space, which mxt does not list`.
+  also accepts an invite. `via` is the link's `via` servers. Without them
+  it is the room ID's server name, when the ID has one, and, for a room
+  the store still has (one the user left, or an invite), the server names
+  of the room's creators (`Room::creators`): a homeserver that has left a
+  room can join it again only through a server in it, and room IDs of
+  newer room versions have no server name. With none of these there is no
+  `via`.
+- mxt does not list spaces, so a space is answered with an error, whether
+  the user was in it before or the join just entered it:
+  `The room is a space, which mxt does not list`, or `Joined, but the room
+  is a space, which mxt does not list`. The core then has no room to wait
+  for.
 
-A user target opens the direct message with that user and creates one
-only when none is found, because a new room invites the other person and,
-for a bridged user, may start a conversation on the remote network. The
-user's own ID is the error `Opening the direct message failed: that is
-your own user ID`. The adapter looks in this order, stops at the first
-step that finds a room, and takes the room with the latest activity when
-one step finds several:
+A user target opens the direct message with that user. A new one is
+created only when none is found and the user answers `y`, because a new
+room invites the other person and, for a bridged user, may start a
+conversation on the remote network. The user's own ID is the error
+`Opening the direct message failed: that is your own user ID`. The
+adapter looks in this order, stops at the first step that finds a room,
+and takes the room with the latest activity when one step finds several:
 
-1. `m.direct`: the joined rooms whose `m.direct` targets are exactly that
-   user (`Client::get_dm_rooms`), except those where the store or the
-   room's heroes show that the user has left or was banned; an unknown
-   membership keeps the room.
-2. A room the user shares with that user alone: joined, not a space,
-   without bridge state (`m.bridge` or `uk.half-shot.bridge`), the server's
-   joined member count (`Room::joined_members_count`) is 2, and that user
-   is a joined member, as the store says, or else the room's heroes
-   (`Room::heroes`); when neither knows, one `/members` request for that
-   room decides. This finds a bridge bot's management room, which bridges
-   do not mark as bridged, and direct messages that `m.direct` lacks.
-   Bridged rooms are left out, because a bridged channel that only the
-   user and the bridge bot have joined would look the same.
+1. Direct messages: the rooms this session created with that user, while
+   the user is still in them (see below), and the joined rooms whose
+   `m.direct` targets are exactly that user (`Client::get_dm_rooms`),
+   except those where the store has that user's membership as left or
+   banned (`Room::get_member_no_sync`); a room where the store has no
+   member event of that user stays. The rooms' heroes are not used: they
+   carry no membership.
+2. A room the user shares with that user alone: joined, not a space, the
+   server's joined member count (`Room::joined_members_count`) is 2, and
+   that user is a joined member. The store decides when it has that
+   user's member event (`Room::get_member_no_sync`). Otherwise the room's
+   heroes (`Room::heroes`) decide when they are exactly that user and the
+   room has no invited members (`Room::invited_members_count` is 0),
+   since heroes list invited members as well as joined ones. Otherwise one
+   `/members` request for that room decides (`Room::get_member`). The room
+   has no bridge state (`m.bridge` or `uk.half-shot.bridge`), with one
+   exception: that user is the bridge's bot (`bridgebot`), the room has no
+   `m.room.name`, and the bridge declares no room type or `dm`. This finds
+   a bridge bot's management room, with or without bridge state, and
+   direct messages that `m.direct` lacks. Other bridged rooms are left
+   out, because a bridged channel that only the user and the bridge bot
+   have joined would look the same; the exception relies on mautrix
+   naming every channel it bridges, as "Room names" does.
 3. Bridged direct messages by the rule in "Room names": a room that the
    rule takes for a direct message with that user, from the store, the
    same check that names the room in the room list.
 4. A pending invite from that user to a room marked direct (the invite's
    `is_direct`, `Room::is_direct` of an invited room): joining it accepts
    it, answered `Joined`.
-5. Nothing found: `Client::create_dm(user)`, which creates a room with
+5. Nothing found: the answer is `Msg::NoDirectMessage`, and the core asks
+   in `CONFIRM` mode `Create a direct message with <user ID>? (y/n)`. Any
+   key but `y` cancels, and nothing is created. `y` sends
+   `MatrixEffect::CreateDm { user }`, shows `Creating a direct message…`
+   and waits for the answer with the user ID as its target. The adapter
+   looks again, steps 1 to 4, and only when they still find nothing calls
+   `Client::create_dm(user)`, which creates a room with
    `m.room.encryption` (the SDK's recommended settings) in its initial
    state, `is_direct`, the `trusted_private_chat` preset and the user
-   invited, and adds it to the account's `m.direct`; answered `Created`.
+   invited, and adds it to the account's `m.direct`; answered `Created`,
+   or like the step that found a room.
 
-The core opens the answered room when the room list has it, else when its
-`Msg::RoomUpserted` arrives; opening another room or another `:join`
-before then cancels the wait. When the room opens, the status line says
-`Joined <room>` after `Joined`, `Created a direct message` after
-`Created`, and nothing after `Already` (a `Joining…` still shown is
-cleared).
+Opening an existing direct message and joining a room by its alias, ID or
+link never ask.
+
+User targets and `CreateDm` run one at a time in the adapter: each lookup,
+with its creation, ends before the next starts, so two quick `:join`s of
+one user, or a `y` and a `:join` of the same user right after it, never
+create two rooms. Room targets do not wait for them. The adapter keeps,
+for the session, the room `create_dm` returned for each user (step 1):
+`create_dm` writes `m.direct` to the server, but the store's `m.direct`
+(`Room::direct_targets`, which `get_dm_rooms` reads) changes only when a
+later sync brings the account data back, and step 2 misses the new room
+while the other person is only invited. The adapter logs at `info` which
+step found the room, or that none did (`direct message lookup: step 2
+found a room`, `direct message lookup: no step found a room`), without
+user IDs, names or room IDs.
+
+The core waits for the answer to its latest `:join` (or `y`) only, and
+opens the answered room when the room list has it, else when its
+`Msg::RoomUpserted` arrives. The first key or paste after the `:join` or
+the `y` ends the wait, before the key does anything else: the join goes
+on and its room appears in the room list, but a room never opens under a
+user who has moved on, also when a slow federated join ends much later,
+and an answer to an earlier `:join` changes nothing. The question of step
+5 is asked only while the wait is on, so a key typed before it appears
+never answers it. A `NoDirectMessage` that arrives while no `:join` is
+waited for sets the status `No direct message found; :join again to
+create one` instead, and one that arrives while a later `:join` is
+waited for changes nothing.
+When the room opens, the status line says `Joined <room>` after
+`Joined`, `Created a direct message` after `Created`, and nothing after
+`Already` (a `Joining…` still shown is cleared).
 
 Failures are status line errors, logged like every failure, and name
 neither the target nor the room, which can be an ID: `Joining failed: no
 room has this alias` when the room directory does not know the alias
 (`M_NOT_FOUND`); `Joining failed: not a room alias, room ID, user ID or
-matrix.to link` when ruma rejects the target; for a user target
-`Opening the direct message failed: <reason>`; otherwise `Joining failed:
-<reason>`, with the shortened reason other failures show (`the homeserver
-answered 403 M_FORBIDDEN` for a refused join).
+matrix.to link` when ruma rejects the target; for a user target and
+`CreateDm` `Opening the direct message failed: <reason>`; otherwise
+`Joining failed: <reason>`, with the shortened reason other failures show
+(`the homeserver answered 403 M_FORBIDDEN` for a refused join). The
+`CONFIRM` question names the user, but it is neither logged nor kept in
+the status line's history.
 
 Pending invites come from `Msg::Invites` (see "Matrix adapter"): each
 invited room's ID and display name (`Room::display_name`; for an invite to
 a direct message, the inviter's name), sorted by name. `<Tab>` after
 `:join ` completes their names, ranked against the typed text as `:open`
-ranks room names and cycling like `:open`'s completion; completing the
-name `join` adds a space.
+ranks room names and cycling like `:open`'s completion; an invite whose
+name another invite shares completes to its room ID instead, so each of
+them can be joined. Completing the name `join` adds a space.
 
 ### Help views
 
@@ -1486,26 +1550,31 @@ action runs (see "Joining rooms and direct messages").
 - `mxt` parses the file into a TOML document (`toml::de::DeTable`, which
   keeps every key's and value's position), sets aside the keys and tables
   it does not know (see below), reads the rest into serde DTOs, and
-  converts argument values into the core's neutral `ArgValue` (string,
-  integer, boolean).
+  converts argument values into the core's neutral `ArgValue`: a string,
+  an integer, a boolean, or `Unsupported` for any other TOML value (a
+  float, an array, a table, a date-time), which no action takes. So every
+  argument is read whatever its value, and `Action::from_spec` decides
+  about it: an unknown argument with an array value is as unknown as one
+  with a string.
 - The core builds checked types with `Action::from_spec(name, args)`,
   `KeySeq::parse("<C-x><C-e>")` and `Keymap::new(..)`.
 - Errors are reported with the file, line, column and reason before the
   terminal UI starts, and mxt exits with a non-zero status: TOML syntax
   errors; a value of the wrong type for a known key or for a known
   argument of a known action (a binding that is not a string, a table or
-  an array, a binding table without `action`, `filter = 1`); a missing
-  `account.user_id`; conflicting arguments (`pick` with `query`); a
-  missing required argument (`file.upload` without `path`); an empty
-  string where a value is required (`query`, `path`, `emoji`, `target`);
-  an empty array as a binding; malformed key notation (an empty key
-  sequence, a `<` without `>`, `S-` on a key it does not change,
-  `<leader>` in `ui.leader`); two spellings of one key sequence in a table
+  an array, a binding table without `action`, `filter = 1`,
+  `filter = 3.5`); a missing `account.user_id`; conflicting arguments
+  (`pick` with `query`); a missing required argument (`file.upload`
+  without `path`); an empty string where a value is required (`query`,
+  `path`, `emoji`, `target`); an empty array as a binding; malformed key
+  notation (an empty key sequence, a `<` without `>`, `S-` on a key it
+  does not change, `<leader>` in `ui.leader`, `<leader>` with modifiers
+  such as `<C-leader>`); two spellings of one key sequence in a table
   (`<leader>x` and `<Space>x`, `<C-a>` and `<C-A>`); a malformed
   `account.user_id`, an `account.homeserver` that is not an `http(s)` URL,
-  a `ui.room_list.width` outside 12 to 80, an empty or invalid
-  `ui.time_format`, a `files.download_dir` that is neither absolute nor
-  `~/…`, and an empty `files.opener`.
+  a `ui.room_list.width` outside 12 to 80, an empty `ui.time_format`, a
+  `files.download_dir` that is neither absolute nor `~/…`, and an empty
+  `files.opener`.
 - Names this version does not know are warnings, not errors: dotfiles
   share one configuration between machines that run different versions,
   and a setting written for a newer mxt must not stop an older one. These
@@ -1513,33 +1582,54 @@ action runs (see "Joining rooms and direct messages").
   `[keymap.foo]`, `[keymap.composer.foo]`), whose contents are then not
   checked; an unknown value of a setting with fixed values
   (`ui.image_preview`, `ui.read_receipts`, `ui.room_list.sort`,
-  `ui.room_list.network`); and in a binding an unknown action, an unknown
-  argument, an unknown value of an argument with fixed values (`filter`,
-  `pick`, `mode`), an unknown emoji, or an unknown key name or modifier in
-  its keys (`<F13>`, `<D-s>`), also in `ui.leader`. The setting or binding
-  is ignored and the default applies: an ignored setting has its default
-  value (`ui.leader` `<Space>`); an ignored binding leaves the default
-  binding of the same keys in its table, if there is one; an array with
-  one unknown action is ignored whole. Within one binding the checks run
-  in order and the first problem decides: its keys (malformed notation is
-  an error, an unknown key name a warning), the same keys spelled twice in
-  the table, then each action in turn: its name, then its arguments' names,
-  then their types and values.
+  `ui.room_list.network`); a `ui.time_format` that jiff rejects (see the
+  last item); and in a binding an unknown action, an unknown argument,
+  whatever its value (`sort = ["name"]`, `ratio = 0.5`), an unknown value
+  of an argument with fixed values (`filter`, `pick`, `mode`), an unknown
+  emoji, or an unknown key name or modifier in its keys (`<F13>`,
+  `<D-s>`), also in `ui.leader`. The setting or binding is ignored and
+  the default applies: an ignored setting has its documented default
+  (`ui.leader` `<Space>`, `ui.time_format` `"%H:%M"`); an ignored binding
+  leaves the default binding of the same keys in its table, if there is
+  one; an array with one unknown action is ignored whole.
+- `ui.read_receipts` is the one exception: an unknown value falls back to
+  `"private"`, not to its default `"public"`. Receipts go out as soon as a
+  room opens; opening one takes a key, and a key clears the status line,
+  so public receipts could be sent before the user has seen the warning.
+  Its warning says what applies instead of ending in `(ignored)`:
+  `ui.read_receipts: unknown value "x", using "private"`.
+- While `ui.leader` is ignored, `<leader>` stands for `<Space>`, so two
+  bindings of one table that a newer version tells apart can become one
+  key sequence (`"<leader>x"` and `"<Space>x"` under `leader = "<F13>"`).
+  Such a duplicate, where one of the two spellings uses `<leader>` and the
+  fallback makes them the same, is a warning that ignores the later
+  binding in the file; every other duplicate stays an error.
+- Within one binding the checks run in order and the first problem
+  decides: its keys (malformed notation is an error, an unknown key name a
+  warning), the same keys spelled twice in the table, then each action in
+  turn, where the first error `Action::from_spec` returns decides. It
+  checks the action's name, then its arguments' names, then conflicts
+  between arguments, then each argument's type and value, and a missing
+  required argument, in the order the action reads them. So
+  `{ action = "room.open", sort = "name", pick = "next", query = "x" }` is
+  a warning (the unknown argument comes first), and
+  `{ action = "room.open", pick = "next", query = "x", filter = "dm" }` an
+  error (the conflict comes before the values).
 - A warning has the form of an error and ends in `(ignored)`:
   `<file>:<line>:<column>: <setting>: <reason> (ignored)`, for example
   `/home/alice/.config/mxt/config.toml:5:7: keymap.timeline.x: unknown action "message.dlete" (ignored)`;
   other reasons are `unknown table`, `unknown key`, `unknown value "wezterm";
-  expected one of "auto", "off", …`, the action errors' texts (`room.open:
-  unknown argument "sort"`, `room.open: unknown "filter" value "dm";
-  expected one of …`) and the key errors' texts (`invalid key "<F13>":
-  unknown key <F13>`). mxt logs each at `warn` with the target
-  `mxt::config` once logging has started, so the log line is the
-  subscriber's UTC time, `WARN`, `mxt::config:` and the warning. The
-  binary then feeds them to the core with `Msg::ConfigWarnings` right after
-  `App::new`: the core puts each into the status line's history and sets
-  the status message, in the error style so that it is not missed,
-  `Ignored 1 setting in the configuration; see
-  :messages` (`Ignored 3 settings in the configuration; see :messages`
+  expected one of "auto", "off", …`, jiff's error for `ui.time_format`, the
+  action errors' texts (`room.open: unknown argument "sort"`,
+  `room.open: unknown "filter" value "dm"; expected one of …`) and the key
+  errors' texts (`invalid key "<F13>": unknown key <F13>`). mxt logs each
+  at `warn` with the target `mxt::config` once logging has started, so the
+  log line is the subscriber's UTC time, `WARN`, `mxt::config:` and the
+  warning. The binary then feeds them to the core with
+  `Msg::ConfigWarnings` right after `App::new`: the core puts each into
+  the status line's history and sets the status message, in the error
+  style so that it is not missed, `Ignored 1 setting in the configuration;
+  see :messages` (`Ignored 3 settings in the configuration; see :messages`
   for more). Nothing is printed to the terminal.
 - A typo is never silently ignored: it is an error, or a warning that the
   status line points to at every start. A configuration that loaded before
@@ -1547,7 +1637,14 @@ action runs (see "Joining rooms and direct messages").
 - Later versions extend the configuration with new names only (keys,
   tables, actions, arguments, values, key names) and keep the meaning of
   the existing ones, so that older versions can skip what they do not
-  know. Giving an existing name another meaning is a breaking change (see
+  know. They never accept what the errors above reject: ranges, conflicts,
+  required arguments and values, key notation, and the forms of user IDs,
+  URLs and paths stay as they are, so no setting of a newer version is an
+  error in an older one. `ui.time_format` is the exception, and so a
+  warning: jiff, which checks it, may accept new directives in compatible
+  releases (its documentation says the set of rejected ones may shrink),
+  and its errors do not say whether a directive is unknown or malformed.
+  Giving an existing name another meaning is a breaking change (see
   [Releasing](../../releasing.md)).
 
 ## Storage
@@ -1625,7 +1722,9 @@ platforms.
 `tracing` writes daily files to `$XDG_STATE_HOME/mxt/` and keeps seven days.
 `MXT_LOG` takes an `EnvFilter` directive. The default is `info` for mxt and
 `warn` for matrix-rust-sdk.
-Configuration warnings are logged at `warn` (see "Layers").
+Configuration warnings are logged at `warn` (see "Layers"), and `:join`'s
+direct message lookup logs at `info` which step found a room (see
+"Joining rooms and direct messages").
 
 ## Testing
 
@@ -1653,8 +1752,10 @@ Configuration warnings are logged at `warn` (see "Layers").
     key
   - the status message history and `:messages`, configuration warnings
     included
-  - `:join`'s reading of targets and invite names, its completion, and
-    opening the answered room when the room list has it or once it does
+  - `:join`'s reading of targets and invite names (duplicate names
+    included), its completion, opening the answered room when the room
+    list has it or once it does, the wait ending at the next key, and the
+    `CONFIRM` question before a direct message is created
 - `mxt-matrix`: tests with constructed inputs for converting SDK values into
   domain types, HTML rendering, download file names, the dimensions of
   uploaded images and the session file. The send queue paths are tested
@@ -1669,11 +1770,14 @@ Configuration warnings are logged at `warn` (see "Layers").
   and shows as a failed local echo, and that a refused reaction is reported
   and then dropped from the timeline and the send queue. `room.join` is
   tested the same way: its targets (an alias, a room ID with a pending
-  invite, a matrix.to link with `via`), each step of the direct message
-  lookup finding its room with no `createRoom` request, and the creation of
-  an encrypted direct message (`is_direct`, the invite, the preset and
-  `m.room.encryption` in the request, then `m.direct`). The rest is covered
-  by phase 0 and by running mxt against a homeserver.
+  invite, a matrix.to link with `via`, a left room by its ID with its
+  creators' servers as `via`), each step of the direct message lookup
+  finding its room with no `createRoom` request (a bridge bot's room with
+  bridge state among them, and heroes that do or do not decide), an
+  answer that nothing was found, and the creation of an encrypted direct
+  message (`is_direct`, the invite, the preset and `m.room.encryption` in
+  the request, then `m.direct`), once only for two quick requests. The
+  rest is covered by phase 0 and by running mxt against a homeserver.
 - `mxt-tui`: unit tests, for example of key conversion, the editor keys
   `mxt-tui` handles itself, wrapping and the cursor by grapheme cluster, the
   composers' reports to the core, and the layout; some assert rendered rows
@@ -1681,7 +1785,8 @@ Configuration warnings are logged at `warn` (see "Layers").
   snapshots, which would pin incidental layout. The rest is verified by
   running mxt.
 - `mxt`: configuration loading from strings: each error and each warning
-  with its position and text, and the complete example of the user
+  with its position and text, a document with every key and every table
+  loading without warnings, and the complete example of the user
   documentation loading without warnings.
 - Continuous integration (GitHub Actions, Linux and macOS on Apple Silicon),
   with the flake's toolchain:
@@ -1946,19 +2051,22 @@ asking for the recovery key ("Startup").
   once other frames are on the stack. An iterative `Drop` in ruma-html would
   make this unnecessary.
 - **Finding an existing direct message.** `:join @user` creates a room only
-  when the lookup in "Joining rooms and direct messages" finds none. Its
-  second step assumes that a bridge bot's management room carries no
-  bridge state (mautrix bridges set `m.bridge` in the rooms they bridge);
-  the owner's account check (`:join` with a bridge bot's user ID opens the
-  existing room with no `createRoom` request) confirms it for the bridge
-  checked. Members are lazy-loaded, so steps 2 and 3 read the store and the
-  rooms' heroes; a room that neither describes costs one `/members`
-  request in step 2.
-- **Ignored settings and privacy.** An unknown value falls back to the
-  default, also where the default is less private: a `ui.read_receipts`
-  value that only a newer version knows makes an older one send public
-  receipts. The status line says at every start that settings were
-  ignored, and `:messages` names them.
+  when the lookup in "Joining rooms and direct messages" finds none and the
+  user answers `y` to the question that follows. Step 2 finds a bridge
+  bot's management room with or without bridge state, as long as the
+  bridge gives it no name and declares no room type other than `dm`; a
+  bridged direct message whose other person has not joined yet looks the
+  same, so `:join` with the bot's ID may open that room instead, which
+  creates nothing. The owner's account check (`:join` with a bridge bot's
+  user ID opens the existing room, and the log names the step that found
+  it) confirms it for the bridge checked. Members are lazy-loaded, so the
+  lookup reads the store and, in step 2, the rooms' heroes; a room that
+  neither decides costs one `/members` request in step 2.
+- **Ignored settings.** An ignored setting takes its documented default,
+  which can be the opposite of what the newer setting asked for. For
+  `ui.read_receipts`, whose default sends receipts that others see, mxt
+  falls back to `"private"` instead (see "Layers"). The status line says
+  at every start that settings were ignored, and `:messages` names them.
 
 ## Third-party licenses
 
