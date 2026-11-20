@@ -796,29 +796,29 @@ pub(crate) mod tests {
             .collect()
     }
 
+    /// The one-line message with the event `$<n>` and the body `message <n>`.
+    pub(crate) fn message(n: u32) -> TimelineEntry {
+        TimelineEntry::Item(TimelineItem {
+            id: ItemRef::Remote(EventId::new(format!("${n}:example.org"))),
+            sender: UserId::new("@alice:example.org"),
+            sender_name: "Alice".to_owned(),
+            timestamp: Timestamp::from_millis(0),
+            content: MessageContent::Text {
+                body: format!("message {n}"),
+                rich: RichText::plain(&format!("message {n}")),
+            },
+            reply: None,
+            reactions: Vec::new(),
+            edited: false,
+            send_state: None,
+        })
+    }
+
     /// `room`'s timeline as one-line messages with the events `$<n>`.
     pub(crate) fn reset(room: &str, events: std::ops::Range<u32>) -> Msg {
-        let entries = events
-            .map(|n| {
-                TimelineEntry::Item(TimelineItem {
-                    id: ItemRef::Remote(EventId::new(format!("${n}:example.org"))),
-                    sender: UserId::new("@alice:example.org"),
-                    sender_name: "Alice".to_owned(),
-                    timestamp: Timestamp::from_millis(0),
-                    content: MessageContent::Text {
-                        body: format!("message {n}"),
-                        rich: RichText::plain(&format!("message {n}")),
-                    },
-                    reply: None,
-                    reactions: Vec::new(),
-                    edited: false,
-                    send_state: None,
-                })
-            })
-            .collect();
         Msg::Timeline {
             room: RoomId::new(room),
-            diffs: vec![TimelineDiff::Reset(entries)],
+            diffs: vec![TimelineDiff::Reset(events.map(message).collect())],
         }
     }
 

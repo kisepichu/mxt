@@ -8,6 +8,13 @@ marked **Breaking:**.
 
 ## [Unreleased]
 
+### Fixed
+
+- After the timeline cursor moved up from the newest message (to reply to
+  a message, for example), new messages, your own included, stayed below
+  the pane until the room was opened again. Now they appear while the pane
+  shows the newest message.
+
 ## [0.1.2] - 2026-11-20
 
 ### Changed

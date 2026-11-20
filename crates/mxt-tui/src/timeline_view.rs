@@ -1,7 +1,8 @@
 //! The timeline pane (design, "Timeline"): the open room's entries, oldest at
 //! the top. The cursor item stays in view, and while the cursor follows the
-//! newest item the newest entry is at the bottom. Only the entries around the
-//! cursor are laid out, so a long timeline costs no more per frame.
+//! newest item, or the pane shows the newest entry, the newest entry is at
+//! the bottom. Only the entries around the cursor are laid out, so a long
+//! timeline costs no more per frame.
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -65,7 +66,7 @@ pub(crate) struct TimelinePane {
     zone: TimeZone,
     /// The cursor item of the last frame and the rows below it then, so the
     /// view stays put while the cursor moves inside it and while entries
-    /// arrive above or below.
+    /// arrive above, and below while the pane shows older entries only.
     anchor: Option<Anchor>,
 }
 
@@ -73,6 +74,9 @@ struct Anchor {
     index: usize,
     item: ItemRef,
     below: usize,
+    /// The frame showed the newest entry, so the next one keeps the newest
+    /// entry at the bottom: entries that arrive below then appear.
+    at_end: bool,
 }
 
 impl TimelinePane {
@@ -312,11 +316,22 @@ impl<'a> Render<'a> {
             index: cursor,
             item: item.id.clone(),
             below: usize::try_from(self.pane_rows() - bottom).unwrap_or(0),
+            at_end: self.shows_end(window),
         })
     }
 
+    /// Whether the last entry with rows is in `window` with its last row on
+    /// the pane; only hidden entries, which have none, may follow it.
+    fn shows_end(&self, window: &Window) -> bool {
+        window.bottom() <= self.pane_rows()
+            && self.entries[window.last() + 1..]
+                .iter()
+                .all(|entry| matches!(entry, TimelineEntry::Hidden))
+    }
+
     /// A window that holds the cursor item, placed where the last frame had
-    /// the anchor. A lost anchor (its item went away or changed its
+    /// the anchor, or with the newest entry at the bottom when the last
+    /// frame showed it. A lost anchor (its item went away or changed its
     /// `ItemRef`, as a local echo does once the server has it) is replaced
     /// by the entry at the anchor's index, clamped to the entries, which is
     /// where the core's `settle` keeps the cursor. A cursor more than a pane
@@ -326,17 +341,21 @@ impl<'a> Render<'a> {
         let Some(anchor) = anchor else {
             return self.at_bottom(cursor);
         };
-        let is_anchor = |entry: &TimelineEntry| matches!(entry, TimelineEntry::Item(item) if item.id == anchor.item);
-        let index = if self.entries.get(anchor.index).is_some_and(is_anchor) {
-            anchor.index
+        let mut window = if anchor.at_end {
+            self.at_bottom(self.entries.len() - 1)
         } else {
-            let clamped = anchor.index.min(self.entries.len() - 1);
-            self.entries.iter().position(is_anchor).unwrap_or(clamped)
+            let is_anchor = |entry: &TimelineEntry| matches!(entry, TimelineEntry::Item(item) if item.id == anchor.item);
+            let index = if self.entries.get(anchor.index).is_some_and(is_anchor) {
+                anchor.index
+            } else {
+                let clamped = anchor.index.min(self.entries.len() - 1);
+                self.entries.iter().position(is_anchor).unwrap_or(clamped)
+            };
+            let rows = self.rows(index);
+            let below = isize::try_from(anchor.below).unwrap_or(isize::MAX);
+            let top = height - below - rows_isize(&rows);
+            Window::new(index, rows, top)
         };
-        let rows = self.rows(index);
-        let below = isize::try_from(anchor.below).unwrap_or(isize::MAX);
-        let top = height - below - rows_isize(&rows);
-        let mut window = Window::new(index, rows, top);
         while cursor > window.last() {
             if window.bottom() > 2 * height {
                 return self.at_bottom(cursor);
@@ -891,7 +910,10 @@ fn expand_tabs(pieces: &mut [Piece<'_>]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mxt_core::ids::{EventId, TxnId, UserId};
+    use crate::view::tests::{self as view, Screen, app, press, reset};
+    use mxt_core::ids::{EventId, RoomId, TxnId, UserId};
+    use mxt_core::msg::Msg;
+    use mxt_core::timeline::TimelineDiff;
 
     const WIDTH: usize = 20;
     const HEIGHT: usize = 10;
@@ -1190,7 +1212,7 @@ mod tests {
     }
 
     #[test]
-    fn entries_added_above_or_below_leave_the_cursor_item_in_place() {
+    fn entries_added_above_or_below_the_pane_leave_the_cursor_item_in_place() {
         let entries = timeline();
         let items = items(&entries);
         let (_, anchor) = lay_out(&entries, items[items.len() - 1], true, None);
@@ -1209,11 +1231,37 @@ mod tests {
         let (placed, _) = lay_out(&paginated, cursor + 3, false, anchor.as_ref());
         assert_eq!(place(&placed, cursor + 3), rows);
 
-        // New messages.
+        // New messages while the cursor is up where the pane shows older
+        // entries only.
+        let cursor = items[4];
+        let (placed, anchor) = lay_out(&entries, cursor, false, anchor.as_ref());
+        assert!(placed.iter().all(|&(index, ..)| index < entries.len() - 1));
+        let rows = place(&placed, cursor);
         let mut appended = entries.clone();
         appended.extend([remote(102, 1), remote(103, 3)]);
         let (placed, _) = lay_out(&appended, cursor, false, anchor.as_ref());
         assert_eq!(place(&placed, cursor), rows);
+    }
+
+    #[test]
+    fn new_entries_appear_at_the_bottom_while_the_pane_shows_the_newest_entry() {
+        let mut entries = timeline();
+        let items = items(&entries);
+        let (_, anchor) = lay_out(&entries, items[items.len() - 1], true, None);
+        let cursor = items[items.len() - 2];
+        let (placed, anchor) = lay_out(&entries, cursor, false, anchor.as_ref());
+        let (top, len) = place(&placed, cursor);
+
+        // A message of two rows: the cursor item moves up by them.
+        entries.push(remote(102, 1));
+        let (placed, anchor) = lay_out(&entries, cursor, false, anchor.as_ref());
+        assert_eq!(place(&placed, entries.len() - 1), (HEIGHT as isize - 2, 2));
+        assert_eq!(place(&placed, cursor), (top - 2, len));
+
+        // More than the rows above the cursor item: it stays on the pane.
+        entries.push(remote(103, 8));
+        let (placed, _) = lay_out(&entries, cursor, false, anchor.as_ref());
+        assert_eq!(place(&placed, cursor), (0, len));
     }
 
     #[test]
@@ -1240,5 +1288,46 @@ mod tests {
         // As the cursor item, it fills the pane.
         let (placed, _) = lay_out(&entries, 0, false, None);
         assert_eq!(placed, [(0, 0, 10)]);
+    }
+
+    /// The owner's report: the cursor one message up (to reply to it, say),
+    /// and every message that arrived afterwards, the user's own reply too,
+    /// stayed below the pane, also after `j` put the cursor on the message
+    /// at the pane's bottom edge, which looks like the end of the timeline.
+    /// Only opening the room again showed them.
+    #[test]
+    fn messages_arriving_while_the_pane_shows_the_newest_entry_appear() {
+        let room = "!a:example.org";
+        let mut app = app();
+        let mut screen = Screen::new();
+        press(&mut app, "<CR>");
+        app.update(reset(room, 1..10));
+        screen.draw(&app, None);
+        let arrive = |app: &mut App, entry: TimelineEntry| {
+            app.update(Msg::Timeline {
+                room: RoomId::new(room),
+                diffs: vec![TimelineDiff::PushBack(entry)],
+            });
+        };
+        let last_visible = |app: &App, screen: &mut Screen| {
+            let (_, last) = screen.draw(app, None).timeline.unwrap();
+            (last, app.timeline().len() - 1)
+        };
+        press(&mut app, "k");
+        screen.draw(&app, None);
+        // The local echo of the user's reply, then a message from another.
+        arrive(&mut app, message(ItemRef::Local(TxnId::new("reply")), 1));
+        let (last, newest) = last_visible(&app, &mut screen);
+        assert_eq!(last, newest);
+        arrive(&mut app, view::message(10));
+        let (last, newest) = last_visible(&app, &mut screen);
+        assert_eq!(last, newest);
+        // On a message that is not the newest: the cursor stays where it is.
+        press(&mut app, "j");
+        assert!(!app.timeline_follows());
+        screen.draw(&app, None);
+        arrive(&mut app, view::message(11));
+        let (last, newest) = last_visible(&app, &mut screen);
+        assert_eq!(last, newest);
     }
 }
