@@ -18,6 +18,11 @@ marked **Breaking:**.
   the same actions in a configuration stay valid.
 - The action `composer.leave`, which returns to the timeline and ends a
   reply or an edit whose text is empty.
+- `:help` lists every command with a one-line description, and `:map`
+  lists each keymap table's bindings after your configuration, as
+  `keys -> action (arguments)`. Both open in the full-screen view, like a
+  message, and `q` or `<Esc>` closes them. The actions `help.commands` and
+  `help.keymap` open them from a key; they have no default key.
 
 ### Changed
 

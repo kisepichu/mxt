@@ -1,6 +1,7 @@
 //! The command registry and the parsing of the `:` command line into actions.
 
-use std::fmt;
+use std::borrow::Cow;
+use std::fmt::{self, Write as _};
 
 use crate::action::Action;
 use crate::rooms::{RoomFilter, RoomTarget};
@@ -24,6 +25,16 @@ pub struct Command {
     /// The action for the argument, which is empty for [`Argument::None`]
     /// and never empty for [`Argument::Required`].
     action: fn(&str) -> Result<Action, CommandError>,
+}
+
+impl Command {
+    /// `:open <room>`, or `:mute` for a command without an argument.
+    pub fn usage(&self) -> Cow<'static, str> {
+        match self.argument {
+            Argument::None => Cow::Owned(format!(":{}", self.name)),
+            Argument::Required(usage) => Cow::Borrowed(usage),
+        }
+    }
 }
 
 /// Every command, in the order of the design's Commands table, which is the
@@ -69,12 +80,42 @@ pub static COMMANDS: &[Command] = &[
         action: |_| Ok(Action::AccountRecover),
     },
     Command {
+        name: "help",
+        argument: Argument::None,
+        description: "List the commands",
+        action: |_| Ok(Action::HelpCommands),
+    },
+    Command {
+        name: "map",
+        argument: Argument::None,
+        description: "List the key bindings of each keymap table",
+        action: |_| Ok(Action::HelpKeymap),
+    },
+    Command {
         name: "q",
         argument: Argument::None,
         description: "Quit",
         action: |_| Ok(Action::AppQuit),
     },
 ];
+
+/// The first line of `:help` (design, "Help views").
+const HELP_FIRST_LINE: &str =
+    "mxt is a Matrix client with nvim-like keys; docs/keys.md describes every key and action.";
+
+/// The text of `:help`: [`HELP_FIRST_LINE`], an empty line, then a line per
+/// command in order with its usage, padded with spaces to the longest usage
+/// plus two, and its description.
+pub fn help_text(commands: &[Command]) -> String {
+    let usages: Vec<Cow<'static, str>> = commands.iter().map(Command::usage).collect();
+    let width = usages.iter().map(|usage| usage.chars().count()).max();
+    let width = width.unwrap_or(0) + 2;
+    let mut text = format!("{HELP_FIRST_LINE}\n");
+    for (command, usage) in commands.iter().zip(&usages) {
+        _ = write!(text, "\n{usage:<width$}{}", command.description);
+    }
+    text
+}
 
 /// Parses a command line without the leading `:`. `Ok(None)` for a blank line.
 /// Everything after the command name, trimmed, is one argument, so
@@ -225,5 +266,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn help_lists_every_command_after_its_first_line() {
+        let text = help_text(COMMANDS);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[..2],
+            [
+                "mxt is a Matrix client with nvim-like keys; docs/keys.md describes every key and action.",
+                ""
+            ]
+        );
+        let entries = &lines[2..];
+        let names: Vec<&str> = entries
+            .iter()
+            .map(|line| line.split_whitespace().next().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ":open", ":mute", ":unmute", ":upload", ":recover", ":help", ":map", ":q"
+            ]
+        );
+        // The descriptions start two columns after the longest usage.
+        let longest = COMMANDS
+            .iter()
+            .map(|command| command.usage().len())
+            .max()
+            .unwrap();
+        for (line, command) in entries.iter().zip(COMMANDS) {
+            let (usage, description) = line.split_at(longest + 2);
+            assert_eq!(usage.trim_end(), command.usage(), "{line}");
+            assert_eq!(description, command.description, "{line}");
+        }
+        let open = format!("{:<1$}Open a room by its name", ":open <room>", longest + 2);
+        assert_eq!(entries[0], open);
     }
 }

@@ -70,6 +70,10 @@ pub enum Action {
     SearchNext,
     SearchPrev,
     ViewClose,
+    /// `:help`: the command list.
+    HelpCommands,
+    /// `:map`: the key bindings of each table.
+    HelpKeymap,
     SidebarToggle,
     FocusRoomList,
     FocusTimeline,
@@ -106,11 +110,7 @@ impl Action {
             }
             "composer.focus" => {
                 let args = Args::new("composer.focus", &["mode"], args)?;
-                let mode = args.choice(
-                    "mode",
-                    &["insert", "keep"],
-                    [FocusMode::Insert, FocusMode::Keep],
-                )?;
+                let mode = args.choice("mode", &MODE_NAMES, MODES)?;
                 return Ok(Action::ComposerFocus(mode.unwrap_or_default()));
             }
             "file.upload" => return file_upload(Args::new("file.upload", &["path"], args)?),
@@ -154,6 +154,8 @@ impl Action {
             "search.next" => Action::SearchNext,
             "search.prev" => Action::SearchPrev,
             "view.close" => Action::ViewClose,
+            "help.commands" => Action::HelpCommands,
+            "help.keymap" => Action::HelpKeymap,
             "sidebar.toggle" => Action::SidebarToggle,
             "focus.room_list" => Action::FocusRoomList,
             "focus.timeline" => Action::FocusTimeline,
@@ -216,6 +218,8 @@ impl Action {
             Action::SearchNext => "search.next",
             Action::SearchPrev => "search.prev",
             Action::ViewClose => "view.close",
+            Action::HelpCommands => "help.commands",
+            Action::HelpKeymap => "help.keymap",
             Action::SidebarToggle => "sidebar.toggle",
             Action::FocusRoomList => "focus.room_list",
             Action::FocusTimeline => "focus.timeline",
@@ -223,6 +227,33 @@ impl Action {
             Action::AccountRecover => "account.recover",
             Action::AppQuit => "app.quit",
             Action::Nop => "nop",
+        }
+    }
+
+    /// The arguments [`Action::from_spec`] builds this action from, as
+    /// names and string values: those at their default are left out, the
+    /// others follow in the order `filter`, `pick`, `query`, `mode`, `path`.
+    pub fn arguments(&self) -> Vec<(&'static str, &str)> {
+        let filter = |filter: RoomFilter| {
+            (filter != RoomFilter::default())
+                .then(|| ("filter", name_of(&FILTER_NAMES, &FILTERS, filter)))
+        };
+        match self {
+            Action::RoomOpen(RoomTarget::Pick { filter: f, pick }) => {
+                let pick = (*pick != Pick::default())
+                    .then(|| ("pick", name_of(&PICK_NAMES, &PICKS, *pick)));
+                filter(*f).into_iter().chain(pick).collect()
+            }
+            Action::RoomOpen(RoomTarget::Fuzzy { filter: f, query }) => filter(*f)
+                .into_iter()
+                .chain([("query", query.as_str())])
+                .collect(),
+            Action::PickerRooms(f) => filter(*f).into_iter().collect(),
+            Action::ComposerFocus(mode) if *mode != FocusMode::default() => {
+                vec![("mode", name_of(&MODE_NAMES, &MODES, *mode))]
+            }
+            Action::FileUpload { path } => vec![("path", path.as_str())],
+            _ => Vec::new(),
         }
     }
 
@@ -239,6 +270,34 @@ impl Action {
     }
 }
 
+/// The values of `filter`, `pick` and `mode`: `*_NAMES[i]` stands for the
+/// value at `i`.
+const FILTER_NAMES: [&str; 4] = ["all", "unread", "notify", "mentions"];
+const FILTERS: [RoomFilter; 4] = [
+    RoomFilter::All,
+    RoomFilter::Unread,
+    RoomFilter::Notify,
+    RoomFilter::Mentions,
+];
+const PICK_NAMES: [&str; 3] = ["first", "next", "prev"];
+const PICKS: [Pick; 3] = [Pick::First, Pick::Next, Pick::Prev];
+const MODE_NAMES: [&str; 2] = ["insert", "keep"];
+const MODES: [FocusMode; 2] = [FocusMode::Insert, FocusMode::Keep];
+
+/// The name of `value`, the inverse of [`Args::choice`].
+///
+/// # Panics
+///
+/// If `values` lacks `value`; the tables above list every value.
+fn name_of<T: PartialEq, const N: usize>(
+    names: &[&'static str; N],
+    values: &[T; N],
+    value: T,
+) -> &'static str {
+    let index = values.iter().position(|known| *known == value);
+    names[index.expect("the value tables list every value")]
+}
+
 fn room_open(args: Args<'_>) -> Result<Action, ActionError> {
     if args.has("pick") && args.has("query") {
         return Err(ActionError::Conflict {
@@ -253,11 +312,7 @@ fn room_open(args: Args<'_>) -> Result<Action, ActionError> {
             query: query.to_owned(),
         },
         None => {
-            let pick = args.choice(
-                "pick",
-                &["first", "next", "prev"],
-                [Pick::First, Pick::Next, Pick::Prev],
-            )?;
+            let pick = args.choice("pick", &PICK_NAMES, PICKS)?;
             RoomTarget::Pick {
                 filter,
                 pick: pick.unwrap_or_default(),
@@ -356,16 +411,7 @@ impl<'a> Args<'a> {
     }
 
     fn filter(&self) -> Result<RoomFilter, ActionError> {
-        let filter = self.choice(
-            "filter",
-            &["all", "unread", "notify", "mentions"],
-            [
-                RoomFilter::All,
-                RoomFilter::Unread,
-                RoomFilter::Notify,
-                RoomFilter::Mentions,
-            ],
-        )?;
+        let filter = self.choice("filter", &FILTER_NAMES, FILTERS)?;
         Ok(filter.unwrap_or_default())
     }
 }
@@ -530,6 +576,8 @@ mod tests {
             "search.next",
             "search.prev",
             "view.close",
+            "help.commands",
+            "help.keymap",
             "sidebar.toggle",
             "focus.room_list",
             "focus.timeline",
@@ -543,6 +591,54 @@ mod tests {
         }
         let upload = Action::from_spec("file.upload", &[s("path", "/tmp/a b.png")]).unwrap();
         assert_eq!(upload.name(), "file.upload");
+    }
+
+    /// `arguments()` as the configuration would give them to `from_spec`.
+    fn spec(action: &Action) -> Vec<(String, ArgValue)> {
+        action
+            .arguments()
+            .into_iter()
+            .map(|(name, value)| s(name, value))
+            .collect()
+    }
+
+    #[test]
+    fn arguments_leave_defaults_out_and_build_the_same_action() {
+        let cases = [
+            (Action::from_spec("room.open", &[]), vec![]),
+            (
+                Action::from_spec("room.open", &[s("pick", "prev"), s("filter", "notify")]),
+                vec![("filter", "notify"), ("pick", "prev")],
+            ),
+            (
+                Action::from_spec("room.open", &[s("query", "a \"b\""), s("filter", "all")]),
+                vec![("query", "a \"b\"")],
+            ),
+            (
+                Action::from_spec("picker.rooms", &[s("filter", "all")]),
+                vec![],
+            ),
+            (
+                Action::from_spec("composer.focus", &[s("mode", "insert")]),
+                vec![],
+            ),
+            (
+                Action::from_spec("composer.focus", &[s("mode", "keep")]),
+                vec![("mode", "keep")],
+            ),
+            (
+                Action::from_spec("file.upload", &[s("path", "/tmp/a b.png")]),
+                vec![("path", "/tmp/a b.png")],
+            ),
+        ];
+        for (action, arguments) in cases {
+            let action = action.unwrap();
+            assert_eq!(action.arguments(), arguments, "{action:?}");
+            assert_eq!(
+                Action::from_spec(action.name(), &spec(&action)),
+                Ok(action.clone())
+            );
+        }
     }
 
     #[test]

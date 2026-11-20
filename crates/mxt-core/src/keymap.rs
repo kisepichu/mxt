@@ -2,6 +2,7 @@
 //! effective map of each input context.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::ops::Bound;
 
 use crate::action::{Action, Binding, FocusMode};
@@ -295,11 +296,15 @@ const DEFAULTS: &[(&[TableId], &str, Action)] = &[
 ];
 
 /// The effective map of each input context, precomputed from the default
-/// tables with the user's bindings merged over them.
+/// tables with the user's bindings merged over them, and those tables and
+/// the leader for `:map`.
 #[derive(Clone, Debug)]
 pub struct Keymap {
     /// Indexed by `InputContext as usize`.
     effective: [EffectiveMap; InputContext::ALL.len()],
+    /// Each table's own bindings, before fallback.
+    tables: BTreeMap<TableId, BTreeMap<KeySeq, Binding>>,
+    leader: KeySeq,
 }
 
 impl Keymap {
@@ -330,12 +335,74 @@ impl Keymap {
         let effective = InputContext::ALL.map(|context| {
             EffectiveMap::merge(context.chain().iter().filter_map(|id| tables.get(id)))
         });
-        Keymap { effective }
+        Keymap {
+            effective,
+            tables,
+            leader: leader.clone(),
+        }
     }
 
     pub fn effective(&self, context: InputContext) -> &EffectiveMap {
         &self.effective[context as usize]
     }
+
+    /// The table's own bindings, the user's merged over the defaults, before
+    /// fallback, in the resolver's key order.
+    fn table(&self, id: TableId) -> impl Iterator<Item = (&KeySeq, &Binding)> {
+        self.tables.get(&id).into_iter().flatten()
+    }
+}
+
+/// The text of `:map` (design, "Help views"): `leader = "<key>"`, then per
+/// table, in [`TableId::ALL`] order, an empty line, its header
+/// (`[keymap.timeline]`) and its own bindings as `keys -> action` or
+/// `keys -> action (name = "value", ...)`, the actions of an array joined
+/// with `; `. Keys are in the configuration's notation with the leader
+/// expanded; values are TOML strings.
+pub fn keymap_text(keymap: &Keymap) -> String {
+    let mut text = String::from("leader = ");
+    toml_string(&keymap.leader.to_string(), &mut text);
+    for id in TableId::ALL {
+        _ = write!(text, "\n\n[keymap.{}]", id.config_name());
+        for (keys, binding) in keymap.table(id) {
+            _ = write!(text, "\n{keys} -> ");
+            for (index, action) in binding.actions().iter().enumerate() {
+                if index > 0 {
+                    text.push_str("; ");
+                }
+                text.push_str(action.name());
+                let arguments = action.arguments();
+                for (index, (name, value)) in arguments.iter().enumerate() {
+                    text.push_str(if index == 0 { " (" } else { ", " });
+                    text.push_str(name);
+                    text.push_str(" = ");
+                    toml_string(value, &mut text);
+                }
+                if !arguments.is_empty() {
+                    text.push(')');
+                }
+            }
+        }
+    }
+    text
+}
+
+/// Appends `value` as a TOML basic string: quoted, with `"`, `\` and the
+/// control characters escaped.
+fn toml_string(value: &str, out: &mut String) {
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_control() => _ = write!(out, "\\u{:04X}", u32::from(c)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
 }
 
 /// The tables of one fallback chain merged into one map.
@@ -391,7 +458,7 @@ impl EffectiveMap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action::{Action, Binding};
+    use crate::action::{Action, ArgValue, Binding};
     use crate::keys::{Key, KeySeq};
 
     fn space() -> KeySeq {
@@ -533,5 +600,119 @@ mod tests {
         assert_eq!(InputContext::RoomList.sink(), KeySink::Drop);
         assert!(InputContext::Timeline.counts());
         assert!(!InputContext::ComposerNormal.counts());
+    }
+
+    #[test]
+    fn the_arguments_of_every_default_binding_build_the_same_action() {
+        let km = Keymap::new(&space(), []);
+        for id in TableId::ALL {
+            for (keys, binding) in km.table(id) {
+                for action in binding.actions() {
+                    let args: Vec<(String, ArgValue)> = action
+                        .arguments()
+                        .into_iter()
+                        .map(|(name, value)| (name.to_owned(), ArgValue::String(value.to_owned())))
+                        .collect();
+                    assert_eq!(
+                        Action::from_spec(action.name(), &args).as_ref(),
+                        Ok(action),
+                        "{keys}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The lines under `[keymap.<table>]` up to the next empty line.
+    fn section<'a>(text: &'a str, table: &str) -> Vec<&'a str> {
+        let header = format!("[keymap.{table}]");
+        let mut lines = text.lines().skip_while(|line| *line != header);
+        assert_eq!(lines.next(), Some(header.as_str()), "{text}");
+        lines.take_while(|line| !line.is_empty()).collect()
+    }
+
+    fn spec(name: &str, args: &[(&str, &str)]) -> Action {
+        let args: Vec<(String, ArgValue)> = args
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), ArgValue::String((*value).to_owned())))
+            .collect();
+        Action::from_spec(name, &args).unwrap()
+    }
+
+    #[test]
+    fn the_keymap_text_lists_each_tables_own_bindings_after_the_users() {
+        let comma = KeySeq::parse(",", &KeySeq::default()).unwrap();
+        let seq = |text: &str| KeySeq::parse(text, &comma).unwrap();
+        let query = spec(
+            "room.open",
+            &[("filter", "notify"), ("query", "say \"hi\"")],
+        );
+        let both = Binding::new(vec![
+            Action::RoomMarkRead,
+            spec("room.open", &[("filter", "unread"), ("pick", "next")]),
+        ])
+        .unwrap();
+        let all_first = spec("room.open", &[("filter", "all"), ("pick", "first")]);
+        let km = Keymap::new(
+            &comma,
+            [
+                // Over the default `<leader>e`, `sidebar.toggle`.
+                (
+                    TableId::Normal,
+                    seq("<leader>e"),
+                    one(Action::FocusRoomList),
+                ),
+                (TableId::Normal, seq("<leader>q"), one(query)),
+                (TableId::Timeline, seq("<leader>x"), both),
+                (TableId::Timeline, seq("dd"), one(Action::Nop)),
+                (TableId::Timeline, seq("gr"), one(all_first)),
+            ],
+        );
+        let text = keymap_text(&km);
+        assert_eq!(text.lines().next(), Some("leader = \",\""));
+        let headers: Vec<&str> = text
+            .lines()
+            .filter(|line| line.starts_with("[keymap."))
+            .collect();
+        let names = TableId::ALL.map(|id| format!("[keymap.{}]", id.config_name()));
+        assert_eq!(headers, names);
+
+        let normal = section(&text, "normal");
+        for line in [
+            ": -> command_line.open",
+            ",, -> picker.rooms",
+            ",e -> focus.room_list",
+            ",m -> picker.rooms (filter = \"mentions\")",
+            ",q -> room.open (filter = \"notify\", query = \"say \\\"hi\\\"\")",
+            "<C-w>j -> composer.focus (mode = \"keep\")",
+            "]u -> room.open (filter = \"unread\", pick = \"next\")",
+        ] {
+            assert!(normal.contains(&line), "{line}: {normal:#?}");
+        }
+        assert!(!text.contains("sidebar.toggle"), "{text}");
+
+        let timeline = section(&text, "timeline");
+        for line in [
+            ",x -> room.mark_read; room.open (filter = \"unread\", pick = \"next\")",
+            "dd -> nop",
+            "gr -> room.open",
+            "i -> composer.focus",
+            "j -> cursor.down",
+        ] {
+            assert!(timeline.contains(&line), "{line}: {timeline:#?}");
+        }
+        // A table shows its own bindings only.
+        assert!(!timeline.iter().any(|line| line.starts_with(": ")));
+        // Key order, not the text's: characters before `<CR>`, and `dd`
+        // before `<C-d>` before `e`.
+        let at = |keys: &str| {
+            let prefix = format!("{keys} -> ");
+            let at = timeline.iter().position(|line| line.starts_with(&prefix));
+            at.unwrap_or_else(|| panic!("{keys}: {timeline:#?}"))
+        };
+        assert!(at("a") < at("<CR>"));
+        assert!(at("dd") < at("<C-d>") && at("<C-d>") < at("e"));
+
+        assert_eq!(section(&text, "composer.visual"), Vec::<&str>::new());
     }
 }
