@@ -543,9 +543,10 @@ covered by unit tests.
   than the timeline pane show a `[+N lines]` marker at the cut-off.
   The help views (`:help`, `:map`; see "Help views") use the same overlay
   and editor for text the core generates. The core's open view is either a
-  message (its item, whose text it sends in `ViewContent::Text` as today)
-  or a help view (its generated text, sent the same way), so the image
-  checks stay tied to a message view, and the tui adapter draws both alike.
+  message (its item, whose content it sends as today, `ViewContent::Text` or
+  `ViewContent::Image`) or a help view (its generated text, sent as
+  `ViewContent::Text`), so the image checks stay tied to a message view, and
+  the tui adapter draws a help view like a text message.
 - Replacing edtui later (with another editor widget or an in-house vim engine)
   only touches `mxt-tui`.
 
@@ -1160,8 +1161,8 @@ Actions are named `<target>.<verb>`. The first release has:
 - movement and search: `cursor.down`, `cursor.up`, `cursor.first`,
   `cursor.last`, `cursor.half_page_down`, `cursor.half_page_up`,
   `search.start`, `search.next`, `search.prev`
-- help: `help.commands` (`:help`), `help.keymap` (`:map`); no default keys
-  (see "Help views") (added after the first release)
+- help: `help.commands` (`:help`), `help.keymap` (`:map`), both added after
+  the first release; no default keys (see "Help views")
 - other: `view.close`, `sidebar.toggle`, `focus.room_list`, `focus.timeline`,
   `file.upload`, `account.recover`, `app.quit`, `nop`
 

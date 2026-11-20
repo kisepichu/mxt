@@ -53,8 +53,9 @@ in `mxt-matrix`: `:react` sends the existing `ToggleReaction`.
   the existing commands is unchanged; their error texts stay as they are.
 - [ ] Tests: the argument-kind rules over the registry (a `None` command
   rejects an argument; a `Required` one without an argument gives its
-  usage); a concrete completion (`re<Tab>` cycles `recover` and back to `re`;
-  after Task 3, `react ` and `recover` in registry order); `:h` is an unknown
+  usage); a concrete completion (`re<Tab>` completes `recover` at once, the
+  only candidate before Task 3; Task 3 adds the cycle `react `, `recover`,
+  back to `re`); `:h` is an unknown
   command. Existing command tests keep passing.
 - No CHANGELOG line (no user-visible change).
 
@@ -87,15 +88,19 @@ in `mxt-matrix`: `:react` sends the existing `ToggleReaction`.
   `keys -> action (arguments)`; keys in the configuration's notation with
   the leader expanded; arrays joined with `; `; `nop` listed.
 - [ ] Tests (core): the help text's first line exactly, one line per registry
-  entry, the padding; the arguments function round-trips through
-  `Action::from_spec` for every default binding; the keymap text after a
-  user configuration that overrides a default, adds a binding with
-  arguments, an array and a `nop` over a default, and sets another leader
-  shows those lines as specified; `composer.visual` (no defaults) shows its
-  header only; `:` appears under `[keymap.normal]` and not under
-  `[keymap.timeline]`; `:help` and `:map` open the view, `q` and `<Esc>`
-  close it, and `:map` while `:help` is open replaces it.
-- [ ] CHANGELOG `### Added`: `:help`, `:map` and `help.keymap`.
+  entry, the padding (the width taken from the registry's longest usage, not
+  a fixed number, since Task 3 adds a longer one); the arguments function
+  round-trips through `Action::from_spec` for every default binding; the
+  keymap text after a user configuration that overrides a default, adds a
+  binding with arguments, an array and a `nop` over a default, and sets
+  another leader shows those lines as specified; `composer.visual` (no
+  defaults) shows its header only; `:` appears under `[keymap.normal]` and
+  not under `[keymap.timeline]`; `:help` and `:map` open the view, `q` and
+  `<Esc>` close it, and `help.keymap` while the `:help` view is open replaces
+  it (bind `help.keymap` in `message_view` for the test, or run the action
+  directly: `:` cannot be typed in a view).
+- [ ] CHANGELOG `### Added`: `:help` and `:map`, and the actions
+  `help.commands` and `help.keymap`.
 
 ## Task 3: `:react`
 
@@ -129,7 +134,8 @@ in `mxt-matrix`: `:react` sends the existing `ToggleReaction`.
   no room, an empty timeline and a deleted message give their status for
   `:react 👍` and for `+`; `:react` from the room list acts on the open
   room's timeline cursor; the completion candidates for `thu` and `:thu`;
-  a binding with `emoji = "nonsense"` or `emoji = ""` is rejected.
+  `re<Tab>` cycles `react `, `recover`, then back to `re`; a binding with
+  `emoji = "nonsense"` or `emoji = ""` is rejected.
 - [ ] CHANGELOG `### Added`: `:react` and `message.react`'s `emoji`
   argument; `### Changed`: `+` now says why it does nothing with no open room
   or an empty timeline.
