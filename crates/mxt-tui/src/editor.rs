@@ -6,9 +6,11 @@
 //! (design, "edtui differences from vim"): `f`, `F`, `t` and `T` with their
 //! character, `;` and `,` repeating them, `r` with its character (in visual
 //! mode, which has no `r` yet, the character is dropped), and `h`, `l`,
-//! `<Left>` and `<Right>` by grapheme cluster. As in vim's operator-pending
-//! mode, the key after an operator (`d`, `c`, `y`) or a text object's `i`
-//! goes to edtui without the keymap (design, "Input routing").
+//! `<Left>` and `<Right>` by grapheme cluster. As in nvim, the key after an
+//! operator (`d`, `c`, `y`), a text object's `i` or `g` goes to edtui
+//! without the keymap: nvim's operator-pending mode sees no normal-mode
+//! mappings, and nvim reads the key after `g` without mappings too (design,
+//! "Input routing").
 
 use std::cmp::Ordering;
 
@@ -47,9 +49,8 @@ const MARK: SwitchMode = SwitchMode(edtui::EditorMode::Search);
 pub(crate) struct Editor {
     pub(crate) state: EditorState,
     keys: EditorEventHandler,
-    /// A key waiting for the next one, which gets it without the keymap
-    /// unless it is `g`. It counts only in normal and visual mode, where it
-    /// was typed.
+    /// A key waiting for the next one, which gets it without the keymap. It
+    /// counts only in normal and visual mode, where it was typed.
     pending: Option<Pending>,
     /// The last `f`, `F`, `t` or `T` with its character, for `;` and `,`.
     last_find: Option<Find>,
@@ -79,10 +80,10 @@ impl Editor {
 
     /// The mode the core resolves the next key in: `AwaitingChar` while a
     /// key waits for the next one, which then goes to the editor without
-    /// the keymap (`f:`, `r<Esc>`, `d]`, `ci[`).
+    /// the keymap (`f:`, `r<Esc>`, `d]`, `ci[`, `g]`).
     pub(crate) fn key_mode(&self) -> EditorMode {
         match self.waiting() {
-            None | Some(Pending::G) => self.mode(),
+            None => self.mode(),
             Some(_) => EditorMode::AwaitingChar,
         }
     }
@@ -415,8 +416,9 @@ enum Pending {
     /// edtui's `df`, `dt` (`till`), `cf` or `ct`: the character goes to
     /// edtui.
     Char { till: bool },
-    /// `g`, which edtui holds for `gg`. `g` is no operator, so the key goes
-    /// through the keymap.
+    /// `g`, which edtui holds for `gg`. As in nvim, the key goes to edtui:
+    /// `gg`, and `g<Esc>`, which cancels; edtui drops any other key with
+    /// the `g` (`g]`, `gx`).
     G,
     /// `dF`, `yf`, `gt`, `ca`, `yi`, visual `a`, visual `r` and the like,
     /// which edtui does not have: the key is dropped.
@@ -424,14 +426,15 @@ enum Pending {
 }
 
 /// What waits after `key`, which edtui got in `mode` while `waiting` waited
-/// for it, when the key started no command of mxt's. This follows edtui
-/// 0.11.8's key sequences, to check again when edtui changes: `g` starts
-/// only `gg`, `y` only `yy`; `d` and `c` start `df`, `dt`, `cf` and `ct`,
-/// which take a character, and `di` and `ci`, which take a text object, as
-/// visual `i` does. edtui has no `a` objects, no `yi` and no other find
-/// after a key (`dF`, `yf`, `gt`). It dropped those keys, and the key after
-/// them is dropped too rather than run as a command. A text object edtui
-/// does not know (`cif`) drops its keys, and the next key runs.
+/// for it, when the key started no command of mxt's; the key after it goes
+/// to edtui without the keymap. This follows edtui 0.11.8's key sequences,
+/// to check again when edtui changes: `g` starts only `gg`, `y` only `yy`;
+/// `d` and `c` start `df`, `dt`, `cf` and `ct`, which take a character, and
+/// `di` and `ci`, which take a text object, as visual `i` does. edtui has no
+/// `a` objects, no `yi` and no other find after a key (`dF`, `yf`, `gt`). It
+/// dropped those keys, and the key after them is dropped too rather than
+/// run as a command. A text object edtui does not know (`cif`) drops its
+/// keys, and the next key runs.
 fn edtui_waits(waiting: Option<Pending>, key: Key, mode: edtui::EditorMode) -> Option<Pending> {
     use edtui::EditorMode::{Normal, Visual};
     let KeyCode::Char(c) = key.code() else {
@@ -851,11 +854,36 @@ pub(crate) mod tests {
                 "{typed}"
             );
         }
-        // `g` is no operator: edtui drops `gd`, and the key after it goes
-        // through the keymap.
-        let mut editor = holding("one two");
-        feed(&mut editor, "gd");
-        assert_eq!(editor.key_mode(), EditorMode::Normal);
+    }
+
+    #[test]
+    fn the_key_after_g_goes_to_edtui() {
+        // As in nvim, which reads the key after `g` without mappings, in
+        // normal and visual mode.
+        for typed in ["g", "vg"] {
+            let mut editor = holding("one two");
+            feed(&mut editor, typed);
+            assert_eq!(editor.key_mode(), EditorMode::AwaitingChar, "{typed}");
+        }
+        let mut editor = holding("one\ntwo");
+        feed(&mut editor, "jgg");
+        assert_eq!(
+            (editor.state.cursor.row, editor.key_mode()),
+            (0, EditorMode::Normal)
+        );
+        // edtui's only `g` command is `gg`: it drops any other key with the
+        // `g`, `<Esc>` among them, and the key after them runs.
+        for typed in ["g]", "g<Esc>"] {
+            let mut editor = holding("one two");
+            feed(&mut editor, typed);
+            assert_eq!(
+                (text(&editor).as_str(), editor.key_mode()),
+                ("one two", EditorMode::Normal),
+                "{typed}"
+            );
+            feed(&mut editor, "x");
+            assert_eq!(text(&editor), "ne two", "{typed}");
+        }
     }
 
     #[test]

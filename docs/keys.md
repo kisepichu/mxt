@@ -276,10 +276,13 @@ breaks included, and runs no keys.
   operator-pending mode, so does the key after an operator (`d`, `c`, `y`)
   and after a text object's `i` or `a` (`ci[`, `vi"`): `d<Esc>` cancels the
   `d`, and a binding in `normal` such as `]u` never takes the `]` of `ci]`.
+  As in nvim, so does the key after `g`: the editors' only `g` command is
+  `gg`, any other key after `g` is dropped with it (`g]`, `gx`), and
+  `g<Esc>` cancels the `g`.
 - `df`, `dt`, `cf` and `ct` work, and `;` and `,` repeat their find. Other
   operators with these motions (`dF`, `cT`, `yf`, `d;`) do nothing, and the
-  character after `dF` or `yf` is dropped, as is the one after `r` in visual
-  mode.
+  character after `dF` or `yf` is dropped, as are the one after `r` in
+  visual mode and the key after `gf`, `gF`, `gt` or `gT`.
 - The text objects are `i` with `w`, `W`, a quote or a bracket, after `d`
   and `c` and in visual mode (`viW` excepted). There are no `a` objects and
   no `yi`: `da(`, `yi"` and visual `a(` do nothing, and the key after them

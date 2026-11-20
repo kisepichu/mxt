@@ -734,7 +734,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::clipboard::SharedRegister;
     use crate::editor::tests::keys;
-    use mxt_core::effect::Effect;
+    use mxt_core::effect::{Effect, UiEffect};
     use mxt_core::ids::{EventId, RoomId, Timestamp, UserId};
     use mxt_core::keymap::Keymap;
     use mxt_core::keys::KeySeq;
@@ -925,6 +925,45 @@ pub(crate) mod tests {
             "{:?}",
             screen.bottom_line()
         );
+    }
+
+    /// Types `text` in the open message view as the terminal does: each key
+    /// goes to the core with the view editor's key mode, and `ReplayKeys`
+    /// to the editor. Whether the core closed the view.
+    fn type_in_view(app: &mut App, view: &mut View, text: &str) -> bool {
+        let mut closed = false;
+        for key in keys(text) {
+            let editor = Some(view.editor.key_mode());
+            for effect in app.update(Msg::Key { key, editor }) {
+                match effect {
+                    Effect::Ui(UiEffect::ReplayKeys(keys)) => {
+                        keys.into_iter().for_each(|key| view.editor.feed(key));
+                    }
+                    Effect::Ui(UiEffect::CloseView) => closed = true,
+                    _ => {}
+                }
+            }
+        }
+        closed
+    }
+
+    #[test]
+    fn the_key_after_g_in_the_message_view_goes_to_its_editor() {
+        // edtui drops `gq` and `g<Esc>`; the next `q` is `view.close`.
+        for typed in ["gq", "g<Esc>"] {
+            let mut app = app();
+            press(&mut app, "<CR>");
+            app.update(reset("!a:example.org", 1..4));
+            press(&mut app, "<CR>");
+            let mut view = View::new(
+                ViewContent::Text("message 3".to_owned()),
+                SharedRegister::default(),
+            );
+            assert!(!type_in_view(&mut app, &mut view, typed), "{typed}");
+            assert!(app.view_open(), "{typed}");
+            assert!(type_in_view(&mut app, &mut view, "q"), "{typed}");
+            assert!(!app.view_open(), "{typed}");
+        }
     }
 
     #[test]
