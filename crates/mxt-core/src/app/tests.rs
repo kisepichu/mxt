@@ -817,6 +817,13 @@ fn completes_command_names_and_cycles_back() {
 }
 
 #[test]
+fn a_command_name_with_one_candidate_completes_at_once() {
+    let mut app = app();
+    keys(&mut app, ":re<Tab>");
+    assert_eq!(line(&app), Some((LineKind::Command, "recover")));
+}
+
+#[test]
 fn completes_room_names_for_open() {
     let mut app = app();
     keys(&mut app, ":open c<Tab>");

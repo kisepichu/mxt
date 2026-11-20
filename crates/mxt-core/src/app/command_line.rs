@@ -2,7 +2,7 @@
 //! completion.
 
 use super::{App, StatusKind};
-use crate::command::{COMMANDS, parse_command, takes_argument};
+use crate::command::{Argument, COMMANDS, parse_command};
 use crate::effect::Effect;
 use crate::fuzzy;
 use crate::keys::{Key, KeyCode, Modifiers};
@@ -195,13 +195,10 @@ fn candidates(text: &str, rooms: &RoomList) -> Vec<String> {
     match text.split_once(char::is_whitespace) {
         None => COMMANDS
             .iter()
-            .filter(|command| command.starts_with(text))
-            .map(|command| {
-                if takes_argument(command) {
-                    format!("{command} ")
-                } else {
-                    (*command).to_owned()
-                }
+            .filter(|command| command.name.starts_with(text))
+            .map(|command| match command.argument {
+                Argument::None => command.name.to_owned(),
+                Argument::Required(_) => format!("{} ", command.name),
             })
             .collect(),
         Some(("open", query)) => {
