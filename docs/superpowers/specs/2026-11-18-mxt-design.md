@@ -256,9 +256,9 @@ The main types in `mxt-core`:
 - Room members: user ID and display name, loaded per room on demand, used for
   mention completion.
 - UI state: focus (room list, timeline, composer), mode, keymap resolver
-  state, picker state, the open message view, cursor positions, the last
-  known viewport of each pane, terminal focus (initially focused), the status
-  message.
+  state, picker state, the open view (a message's item, or a help view:
+  `:help` or `:map`), cursor positions, the last known viewport of each
+  pane, terminal focus (initially focused), the status message.
 
 ### Keymap resolver
 
@@ -542,9 +542,10 @@ covered by unit tests.
   the tui adapter's image cache) and the file name and size. Messages taller
   than the timeline pane show a `[+N lines]` marker at the cut-off.
   The help views (`:help`, `:map`; see "Help views") use the same overlay
-  and editor for text the core generates, so the core holds either a
-  message or a generated text for the view, and the tui adapter draws both
-  alike.
+  and editor for text the core generates. The core's open view is either a
+  message (its item, whose text it sends in `ViewContent::Text` as today)
+  or a help view (its generated text, sent the same way), so the image
+  checks stay tied to a message view, and the tui adapter draws both alike.
 - Replacing edtui later (with another editor widget or an in-house vim engine)
   only touches `mxt-tui`.
 
@@ -604,7 +605,7 @@ why, and exits. The next start logs in as a new device with fresh stores.
   first. Pressing `:` turns it into the command line.
 - Overlays: the fuzzy room picker, whose items show their unread badges, the
   emoji picker, the mention menu above the composer, and the full-screen
-  message view.
+  message view, which also shows the help views (`:help`, `:map`).
 
 ### Modes
 
@@ -614,7 +615,7 @@ why, and exits. The next start logs in as a new device with fresh stores.
 | composer modes | the composer has focus; the status line shows edtui's mode (`INSERT`, `NORMAL`, `VISUAL`, `SEARCH`) | see "Input routing" above |
 | `COMMAND` | the `:` command line is open | `command_line` table, then text input |
 | `PICKER` | the room picker, the emoji picker or the link picker is open | `picker` table, then text input |
-| `VIEW` | the message view is open; the status line shows `VIEW` and the view editor's mode (`VIEW NORMAL`, `VIEW INSERT`, `VIEW VISUAL`, `VIEW SEARCH`) | `message_view` table while its editor is in normal or visual mode and no key waits for its character (see "Input routing" above), then edtui |
+| `VIEW` | the message view or a help view is open; the status line shows `VIEW` and the view editor's mode (`VIEW NORMAL`, `VIEW INSERT`, `VIEW VISUAL`, `VIEW SEARCH`) | `message_view` table while its editor is in normal or visual mode and no key waits for its character (see "Input routing" above), then edtui |
 | `CONFIRM` | an action asks for confirmation | `y` confirms, any other key cancels |
 | `SECRET` | the recovery key is being entered | masked text input, `<CR>` submits, `<Esc>` cancels |
 
@@ -782,48 +783,68 @@ the registry, so a new command needs only its entry.
 
 `:mute`, `:unmute`, `:recover`, `:help`, `:map` and `:q` reject an argument,
 and `:open` and `:upload` without one show their usage
-(`usage: :open <room>`). `:react` takes an optional argument. The command
-line, the `/` search line and picker queries take typed characters, `<BS>`,
-`<C-u>` (clear) and `<C-w>` (delete the last word); `<BS>` on an empty
-command or search line closes it.
+(`usage: :open <room>`). `:react` takes an optional argument. Command names
+match exactly: `:q` is the only short name, and `:h` is an unknown command.
+The command line, the `/` search line and picker queries take typed
+characters, `<BS>`, `<C-u>` (clear) and `<C-w>` (delete the last word);
+`<BS>` on an empty command or search line closes it.
 
-`:react <emoji>` toggles the reaction on the message under the timeline's
-cursor, whichever pane has focus, exactly as choosing it in the emoji picker
-(`+`) does: a reaction the user already sent there is removed, any other is
-sent. The argument is an emoji (`:react 👍`) or a shortcode, with or without
-colons (`:react thumbsup`, `:react :+1:`), resolved with the `emojis` crate.
-`<Tab>` after `:react ` completes shortcodes: those that start with the typed
-text, in alphabetical order, cycling like `:open`'s completion. An unknown
-shortcode is an error in the status line (`Unknown emoji: <text>`), and
-nothing is sent. Without an argument, `:react` opens the emoji picker for
-that message, as `+` does. With no open room, or no message under the
-timeline's cursor (an empty timeline, or the cursor on something that is not
-a message), the status line says so and nothing happens.
+`:react` runs `message.react`, with `emoji` when an argument is given, on the
+open room's timeline cursor, whichever pane has focus (unlike `:mute`, which
+acts on the room under the room list's cursor when the room list has focus).
+Its argument is an emoji (`:react 👍`) or a shortcode, with colons on both
+sides or none (`:react thumbsup`, `:react :+1:`; `:react :+1` is unknown),
+resolved with the `emojis` crate; an unknown one is an error in the status
+line, `unknown emoji "<argument as typed>"`, and nothing is sent. Completing
+the name `react` adds a space, as for `:open`, and `<Tab>` after `:react `
+completes shortcodes: those that start with the typed text (a leading `:` is
+ignored; shortcodes are lower case, so matching is case-sensitive), written
+without colons, in alphabetical order, cycling like `:open`'s completion.
+What `message.react` then does is in "Action registry".
 
 ### Help views
 
-`:help` and `:map` open a read-only view over the whole screen, the same as
-the message view for a text message: its editor holds generated text, so
-`j`/`k`, `/` search, visual selection and `yy` work, and `q` or `<Esc>`
-closes it (the `message_view` table). The text is generated each time the
-view opens, so it shows the running mxt's commands and configuration.
+`:help` and `:map` open a view over the whole screen, the same overlay and
+editor as the message view for a text message: `j`/`k`, `/` search, visual
+selection and `yy` work, changes are discarded as in the message view, and
+`q` or `<Esc>` closes it (the `message_view` table). The text is generated
+each time the view opens, so it shows the running mxt's commands and
+configuration; a long text scrolls and wraps like a long message. A help
+action while a view is open replaces that view. The view has no title: its
+first line says what it is.
 
-- `:help` (`help.commands`): the first line is one English sentence, `mxt is
-  a Matrix client with nvim-like keys; docs/keys.md describes every key and
-  action.`, then an empty line, then one line per registry entry in registry
-  order: the usage, padded to one column, and the description
-  (`:open <room>   Open a room by its name`). No other usage text.
-- `:map` (`help.keymap`): the effective bindings after the user's
-  configuration is merged over the defaults. The first line names the leader
-  (`leader = <Space>`). Then, for each table in the order of "Tables and
-  resolution", a header line with the table's name, and one line per binding
-  of that table (its own bindings, not those it falls back to), sorted by
-  keys: `keys -> action (arguments)`. Keys are in the configuration's
-  notation with the leader expanded (`<C-w>h`, `<Space>m`); arguments are
-  written as in the configuration (`room.open (filter = "unread", pick =
-  "next")`); an array of actions is written with `; ` between them; a `nop`
-  binding is listed as `nop`, since it hides a default. A table without
-  bindings is listed with its header only.
+- `:help` (`help.commands`): the first line is exactly
+
+  ```text
+  mxt is a Matrix client with nvim-like keys; docs/keys.md describes every key and action.
+  ```
+
+  then an empty line, then one line per registry entry in the order of the
+  Commands table above (`:open`, `:mute`, `:unmute`, `:upload`, `:react`,
+  `:recover`, `:help`, `:map`, `:q`): the usage, padded with spaces to the
+  longest usage plus two, then the description
+  (`:open <room>      Open a room by its name`). No other usage text.
+- `:map` (`help.keymap`): the bindings of each table after the user's
+  bindings are merged over its defaults, before fallback: a table shows its
+  own bindings, not those it falls back to (`:` is listed under `normal`
+  only). The first line names the leader (`leader = "<Space>"`). Then, for
+  each table in the order `normal`, `room_list`, `timeline`,
+  `composer.normal`, `composer.visual`, `composer.insert`,
+  `composer.completion`, `message_view`, `picker`, `command_line`, an empty
+  line, a header in the configuration's syntax (`[keymap.timeline]`), and one
+  line per binding in the keymap's key order (the order of key sequences
+  the resolver uses, not the text's alphabetical order): `keys -> action`, or
+  `keys -> action (arguments)`. Keys are in the configuration's notation with
+  the leader expanded (`<C-w>h`, `<Space>m`). Arguments are rendered from the
+  checked action, since the core does not keep what the user wrote:
+  arguments at their default are left out (`room.open` with `filter = "all"`
+  and `pick = "first"` is `room.open`; `composer.focus` with
+  `mode = "insert"` is `composer.focus`), the others follow in the order
+  `filter`, `pick`, `query`, `mode`, `path`, `emoji`, as `name = value` with
+  TOML strings (quoted, with escapes), separated by `, `; `emoji` shows the
+  emoji itself (`emoji = "👍"`). An array of actions is written with `; `
+  between them; a `nop` binding is listed as `nop`, since it hides a
+  default. A table without bindings is listed with its header only.
 - Both have actions without a default key, so the user can bind them
   (`<leader>sk = "help.keymap"`).
 
@@ -1140,7 +1161,7 @@ Actions are named `<target>.<verb>`. The first release has:
   `cursor.last`, `cursor.half_page_down`, `cursor.half_page_up`,
   `search.start`, `search.next`, `search.prev`
 - help: `help.commands` (`:help`), `help.keymap` (`:map`); no default keys
-  (see "Help views")
+  (see "Help views") (added after the first release)
 - other: `view.close`, `sidebar.toggle`, `focus.room_list`, `focus.timeline`,
   `file.upload`, `account.recover`, `app.quit`, `nop`
 
@@ -1161,13 +1182,22 @@ Each action declares typed arguments. `room.open` takes a `RoomTarget`:
 when the configuration is loaded. `picker.rooms` takes an optional `filter`
 with the same values.
 
-`message.react` takes an optional `emoji`: an emoji or a shortcode (with or
-without colons), resolved with the `emojis` crate. Without it, the action
-opens the emoji picker, as before; with it, the action toggles that reaction
-on the message under the timeline's cursor (see "Commands"), so a binding
-such as `{ action = "message.react", emoji = "thumbsup" }` reacts with one
-key. In a binding, an unknown emoji is rejected when the configuration is
-loaded; in `:react`, it is an error in the status line.
+`message.react` takes an optional `emoji` (added after the first release): an
+emoji or a shortcode with colons on both sides or none, resolved with the
+`emojis` crate. In a binding, an unknown or empty emoji is rejected when the
+configuration is loaded; in `:react`, it is an error in the status line (see
+"Commands"). Both forms act on the open room's timeline cursor and first
+check it, for `+` and `:react` alike: with no open room the status line says
+`No room is open`, with an empty timeline `No message to react to`, and on a
+deleted message `The message is deleted`; nothing else happens. Then,
+without `emoji`, the action opens the emoji picker, as before. With `emoji`,
+it toggles that reaction: the key sent is the key of the user's own reaction
+on that message when it is the same emoji (compared through `Emoji::get`,
+so `❤` without the variation selector matches `❤️`), otherwise the emoji
+itself (`Emoji::as_str`), the same choice the emoji picker makes, so a
+second `:react heart` removes the reaction rather than adding a second one.
+A binding such as `{ action = "message.react", emoji = "thumbsup" }` reacts
+with one key.
 
 ### Layers
 
