@@ -692,9 +692,11 @@ instead, and it never takes more than half of the width.
 - The cursor follows the newest message from the room's opening until `k`,
   `<C-u>`, `gg`, a search or `gd` moves it to another message; moving down
   onto the newest message or `G` follows again. While the pane shows the
-  newest entry, entries that arrive appear at the bottom whether or not the
-  cursor follows: the view moves up, but never so far that the cursor's
-  message leaves the pane. Once the pane shows older entries only, the view
+  newest entry's last row, entries that arrive appear at the bottom whether
+  or not the cursor follows: the view moves up, but never so far that the
+  cursor's message leaves the pane. Whenever the cursor's message and every
+  entry after it fit on the pane, the newest entry is at the bottom too, so
+  moving down near the end shows what arrived meanwhile. Otherwise the view
   stays put while entries arrive above or below it.
 - Messages taller than the pane show `[+N lines]`, and `message.view` shows
   them in full.

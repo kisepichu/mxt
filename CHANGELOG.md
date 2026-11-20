@@ -12,8 +12,10 @@ marked **Breaking:**.
 
 - After the timeline cursor moved up from the newest message (to reply to
   a message, for example), new messages, your own included, stayed below
-  the pane until the room was opened again. Now they appear while the pane
-  shows the newest message.
+  the pane until the cursor reached the newest message or the room was
+  opened again. Now they appear at the bottom while the pane shows the
+  newest message's last row, and whenever the cursor's message and every
+  message after it fit on the pane.
 
 ## [0.1.2] - 2026-11-20
 
