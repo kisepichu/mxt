@@ -153,9 +153,10 @@ A table that is checked first wins: with `"]"` in `timeline` and the default
 `"]u"` in `normal`, `]` in the timeline waits for the next key, as in nvim,
 and runs the `timeline` binding when the next key is not `u` or when
 `timeoutlen` passes. Some keys never reach the keymap: in the editors' search
-mode, after a key that waits for its character (`f`, `F`, `t`, `T`, `r`), and
-in the message view's insert mode, every key goes to the editor (see
-[Keys](keys.md#the-editors)).
+mode, after a key that waits for its character (`f`, `F`, `t`, `T`, `r`),
+after an operator (`d`, `c`, `y`) and after a text object's `i` or `a`, as in
+nvim's operator-pending mode, and in the message view's insert mode, every
+key goes to the editor (see [Keys](keys.md#the-editors)).
 
 ### Binding values
 

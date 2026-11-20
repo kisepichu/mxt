@@ -491,10 +491,19 @@ covered by unit tests.
     `composer.completion`, then in `composer.insert`. Otherwise look it up in
     `composer.insert`. If it is not bound, pass it to edtui.
   - edtui in search mode: every key goes to edtui, including `<Esc>`.
-  - edtui in normal or visual mode while a key waits for its character
-    (after `f`, `F`, `t`, `T` or `r`, also after an operator, as in `df` or
-    `yt`): the next key goes to edtui without the keymap (see "edtui
-    differences from vim").
+  - edtui in normal or visual mode while a key waits for the next one: the
+    next key goes to edtui without the keymap (see "edtui differences from
+    vim"), as in nvim, whose operator-pending mode sees no normal-mode
+    mappings. This is the key after:
+    - `f`, `F`, `t`, `T` or `r`: its character, also after an operator, as
+      in `df` or `yt`;
+    - an operator, `d`, `c` or `y` in normal mode: `dw`, `yy`, and
+      `d<Esc>`, which cancels the `d`;
+    - a text object's `i` or `a` after an operator (`ci[`, `da(`, `yi"`) or
+      in visual mode (`vi[`): the object.
+    So bindings in `normal` that start with `[`, `]`, `(`, `"` and similar
+    keys, the default `]u` and `[u` among them, neither delay these
+    commands nor take their keys.
 - Pasted text, wherever the keys go: mxt turns on bracketed paste, so the
   terminal reports a paste as one event, which the tui adapter sends as
   `Msg::Paste` with its line breaks as `\n` (terminals and tmux send `\r`).
@@ -615,7 +624,7 @@ why, and exits. The next start logs in as a new device with fresh stores.
 | composer modes | the composer has focus; the status line shows edtui's mode (`INSERT`, `NORMAL`, `VISUAL`, `SEARCH`) | see "Input routing" above |
 | `COMMAND` | the `:` command line is open | `command_line` table, then text input |
 | `PICKER` | the room picker, the emoji picker or the link picker is open | `picker` table, then text input |
-| `VIEW` | the message view is open; the status line shows `VIEW` and the view editor's mode (`VIEW NORMAL`, `VIEW INSERT`, `VIEW VISUAL`, `VIEW SEARCH`) | `message_view` table while its editor is in normal or visual mode and no key waits for its character (see "Input routing" above), then edtui |
+| `VIEW` | the message view is open; the status line shows `VIEW` and the view editor's mode (`VIEW NORMAL`, `VIEW INSERT`, `VIEW VISUAL`, `VIEW SEARCH`) | `message_view` table while its editor is in normal or visual mode and no key waits for the next one (see "Input routing" above), then edtui |
 | `CONFIRM` | an action asks for confirmation | `y` confirms, any other key cancels |
 | `SECRET` | the recovery key is being entered | masked text input, `<CR>` submits, `<Esc>` cancels |
 
@@ -744,12 +753,6 @@ instead, and it never takes more than half of the width.
 normal mode and the draft is kept. A user binding of `<Esc>` in
 `composer.normal`, such as `"<Esc>" = "focus.timeline"`, replaces
 `composer.leave` like any other default.
-
-`]u` and `[u` are in `normal`, so `[` and `]` wait for the next key in the
-composer's normal and visual modes too: edtui's `di[`, `ci]` and `vi[` run
-when the next key arrives or `ui.timeoutlen` passes, and a `u` typed within
-that time after `ci[` runs `[u`. nvim's operator-pending and visual modes do
-not see normal-mode mappings; mxt's composer tables fall back to `normal`.
 
 `<C-j>` inserts a newline because many terminals cannot tell Shift+Enter apart
 from Enter.
@@ -1069,10 +1072,10 @@ Settings:
 |---|---|---|
 | `room_list` | the room list has focus | look in `normal` |
 | `timeline` | the timeline has focus | look in `normal` |
-| `composer.normal`, `composer.visual` | the composer has focus, edtui is in normal or visual mode, and no key waits for its character (see "Input routing") | look in `normal`, then pass the key to edtui |
+| `composer.normal`, `composer.visual` | the composer has focus, edtui is in normal or visual mode, and no key waits for the next one (see "Input routing") | look in `normal`, then pass the key to edtui |
 | `composer.insert` | the composer has focus and edtui is in insert mode | pass the key to edtui |
 | `composer.completion` | the mention menu is open in insert mode | look in `composer.insert`, then pass the key to edtui |
-| `message_view` | the message view is open, its editor is in normal or visual mode, and no key waits for its character | pass the key to edtui |
+| `message_view` | the message view is open, its editor is in normal or visual mode, and no key waits for the next one | pass the key to edtui |
 | `picker` | a picker is open | type it into the query |
 | `command_line` | the command line is open | type it into the command line |
 | `normal` | fallback for the tables above that name it | ignore the key |
@@ -1464,23 +1467,30 @@ asking for the recovery key ("Startup").
   `r{char}` in normal mode, one undo step; and `h`, `l`, `<Left>` and
   `<Right>` over whole grapheme clusters (skin tones, ZWJ sequences, VS16).
   The key after `f`, `t` or `r` goes to the editor without the keymap (`f:`
-  finds a colon, `<Esc>` cancels). edtui's own `df`, `dt`, `cf` and `ct`
-  still work, and `;` and `,` repeat their find. Other operators with these
-  motions (`dF`, `cT`, `yf`, `d;`) are not supported and do nothing; the
-  character after `dF` or `yf` is dropped, as is the one after `r` in visual
-  mode. mxt's edtui fork (see "Nix flake") draws the cursor and wraps lines
-  by grapheme cluster, and groups characters for `w`, `e`, `b`, `dw`, `cw`
-  and `iw` into vim's classes: kanji, hiragana and katakana are separate
-  words, full-width punctuation is punctuation, and the ideographic space is
-  a space; emoji count as punctuation, where vim gives them a class of their
-  own. Still needing edtui patches, or accepted for the first release: `x`,
-  `r`, `a`, insert-mode arrows and visual selections that work on single
-  characters inside a cluster, `e` stopping on the last character of a
-  cluster (the variation selector of `❤️`, drawn on the emoji's cell),
-  edtui's `df`, `dt`, `cf` and `ct`, which work on single characters and can
-  split a cluster (`df👍` leaves the skin tone), `df<Tab>`, which cancels
-  where `f<Tab>` finds a tab, operators with `F`, `T`, `;` and `,`, a
-  linewise `p` on the last line, `.` repeating `r`, and `r` in visual mode.
+  finds a colon, `<Esc>` cancels), and so does the key after an operator or
+  a text object's `i` or `a` (see "Input routing"). edtui's own `df`, `dt`,
+  `cf` and `ct` still work, and `;` and `,` repeat their find. Other
+  operators with these motions (`dF`, `cT`, `yf`, `d;`) are not supported
+  and do nothing; the character after `dF` or `yf` is dropped, as is the
+  one after `r` in visual mode. edtui's text objects are `i` with `w`, `W`,
+  a quote or a bracket, after `d` and `c` and in visual mode (there without
+  `iW`). It has no `a` objects and no `yi`: `da(`, `ya"`, `yi"` and visual
+  `a(` do nothing, and the object's key is dropped. A text object edtui
+  does not know (`dif`) drops its keys. mxt's edtui fork (see "Nix flake")
+  draws the cursor and wraps lines by grapheme cluster, and groups
+  characters for `w`, `e`, `b`, `dw`, `cw` and `iw` into vim's classes:
+  kanji, hiragana and katakana are separate words, full-width punctuation
+  is punctuation, and the ideographic space is a space; emoji count as
+  punctuation, where vim gives them a class of their own. Still needing
+  edtui patches, or accepted for the first release: `x`, `r`, `a`,
+  insert-mode arrows and visual selections that work on single characters
+  inside a cluster, `e` stopping on the last character of a cluster (the
+  variation selector of `❤️`, drawn on the emoji's cell), edtui's `df`,
+  `dt`, `cf` and `ct`, which work on single characters and can split a
+  cluster (`df👍` leaves the skin tone), `df<Tab>`, which cancels where
+  `f<Tab>` finds a tab, operators with `F`, `T`, `;` and `,`, `a` text
+  objects and `yi`, a linewise `p` on the last line, `.` repeating `r`, and
+  `r` in visual mode.
 - **Mentions on the remote network.** mxt relies on bridges turning
   `matrix.to` user links and `m.mentions` into remote mentions. Phase 0
   confirmed it for the Discord bridge in both directions; other bridges are

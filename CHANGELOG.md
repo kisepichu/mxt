@@ -30,6 +30,17 @@ marked **Breaking:**.
   `<Esc>`. Any text stays with its reply or edit. Binding `<Esc>` in
   `composer.normal` to `focus.timeline` keeps the old behavior.
 
+### Fixed
+
+- As in nvim's operator-pending mode, the key after `ci`, `di` and visual
+  `i`, after `ca`, `da`, `yi`, `ya` and visual `a`, and after a bare `d`,
+  `c` or `y` goes to the editor without the keymap. Bindings in `normal`
+  that start with `[`, `]`, `(`, `"` and similar keys, the new `]u` and `[u`
+  among them, no longer delay or take over text objects in the composer:
+  `ci[` no longer waits for the next key, and a `u` typed after it no
+  longer opens another room. `d<Esc>` cancels the `d` instead of leaving
+  the composer.
+
 ## [0.1.2] - 2026-11-20
 
 ### Changed

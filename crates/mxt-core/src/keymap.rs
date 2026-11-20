@@ -70,7 +70,8 @@ pub enum InputContext {
     /// The message view's editor in normal or visual mode.
     MessageView,
     /// An editor in a mode where every key goes to it (search mode; the message
-    /// view's editor in insert mode; a key waiting for its character).
+    /// view's editor in insert mode; a key waiting for the next one, as after
+    /// `f` or an operator).
     EditorPassthrough,
     Picker,
     CommandLine,

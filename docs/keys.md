@@ -85,11 +85,6 @@ visual mode.
 
 As in nvim, ctrl can stay held for the key after `<C-w>`.
 
-In the composer's normal and visual modes `[` and `]` start `[u` and `]u`
-too, so they wait for the next key: the editor's `di[`, `ci]` and `vi[` run
-when it arrives or after `ui.timeoutlen`, and a `u` typed within that time
-after `ci[` opens a room instead.
-
 ### `room_list` and `timeline`
 
 | Key | Action | |
@@ -252,11 +247,18 @@ breaks included, and runs no keys.
   replaces the character under the cursor in normal mode, as one undo step.
   `h`, `l`, `<Left>` and `<Right>` step over whole grapheme clusters.
 - The key after `f`, `F`, `t`, `T` or `r` goes to the editor without the
-  keymap: `f:` finds a colon, and `<Esc>` cancels.
+  keymap: `f:` finds a colon, and `<Esc>` cancels. As in nvim's
+  operator-pending mode, so does the key after an operator (`d`, `c`, `y`)
+  and after a text object's `i` or `a` (`ci[`, `vi"`): `d<Esc>` cancels the
+  `d`, and a binding in `normal` such as `]u` never takes the `]` of `ci]`.
 - `df`, `dt`, `cf` and `ct` work, and `;` and `,` repeat their find. Other
   operators with these motions (`dF`, `cT`, `yf`, `d;`) do nothing, and the
   character after `dF` or `yf` is dropped, as is the one after `r` in visual
   mode.
+- The text objects are `i` with `w`, `W`, a quote or a bracket, after `d`
+  and `c` and in visual mode (`viW` excepted). There are no `a` objects and
+  no `yi`: `da(`, `yi"` and visual `a(` do nothing, and the key after them
+  is dropped.
 - `w`, `e`, `b`, `dw`, `cw` and `iw` group characters as vim does: kanji,
   hiragana and katakana are separate words, full-width punctuation is
   punctuation, and the ideographic space is a space. Emoji count as
