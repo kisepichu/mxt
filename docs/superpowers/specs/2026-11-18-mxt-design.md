@@ -541,6 +541,10 @@ covered by unit tests.
   `FetchImage`, decoded and scaled down with the `image` crate, and kept in
   the tui adapter's image cache) and the file name and size. Messages taller
   than the timeline pane show a `[+N lines]` marker at the cut-off.
+  The help views (`:help`, `:map`; see "Help views") use the same overlay
+  and editor for text the core generates, so the core holds either a
+  message or a generated text for the view, and the tui adapter draws both
+  alike.
 - Replacing edtui later (with another editor widget or an in-house vim engine)
   only touches `mxt-tui`.
 
@@ -759,19 +763,69 @@ Commands resolve through the same action registry as keys. Everything after
 the command name, trimmed, is one argument, so `:open my room` and paths with
 spaces work without quoting.
 
+The commands are declared in one registry in `mxt-core`: each entry has the
+command's name, its argument (none, required or optional) with its usage
+(`:open <room>`), a one-line description, and the action it becomes. Parsing,
+`<Tab>` completion of command names, the usage errors and `:help` all read
+the registry, so a new command needs only its entry.
+
 | Command | Action |
 |---|---|
 | `:open <room>` | `room.open` with a fuzzy query, with completion over room names |
 | `:mute` / `:unmute` | `room.mute` / `room.unmute` |
 | `:upload <path>` | `file.upload` |
+| `:react [<emoji>]` | `message.react` with `emoji`, with completion over shortcodes; without an argument the emoji picker |
 | `:recover` | `account.recover` (asks for the recovery key in `SECRET` mode) |
+| `:help` | `help.commands`: the command list (see "Help views") |
+| `:map` | `help.keymap`: the effective key bindings (see "Help views") |
 | `:q` | `app.quit` |
 
-`:mute`, `:unmute`, `:recover` and `:q` reject an argument, and `:open` and
-`:upload` without one show their usage (`usage: :open <room>`). The command
+`:mute`, `:unmute`, `:recover`, `:help`, `:map` and `:q` reject an argument,
+and `:open` and `:upload` without one show their usage
+(`usage: :open <room>`). `:react` takes an optional argument. The command
 line, the `/` search line and picker queries take typed characters, `<BS>`,
 `<C-u>` (clear) and `<C-w>` (delete the last word); `<BS>` on an empty
 command or search line closes it.
+
+`:react <emoji>` toggles the reaction on the message under the timeline's
+cursor, whichever pane has focus, exactly as choosing it in the emoji picker
+(`+`) does: a reaction the user already sent there is removed, any other is
+sent. The argument is an emoji (`:react 👍`) or a shortcode, with or without
+colons (`:react thumbsup`, `:react :+1:`), resolved with the `emojis` crate.
+`<Tab>` after `:react ` completes shortcodes: those that start with the typed
+text, in alphabetical order, cycling like `:open`'s completion. An unknown
+shortcode is an error in the status line (`Unknown emoji: <text>`), and
+nothing is sent. Without an argument, `:react` opens the emoji picker for
+that message, as `+` does. With no open room, or no message under the
+timeline's cursor (an empty timeline, or the cursor on something that is not
+a message), the status line says so and nothing happens.
+
+### Help views
+
+`:help` and `:map` open a read-only view over the whole screen, the same as
+the message view for a text message: its editor holds generated text, so
+`j`/`k`, `/` search, visual selection and `yy` work, and `q` or `<Esc>`
+closes it (the `message_view` table). The text is generated each time the
+view opens, so it shows the running mxt's commands and configuration.
+
+- `:help` (`help.commands`): the first line is one English sentence, `mxt is
+  a Matrix client with nvim-like keys; docs/keys.md describes every key and
+  action.`, then an empty line, then one line per registry entry in registry
+  order: the usage, padded to one column, and the description
+  (`:open <room>   Open a room by its name`). No other usage text.
+- `:map` (`help.keymap`): the effective bindings after the user's
+  configuration is merged over the defaults. The first line names the leader
+  (`leader = <Space>`). Then, for each table in the order of "Tables and
+  resolution", a header line with the table's name, and one line per binding
+  of that table (its own bindings, not those it falls back to), sorted by
+  keys: `keys -> action (arguments)`. Keys are in the configuration's
+  notation with the leader expanded (`<C-w>h`, `<Space>m`); arguments are
+  written as in the configuration (`room.open (filter = "unread", pick =
+  "next")`); an array of actions is written with `; ` between them; a `nop`
+  binding is listed as `nop`, since it hides a default. A table without
+  bindings is listed with its header only.
+- Both have actions without a default key, so the user can bind them
+  (`<leader>sk = "help.keymap"`).
 
 ### Mentions
 
@@ -1085,6 +1139,8 @@ Actions are named `<target>.<verb>`. The first release has:
 - movement and search: `cursor.down`, `cursor.up`, `cursor.first`,
   `cursor.last`, `cursor.half_page_down`, `cursor.half_page_up`,
   `search.start`, `search.next`, `search.prev`
+- help: `help.commands` (`:help`), `help.keymap` (`:map`); no default keys
+  (see "Help views")
 - other: `view.close`, `sidebar.toggle`, `focus.room_list`, `focus.timeline`,
   `file.upload`, `account.recover`, `app.quit`, `nop`
 
@@ -1104,6 +1160,14 @@ Each action declares typed arguments. `room.open` takes a `RoomTarget`:
 `pick` and `query` are mutually exclusive. A binding with both is rejected
 when the configuration is loaded. `picker.rooms` takes an optional `filter`
 with the same values.
+
+`message.react` takes an optional `emoji`: an emoji or a shortcode (with or
+without colons), resolved with the `emojis` crate. Without it, the action
+opens the emoji picker, as before; with it, the action toggles that reaction
+on the message under the timeline's cursor (see "Commands"), so a binding
+such as `{ action = "message.react", emoji = "thumbsup" }` reacts with one
+key. In a binding, an unknown emoji is rejected when the configuration is
+loaded; in `:react`, it is an error in the status line.
 
 ### Layers
 
