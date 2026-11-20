@@ -8,6 +8,8 @@ marked **Breaking:**.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-20
+
 ### Changed
 
 - Inside tmux, with `ui.image_preview = "auto"`, images are sixel that tmux
@@ -85,6 +87,7 @@ The first release.
   prebuilt binaries for x86_64 Linux and Apple Silicon macOS on GitHub
   Releases, which `mise use -g github:kisepichu/mxt` installs.
 
-[Unreleased]: https://github.com/kisepichu/mxt/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/kisepichu/mxt/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/kisepichu/mxt/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/kisepichu/mxt/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kisepichu/mxt/releases/tag/v0.1.0
