@@ -956,6 +956,12 @@ list, so mxt does not offer an event-level mention list.
     pane's last row scrolls the pane. With forced protocols through
     passthrough, the cell size comes from whichever terminal answers
     ratatui-image's query first.
+  - Checked on real terminals (owner, 2026-11-20, mxt 0.1.2): WezTerm on
+    macOS over SSH, outside tmux (iTerm2 graphics) and inside tmux 3.6a
+    (tmux's sixel), draws the image sharp and in place, and in place again
+    after the view is closed and opened again; WSL without SSH draws half
+    blocks in place. Not tried yet: kitty, Ghostty, iTerm2 and Windows
+    Terminal, and kitty graphics inside tmux.
 
 ### Clipboard and terminal focus
 
@@ -969,6 +975,9 @@ when mxt's window is in front), and the option stays on after mxt exits.
 When mxt runs over SSH from inside a local tmux, the remote mxt cannot tell
 the terminal (see "Files and images"), and images are usually half blocks.
 The user documentation, [Terminal setup](../../terminal.md), says so.
+
+Checked (owner, 2026-11-20): `yy` in mxt over SSH from WezTerm on macOS put
+the message's text on the Mac's clipboard.
 
 ## Configuration
 

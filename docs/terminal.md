@@ -43,6 +43,7 @@ text on the terminal's clipboard with the OSC 52 escape sequence, which also
 works over SSH. The terminal must accept OSC 52 clipboard writes; some turn
 them off or ask first, so check its settings if yanks do not arrive. Inside
 tmux, OSC 52 reaches the outer terminal only with `set -g set-clipboard on`.
+This has been checked over SSH from WezTerm on macOS.
 
 mxt never reads the clipboard. `p` in the editors pastes mxt's own register,
 which holds the last yank. Pasting with the terminal (its paste shortcut, or
@@ -159,6 +160,12 @@ graphics protocols draw an image in pixels that must fill its cells.
   until the pane resizes again, and an image may take more or fewer rows
   than its area, and scroll the pane when it reaches past the pane's
   bottom.
+
+So far this has been checked with WezTerm on macOS over SSH, outside tmux
+and inside tmux 3.6a, where images are sharp and in place, also after
+closing and opening the view again, and in WSL without SSH, where they are
+half blocks. kitty, Ghostty, iTerm2 and Windows Terminal have not been
+tried yet.
 
 When the choice is wrong for your terminal, `ui.image_preview = "iterm2"`,
 `"sixel"`, `"kitty"` or `"halfblocks"` uses that protocol, also in WSL.
