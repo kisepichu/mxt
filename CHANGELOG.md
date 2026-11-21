@@ -8,6 +8,15 @@ marked **Breaking:**.
 
 ## [Unreleased]
 
+### Fixed
+
+- Moving the timeline cursor down with `j` or `<C-d>` near the newest message
+  no longer jumps the view to the bottom with the cursor on the top row: the
+  view scrolls just far enough to show the cursor's message, all the way to
+  the newest. Messages that arrived below the pane meanwhile stay there,
+  counted by `↓ N newer`, until the cursor reaches them or the pane grows
+  (when a draft of several rows is sent, say).
+
 ## [0.1.3] - 2026-11-21
 
 ### Added

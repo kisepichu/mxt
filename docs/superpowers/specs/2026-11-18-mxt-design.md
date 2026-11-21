@@ -760,11 +760,16 @@ instead, and it never takes more than half of the width.
   so does going to a jump list entry without a message. While the pane
   shows the newest entry's last row, entries that arrive appear at the
   bottom whether or not the cursor follows: the view moves up, but never so
-  far that the cursor's message leaves the pane. Whenever the cursor's
-  message and every entry after it fit on the pane, the newest entry is at
-  the bottom too, so moving down near the end shows what arrived
-  meanwhile. Otherwise the view stays put while entries arrive above or
-  below it.
+  far that the cursor's message leaves the pane. Otherwise the view stays
+  put while entries arrive above or below it. Moving the cursor never jumps
+  the view: it stays put while the cursor's message is on the pane, and
+  otherwise scrolls just far enough to bring that message in at the edge
+  the cursor moved towards, so `j` at the bottom edge scrolls one message
+  at a time all the way to the newest. When the pane gets taller (the
+  composer gives back the rows of a draft that was sent, say), the new rows
+  show what is below the cursor's message first, so the newest entry is
+  back at the bottom when it fits. Entries that arrived below the pane stay
+  there until the cursor reaches them or a taller pane shows them.
 - The newer-messages hint: while items exist after the last entry with a
   row on the pane, the composer's top rule ends with a dim `↓ N newer`. `N`
   counts those items: messages of every kind, deleted, undecryptable and
@@ -778,13 +783,14 @@ instead, and it never takes more than half of the width.
   that does not fit either it is left out, so the label is never cut for
   it. Each frame computes it from what it draws, so it follows the cursor
   and the entries that arrive, and is gone once the pane shows the newest
-  item. It covers what the rules above leave: a burst taller than the rows
-  below the cursor's message stays below the pane until the cursor moves
-  down. The tui adapter counts from its frame (`TimelinePane` knows the
-  last entry with a row, `App::timeline` the entries) and stops counting
-  at 100 items; the core is not involved. It reads "newer", not "new":
-  after the cursor moved up, the count includes messages the pane showed
-  before.
+  item. It covers what the rules above leave below the pane until the
+  cursor moves down to it or a taller pane shows it: a burst taller than
+  the rows above the cursor's message, or anything that arrives while the
+  pane does not show the newest entry's last row. The tui adapter counts
+  from its frame (`TimelinePane` knows the last entry with a row,
+  `App::timeline` the entries) and stops counting at 100 items; the core is
+  not involved. It reads "newer", not "new": after the cursor moved up, the
+  count includes messages the pane showed before.
 - Messages taller than the pane show `[+N lines]`, and `message.view` shows
   them in full.
 
