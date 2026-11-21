@@ -90,6 +90,16 @@ pub struct RoomSummary {
     pub latest_activity: Option<Timestamp>,
 }
 
+/// A pending invite, for `:join`'s completion (design, "Joining rooms and
+/// direct messages"). Invited rooms are not room summaries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Invite {
+    pub room: RoomId,
+    /// The room's display name; for an invite to a direct message, the
+    /// inviter's name.
+    pub name: String,
+}
+
 /// The single unread badge of a room.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Badge {

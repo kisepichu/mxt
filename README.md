@@ -19,6 +19,10 @@ user interface around it. It runs on Linux and macOS.
   mark.
 - A fuzzy room picker, the same picker for rooms with unread mentions, and
   `]u` and `[u`, which open the next or previous unread room.
+- `:join` for rooms by alias, ID or matrix.to link and for pending invites,
+  and for direct messages with a user ID: it opens the existing one, a
+  bridged one or a bridge bot's room included, and creates an encrypted
+  one only after asking.
 - A timeline with formatted messages, replies, edits, reactions and read
   receipts, and a full-screen view for long messages and images.
 - A composer with vim modes, Markdown, `@` mention completion, replies and

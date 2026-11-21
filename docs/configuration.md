@@ -77,9 +77,9 @@ These are errors:
   `files.opener` without a program;
 - malformed key notation, such as `"<C-x"`, `"<C-x<CR>"`, `"<>"`, `"<S-1>"`
   or `"<C-leader>"`;
-- `pick` together with `query`, `file.upload` without `path`, an empty
-  `query`, `path` or `emoji`, a binding table without `action`, and an empty
-  array as a binding;
+- `pick` together with `query`, `file.upload` without `path`, `room.join`
+  without `target`, an empty `query`, `path`, `emoji` or `target`, a
+  binding table without `action`, and an empty array as a binding;
 - the same key sequence written twice in one table in different spellings,
   such as `"<leader>x"` and `"<Space>x"`, or `"<C-a>"` and `"<C-A>"`.
 
@@ -346,6 +346,7 @@ arguments; any other argument ignores the binding with a warning. Actions on
 | `room.mark_read` | | Marks the room as read: the room under the cursor while the room list has focus, otherwise the open room. Sends a read receipt for the room's latest message, moves the fully-read marker there, and clears the manual unread mark. |
 | `room.mute` | | Mutes the room (the same room as `room.mark_read`). |
 | `room.unmute` | | Removes the room's own notification setting, so the account's default applies again. On a room that is not muted it does nothing and says so, so a "mentions only" setting made in another client stays. |
+| `room.join` | `target`, required | Joins a room or opens a direct message as `:join <target>` does (see [Keys](keys.md#joining-rooms-and-direct-messages)): `target` is a room alias, a room ID, a user ID, a matrix.to link or the name of a pending invite, read when the key runs, for example `{ action = "room.join", target = "#mxt:example.org" }`. An empty `target` is an error. |
 | `message.reply` | | Starts a reply to the message in the composer. Not for a message that is still being sent, and not while an edit is open in the composer. |
 | `message.edit` | | Loads your own text message into the composer to edit it. The composer must be empty. |
 | `message.delete` | | Deletes your own message after you confirm with `y`. |
@@ -371,7 +372,7 @@ arguments; any other argument ignores the binding with a warning. Actions on
 | `command_line.open` | | Opens the `:` command line. |
 | `command_line.execute` | | Runs the command, or searches with a `/` line. |
 | `command_line.cancel` | | Closes the line. |
-| `command_line.complete` | | Completes command names, room names after `:open`, and emoji shortcodes after `:react`; pressing it again cycles through the candidates. |
+| `command_line.complete` | | Completes command names, room names after `:open`, the names of pending invites after `:join`, and emoji shortcodes after `:react`; pressing it again cycles through the candidates. |
 | `cursor.down`, `cursor.up` | | Moves the cursor of the focused list by one room or message, or by the count. |
 | `cursor.first`, `cursor.last` | | Moves it to the first or last room or message. |
 | `cursor.half_page_down`, `cursor.half_page_up` | | Moves it by half of the visible rooms or messages, times the count. |

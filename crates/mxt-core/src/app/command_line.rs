@@ -1,6 +1,7 @@
 //! The `:` command line and the `/` search line: text editing, execution and
 //! completion.
 
+use super::join::join_candidates;
 use super::{App, StatusKind};
 use crate::command::{Argument, COMMANDS, parse_command};
 use crate::effect::Effect;
@@ -9,6 +10,7 @@ use crate::fuzzy;
 use crate::keys::Key;
 use crate::line::{LineChange, LineEditor};
 use crate::msg::Pane;
+use crate::room::Invite;
 use crate::rooms::RoomList;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,7 +123,7 @@ impl App {
             Some(completion) => completion,
             None => {
                 let text = open.line.input.text();
-                let mut candidates = candidates(text, &self.rooms);
+                let mut candidates = candidates(text, &self.rooms, &self.invites);
                 if candidates.len() <= 1 {
                     if let Some(only) = candidates.pop() {
                         open.line.input.set_text(&only);
@@ -147,9 +149,11 @@ impl App {
 /// Without whitespace in `text`: the commands that start with it, with a
 /// space after those that take an argument. For `open <query>`: the
 /// displayed room names ranked against the query, as `open <name>`. For
-/// `react <prefix>`: the shortcodes that start with the prefix, a leading
-/// `:` ignored, in alphabetical order, as `react <shortcode>`.
-fn candidates(text: &str, rooms: &RoomList) -> Vec<String> {
+/// `join <query>`: the pending invites ranked by name (see
+/// `join_candidates`). For `react <prefix>`: the shortcodes that start with
+/// the prefix, a leading `:` ignored, in alphabetical order, as
+/// `react <shortcode>`.
+fn candidates(text: &str, rooms: &RoomList, invites: &[Invite]) -> Vec<String> {
     match text.split_once(char::is_whitespace) {
         None => COMMANDS
             .iter()
@@ -170,6 +174,7 @@ fn candidates(text: &str, rooms: &RoomList) -> Vec<String> {
                 .map(|index| format!("open {}", names[index]))
                 .collect()
         }
+        Some(("join", query)) => join_candidates(query.trim(), invites),
         Some(("react", prefix)) => {
             let prefix = prefix.trim();
             let prefix = prefix.strip_prefix(':').unwrap_or(prefix);

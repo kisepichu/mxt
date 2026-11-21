@@ -641,7 +641,8 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App, editor: Option<Edi
     if !pending.is_empty() {
         head.extend([(GAP, PLAIN), (pending.as_str(), PLAIN)]);
     }
-    let status = match (app.confirmation(), app.status()) {
+    let question = app.confirmation();
+    let status = match (question.as_deref(), app.status()) {
         (Some(question), _) => Some([(GAP, PLAIN), (question, BOLD)]),
         (None, Some(status)) => {
             let style = match status.kind {

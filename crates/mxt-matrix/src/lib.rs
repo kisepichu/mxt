@@ -13,6 +13,7 @@ mod bridges;
 mod client;
 mod error;
 mod html;
+mod join;
 mod media;
 mod recovery;
 mod rooms;

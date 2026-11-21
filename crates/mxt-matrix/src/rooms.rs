@@ -1,5 +1,5 @@
-//! The room list: the joined rooms, the facts mxt reads per room, and the
-//! summaries the core receives.
+//! The room list: the joined rooms, the facts mxt reads per room, the
+//! summaries the core receives, and the pending invites.
 
 use std::collections::{HashMap, HashSet};
 
@@ -7,13 +7,14 @@ use matrix_sdk::{
     Client, Room, RoomDisplayName, RoomMemberships, RoomState,
     deserialized_responses::SyncOrStrippedState,
     notification_settings::{NotificationSettings, RoomNotificationMode},
-    ruma::{self, OwnedRoomId, events::space::parent::SpaceParentEventContent},
+    ruma::{self, OwnedRoomId, OwnedUserId, events::space::parent::SpaceParentEventContent},
 };
 use mxt_core::{
     ids::{RoomId, Timestamp},
     msg::Msg,
     room::{
-        BridgeInfo, NotificationMode, RoomKind, RoomName, RoomSummary, UnreadCounts, network_name,
+        BridgeInfo, Invite, NotificationMode, RoomKind, RoomName, RoomSummary, UnreadCounts,
+        network_name,
     },
 };
 use tokio::sync::{
@@ -80,19 +81,25 @@ pub(crate) fn summary(facts: &RoomFacts) -> RoomSummary {
 /// every room at the start, then the rooms of each sync response
 /// (`responses`), room info updates (read receipts and unread counts change
 /// through them), notification settings changes, and changes of parent
-/// spaces.
+/// spaces. The pending invites go to the core as `Msg::Invites` at the
+/// start and when a sync response changed them.
 pub(crate) async fn run(mut rooms: Rooms, mut responses: broadcast::Receiver<SyncedRooms>) {
     let mut settings_changes = rooms.settings.subscribe_to_changes();
     let mut room_updates = rooms.client.room_info_notable_update_receiver();
     // After subscribing, so that no change is missed.
     rooms.reload().await;
+    rooms.check_invites().await;
     loop {
         tokio::select! {
             response = responses.recv() => match response {
-                Ok(updated) => rooms.check(updated.iter().cloned()).await,
+                Ok(updated) => {
+                    rooms.check(updated.iter().cloned()).await;
+                    rooms.check_invites().await;
+                }
                 Err(RecvError::Lagged(missed)) => {
                     info!("missed the rooms of {missed} sync responses; re-reading every room");
                     rooms.reload().await;
+                    rooms.check_invites().await;
                 }
                 Err(RecvError::Closed) => break,
             },
@@ -167,6 +174,9 @@ pub(crate) struct Rooms {
     listed: HashMap<OwnedRoomId, Listed>,
     /// The listed rooms per parent space (every `m.space.parent`, joined or not).
     spaces: Spaces,
+    /// The pending invites the core has, sorted by name; `None` before the
+    /// first `Msg::Invites`.
+    invites: Option<Vec<Invite>>,
 }
 
 struct Listed {
@@ -186,6 +196,7 @@ impl Rooms {
             to_core,
             listed: HashMap::new(),
             spaces: Spaces::default(),
+            invites: None,
         }
     }
 
@@ -309,6 +320,38 @@ impl Rooms {
             }
         }
     }
+
+    /// Sends the invited rooms' IDs and display names as `Msg::Invites`,
+    /// sorted by name, when they differ from the ones sent last. An invite's
+    /// name often resolves a sync after the invite arrives, so names count.
+    pub(crate) async fn check_invites(&mut self) {
+        let mut invites = Vec::new();
+        for room in self.client.invited_rooms() {
+            match room.display_name().await {
+                Ok(name) => invites.push(Invite {
+                    room: RoomId::new(room.room_id().as_str()),
+                    name: name.to_string(),
+                }),
+                Err(error) => {
+                    let error = Error::from(error);
+                    warn!("reading a pending invite failed: {}", error.brief());
+                    debug!(room = %room.room_id(), "reading the invite failed: {error}");
+                    return;
+                }
+            }
+        }
+        invites.sort_by_cached_key(|invite| {
+            (
+                invite.name.to_lowercase(),
+                invite.name.clone(),
+                invite.room.clone(),
+            )
+        });
+        if self.invites.as_ref() != Some(&invites) {
+            let _ = self.to_core.send(Msg::Invites(invites.clone()));
+            self.invites = Some(invites);
+        }
+    }
 }
 
 /// The listed rooms per parent space, with what they read from the space.
@@ -374,11 +417,11 @@ struct Changes {
     removed: Vec<OwnedRoomId>,
 }
 
-/// The rooms of `updated` (the joined and left rooms of a sync response, or
-/// the rooms of room info updates), each once, and the room each of them
-/// replaced, because whether an upgraded room is listed depends on its
-/// successor (see `is_listed`). Every room that is `listable` is upserted;
-/// the others are removed when they are `listed`.
+/// The rooms of `updated` (the joined, left and invited rooms of a sync
+/// response, or the rooms of room info updates), each once, and the room
+/// each of them replaced, because whether an upgraded room is listed
+/// depends on its successor (see `is_listed`). Every room that is
+/// `listable` is upserted; the others are removed when they are `listed`.
 fn changes(
     updated: impl IntoIterator<Item = OwnedRoomId>,
     predecessor: impl Fn(&ruma::RoomId) -> Option<OwnedRoomId>,
@@ -410,7 +453,9 @@ async fn room_facts(
 ) -> Result<(RoomFacts, Vec<Parent>), Error> {
     let bridge = bridges::bridge(room).await?;
     let bridged_partner = match &bridge {
-        Some(bridge) => bridged_dm_partner_name(room, bridge).await?,
+        Some(bridge) => bridged_dm_partner(room, bridge)
+            .await?
+            .map(|partner| partner.name),
         None => None,
     };
     let (is_direct, dm_partner_name) = match bridged_partner {
@@ -463,12 +508,20 @@ async fn dm_partner_name(room: &Room) -> Result<Option<String>, Error> {
         .filter(|name| !name.trim().is_empty()))
 }
 
+/// The other person of a bridged direct message.
+pub(crate) struct Partner {
+    pub id: OwnedUserId,
+    /// The display name, or the user ID without one.
+    pub name: String,
+}
+
 /// The other person of a bridged direct message (see `DmCandidate`), from
-/// the store only: no `/members` request.
-async fn bridged_dm_partner_name(
+/// the store only: no `/members` request. The room list names the room
+/// after them, and `:join` finds the room by their user ID.
+pub(crate) async fn bridged_dm_partner(
     room: &Room,
     bridge: &bridges::Bridge,
-) -> Result<Option<String>, Error> {
+) -> Result<Option<Partner>, Error> {
     let Some(bot) = bridge.bot.as_deref() else {
         return Ok(None);
     };
@@ -487,13 +540,27 @@ async fn bridged_dm_partner_name(
             display_name: member.display_name(),
         })
         .collect();
-    Ok(candidate.partner(room.own_user_id(), &joined))
+    Ok(candidate
+        .partner(room.own_user_id(), &joined)
+        .map(|person| Partner {
+            id: person.id.to_owned(),
+            name: person.name(),
+        }))
 }
 
 /// A joined member as the store knows it.
 struct JoinedMember<'a> {
     id: &'a ruma::UserId,
     display_name: Option<&'a str>,
+}
+
+impl JoinedMember<'_> {
+    /// The display name, or the user ID without one.
+    fn name(&self) -> String {
+        self.display_name
+            .filter(|name| !name.trim().is_empty())
+            .map_or_else(|| self.id.to_string(), str::to_owned)
+    }
 }
 
 /// A bridged room that may be a direct message (phase 0 finding 2), before
@@ -527,13 +594,16 @@ impl<'a> DmCandidate<'a> {
         (may_be_dm && (2..=3).contains(&joined_count)).then_some(DmCandidate { bot, joined_count })
     }
 
-    /// The name of the person the room is a direct message with: the only
-    /// joined member besides the user (`me`) and the bot. Members are
-    /// lazy-loaded, so `joined` (from the store) may lack members that the
-    /// server counts: the person must be the only joined member the count
-    /// leaves besides the user and the bot. The name is the display name, or
-    /// the user ID without one.
-    fn partner(&self, me: &ruma::UserId, joined: &[JoinedMember<'_>]) -> Option<String> {
+    /// The person the room is a direct message with: the only joined member
+    /// besides the user (`me`) and the bot. Members are lazy-loaded, so
+    /// `joined` (from the store) may lack members that the server counts:
+    /// the person must be the only joined member the count leaves besides
+    /// the user and the bot.
+    fn partner<'m, 'j>(
+        &self,
+        me: &ruma::UserId,
+        joined: &'m [JoinedMember<'j>],
+    ) -> Option<&'m JoinedMember<'j>> {
         let bot_joined = joined.iter().any(|member| member.id == self.bot);
         if self.joined_count.checked_sub(1 + u64::from(bot_joined)) != Some(1) {
             return None;
@@ -544,12 +614,7 @@ impl<'a> DmCandidate<'a> {
         let (Some(person), None) = (others.next(), others.next()) else {
             return None;
         };
-        Some(
-            person
-                .display_name
-                .filter(|name| !name.trim().is_empty())
-                .map_or_else(|| person.id.to_string(), str::to_owned),
-        )
+        Some(person)
     }
 }
 
@@ -706,8 +771,9 @@ mod tests {
         JoinedMember { id, display_name }
     }
 
-    /// The partner `bridged_dm_partner_name` finds in a bridged room whose
-    /// bridge declares `room_type`, with an `m.room.name` or without one.
+    /// The name of the partner `bridged_dm_partner` finds in a bridged room
+    /// whose bridge declares `room_type`, with an `m.room.name` or without
+    /// one.
     fn partner(
         room_type: Option<RoomType>,
         named: bool,
@@ -715,7 +781,8 @@ mod tests {
         joined: &[JoinedMember<'_>],
     ) -> Option<String> {
         let [me, bot, ..] = ids();
-        DmCandidate::new(bot, room_type, named, joined_count)?.partner(me, joined)
+        let person = DmCandidate::new(bot, room_type, named, joined_count)?.partner(me, joined)?;
+        Some(person.name())
     }
 
     /// The user, the bridge bot and Alice.
@@ -732,6 +799,13 @@ mod tests {
     fn an_unnamed_bridged_room_with_the_bot_and_one_person_is_a_direct_message() {
         let joined = with_the_bot_and_alice();
         assert_eq!(partner(None, false, 3, &joined), Some("Alice".to_owned()));
+        // `:join` finds the room by the person's user ID.
+        let [me, bot, alice, _] = ids();
+        let candidate = DmCandidate::new(bot, None, false, 3).unwrap();
+        assert_eq!(
+            candidate.partner(me, &joined).map(|person| person.id),
+            Some(alice)
+        );
         // The user's own membership is not needed.
         assert_eq!(
             partner(None, false, 3, &joined[1..]),

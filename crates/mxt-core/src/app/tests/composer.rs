@@ -722,7 +722,10 @@ fn message_delete_asks_for_confirmation() {
 
     keys(&mut app, "k");
     assert_eq!(no_timers(keys(&mut app, "dd")), vec![]);
-    assert_eq!(app.confirmation(), Some("Delete this message? (y/n)"));
+    assert_eq!(
+        app.confirmation().as_deref(),
+        Some("Delete this message? (y/n)")
+    );
     assert_eq!(app.mode_label(None), "CONFIRM");
     assert_eq!(
         keys(&mut app, "y"),
@@ -744,7 +747,10 @@ fn the_confirm_question_is_not_a_status_message() {
     let mut app = opened();
     reset(&mut app, vec![own(remote(1), "mine")]);
     keys(&mut app, "dd");
-    assert_eq!(app.confirmation(), Some("Delete this message? (y/n)"));
+    assert_eq!(
+        app.confirmation().as_deref(),
+        Some("Delete this message? (y/n)")
+    );
     keys(&mut app, "n");
     assert_eq!(messages(&mut app), [MESSAGES_FIRST_LINE]);
 }
@@ -767,7 +773,7 @@ fn keys_left_after_a_binding_which_asks_for_confirmation_are_dropped() {
     reset(&mut app, vec![own(remote(1), "one"), own(remote(2), "two")]);
     let question = Some("Delete this message? (y/n)");
     assert_eq!(no_timers(keys(&mut app, "gyk")), vec![]);
-    assert_eq!(app.confirmation(), question);
+    assert_eq!(app.confirmation().as_deref(), question);
     assert_eq!(app.timeline_cursor(), Some(1));
     // A key typed after the question answers it.
     assert_eq!(keys(&mut app, "n"), vec![]);
@@ -775,7 +781,7 @@ fn keys_left_after_a_binding_which_asks_for_confirmation_are_dropped() {
 
     let timer = last_timer(&keys(&mut app, "gy"));
     assert_eq!(app.update(Msg::Timeout { id: timer }), vec![]);
-    assert_eq!(app.confirmation(), question);
+    assert_eq!(app.confirmation().as_deref(), question);
     assert_eq!(
         keys(&mut app, "y"),
         vec![matrix(MatrixEffect::Redact {
@@ -790,7 +796,10 @@ fn a_paste_never_answers_a_question() {
     let mut app = opened();
     reset(&mut app, vec![own(remote(1), "one")]);
     no_timers(keys(&mut app, "dd"));
-    assert_eq!(app.confirmation(), Some("Delete this message? (y/n)"));
+    assert_eq!(
+        app.confirmation().as_deref(),
+        Some("Delete this message? (y/n)")
+    );
     assert_eq!(paste(&mut app, "y", None), vec![]);
     assert_eq!(app.confirmation(), None);
     assert_eq!(no_timers(keys(&mut app, "y")), vec![]);
@@ -815,7 +824,7 @@ fn a_paste_never_answers_a_question_that_the_keys_it_ends_ask() {
         !effects.iter().any(|e| matches!(e, Effect::Matrix(_))),
         "{effects:?}"
     );
-    assert_eq!(app.confirmation(), question);
+    assert_eq!(app.confirmation().as_deref(), question);
     keys(&mut app, "n");
     // `gy` pending: `g` asks, and the `y` fed again is dropped.
     keys(&mut app, "gy");
@@ -824,7 +833,7 @@ fn a_paste_never_answers_a_question_that_the_keys_it_ends_ask() {
         !effects.iter().any(|e| matches!(e, Effect::Matrix(_))),
         "{effects:?}"
     );
-    assert_eq!(app.confirmation(), question);
+    assert_eq!(app.confirmation().as_deref(), question);
 }
 
 #[test]
@@ -841,7 +850,10 @@ fn a_question_asked_with_the_recovery_key_prompt_is_shown_and_answered_first() {
         assert_eq!(no_timers(keys(&mut app, "D")), vec![]);
         // The bottom line shows the question, which the next key answers.
         assert_eq!(app.mode_label(None), "CONFIRM");
-        assert_eq!(app.confirmation(), Some("Delete this message? (y/n)"));
+        assert_eq!(
+            app.confirmation().as_deref(),
+            Some("Delete this message? (y/n)")
+        );
         assert_eq!(app.secret_prompt(), None);
         assert_eq!(
             keys(&mut app, "y"),
