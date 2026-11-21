@@ -34,6 +34,8 @@ const QUOTE: &str = "│ ";
 const CODE_BLOCK: Style = DIM;
 /// Columns between tab stops.
 const TAB_WIDTH: usize = 4;
+/// The newer-messages hint shows counts above this as `99+`.
+pub(crate) const MAX_SHOWN_NEWER: usize = 99;
 
 /// A checked `ui.time_format`, the `strftime`-style format of the item
 /// headers' times.
@@ -150,6 +152,21 @@ impl TimelinePane {
         self.anchor = render.anchor(&window, cursor);
         window.visible(render.pane_rows())
     }
+}
+
+/// The newer-messages hint's count (design, "Timeline"): the items after
+/// the entry at `last`, the last with a row on the pane (as
+/// `TimelinePane::draw` returns it). Messages of every content kind count,
+/// local echoes too; date dividers, the read marker and hidden entries do
+/// not. Counting stops one past `MAX_SHOWN_NEWER`, so a long timeline costs
+/// no more than a short one.
+pub(crate) fn newer_items(entries: &[TimelineEntry], last: usize) -> usize {
+    entries
+        .iter()
+        .skip(last + 1)
+        .filter(|entry| matches!(entry, TimelineEntry::Item(_)))
+        .take(MAX_SHOWN_NEWER + 1)
+        .count()
 }
 
 /// Consecutive entries and their rows, placed on the pane's rows.
@@ -942,6 +959,7 @@ fn expand_tabs(pieces: &mut [Piece<'_>]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::view::RoomListLayout;
     use crate::view::tests::{self as view, Screen, app, press};
     use mxt_core::ids::{EventId, RoomId, TxnId, UserId};
     use mxt_core::msg::Msg;
@@ -1332,8 +1350,12 @@ mod tests {
     /// The room `!a` open with `entries` and drawn once; the cursor follows.
     /// The pane has 8 rows, four one-line messages.
     fn open(entries: Vec<TimelineEntry>) -> (App, Screen) {
+        open_on(Screen::new(), entries)
+    }
+
+    /// `open` on `screen`.
+    fn open_on(mut screen: Screen, entries: Vec<TimelineEntry>) -> (App, Screen) {
         let mut app = app();
-        let mut screen = Screen::new();
         press(&mut app, "<CR>");
         app.update(Msg::Timeline {
             room: RoomId::new(ROOM),
@@ -1425,6 +1447,88 @@ mod tests {
         assert!(!app.timeline_follows());
         let (last, newest) = last_visible(&app, &mut screen);
         assert_eq!(last, newest);
+    }
+
+    /// After `open` with nine messages, the cursor one message up and a
+    /// burst of `count` messages: the pane shows the cursor's message at its
+    /// top and the three after it, so `count - 2` are below the pane.
+    fn burst(app: &mut App, screen: &mut Screen, count: u32) {
+        repeat(app, screen, "k", 1);
+        arrive(app, (10..10 + count).map(view::message));
+        let newest = 8 + usize::try_from(count).unwrap();
+        assert_eq!(last_visible(app, screen), (10, newest));
+    }
+
+    #[test]
+    fn the_composer_rule_counts_the_messages_below_the_pane_until_it_shows_the_newest() {
+        let (mut app, mut screen) = open((1..10).map(view::message).collect());
+        burst(&mut app, &mut screen, 5);
+        let rule = screen.composer_rule();
+        assert!(rule.ends_with("── ↓ 3 newer ─"), "{rule:?}");
+        // The view stays put while the cursor moves inside it.
+        repeat(&mut app, &mut screen, "j", 2);
+        let rule = screen.composer_rule();
+        assert!(rule.ends_with("── ↓ 3 newer ─"), "{rule:?}");
+        repeat(&mut app, &mut screen, "j", 1);
+        assert!(!app.timeline_follows());
+        let (last, newest) = last_visible(&app, &mut screen);
+        assert_eq!(last, newest);
+        let rule = screen.composer_rule();
+        assert!(!rule.contains('↓'), "{rule:?}");
+    }
+
+    #[test]
+    fn hidden_entries_and_date_dividers_below_the_pane_give_no_hint() {
+        let (mut app, mut screen) = open((1..10).map(view::message).collect());
+        repeat(&mut app, &mut screen, "k", 1);
+        let divider = TimelineEntry::DateDivider(Timestamp::from_millis(86_400_000));
+        arrive(
+            &mut app,
+            [
+                view::message(10),
+                view::message(11),
+                TimelineEntry::Hidden,
+                divider,
+            ],
+        );
+        // The divider is below the pane.
+        assert_eq!(last_visible(&app, &mut screen), (10, 12));
+        let rule = screen.composer_rule();
+        assert!(!rule.contains('↓'), "{rule:?}");
+    }
+
+    #[test]
+    fn more_than_99_newer_messages_read_99_plus() {
+        let (mut app, mut screen) = open((1..10).map(view::message).collect());
+        burst(&mut app, &mut screen, 101);
+        let rule = screen.composer_rule();
+        assert!(rule.ends_with("── ↓ 99 newer ─"), "{rule:?}");
+        // 150 below the pane.
+        arrive(&mut app, (111..162).map(view::message));
+        assert_eq!(last_visible(&app, &mut screen), (10, 160));
+        let rule = screen.composer_rule();
+        assert!(rule.ends_with("── ↓ 99+ newer ─"), "{rule:?}");
+    }
+
+    #[test]
+    fn a_narrow_rule_keeps_the_draft_label_and_shortens_or_leaves_out_the_hint() {
+        // `─ Reply to Alice ` takes 17 columns, ` ↓ 3 newer ─` 12 and
+        // ` ↓ 3 ─` 6, and one `─` at least goes between.
+        for (width, expected) in [
+            (30, "─ Reply to Alice ─ ↓ 3 newer ─"),
+            (29, "─ Reply to Alice ────── ↓ 3 ─"),
+            (24, "─ Reply to Alice ─ ↓ 3 ─"),
+            (23, "─ Reply to Alice ──────"),
+        ] {
+            let screen = Screen::sized(width, RoomListLayout::default());
+            let (mut app, mut screen) = open_on(screen, (1..10).map(view::message).collect());
+            // Without the room list the rule takes the terminal's width.
+            press(&mut app, "<Space>e");
+            burst(&mut app, &mut screen, 5);
+            press(&mut app, "r");
+            screen.draw(&app, None);
+            assert_eq!(screen.composer_rule(), expected, "{width}");
+        }
     }
 
     /// The newest message so tall (a long paste, say) that it and the one

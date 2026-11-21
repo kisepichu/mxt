@@ -38,6 +38,12 @@ arrive) and `(unsupported: …)`.
 A message taller than the pane ends with `[+N lines]`; `<CR>` shows it in
 full. Date dividers and a `new messages` line, where you stopped reading,
 come between messages.
+When newer messages are below the pane, for example after a burst arrived
+while the cursor was on an older message, the composer's top rule ends with
+`↓ N newer`. `N` counts the messages below the pane, yours and those still
+sending too, but not date dividers or the `new messages` line; above 99 it
+reads `99+`. On a narrow rule it shortens to `↓ N` or is left out. It goes
+once the pane shows the newest message, as moving down to it does.
 
 ## Modes
 
