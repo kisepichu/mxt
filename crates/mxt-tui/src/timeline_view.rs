@@ -158,8 +158,8 @@ impl TimelinePane {
 /// the entry at `last`, the last with a row on the pane (as
 /// `TimelinePane::draw` returns it). Messages of every content kind count,
 /// local echoes too; date dividers, the read marker and hidden entries do
-/// not. Counting stops one past `MAX_SHOWN_NEWER`, so a long timeline costs
-/// no more than a short one.
+/// not. Counting stops at the 100th item after `last` (one past
+/// `MAX_SHOWN_NEWER`).
 pub(crate) fn newer_items(entries: &[TimelineEntry], last: usize) -> usize {
     entries
         .iter()
@@ -1478,7 +1478,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_entries_and_date_dividers_below_the_pane_give_no_hint() {
+    fn hidden_entries_date_dividers_and_the_read_marker_below_the_pane_give_no_hint() {
         let (mut app, mut screen) = open((1..10).map(view::message).collect());
         repeat(&mut app, &mut screen, "k", 1);
         let divider = TimelineEntry::DateDivider(Timestamp::from_millis(86_400_000));
@@ -1489,10 +1489,11 @@ mod tests {
                 view::message(11),
                 TimelineEntry::Hidden,
                 divider,
+                TimelineEntry::ReadMarker,
             ],
         );
-        // The divider is below the pane.
-        assert_eq!(last_visible(&app, &mut screen), (10, 12));
+        // The divider and the read marker are below the pane.
+        assert_eq!(last_visible(&app, &mut screen), (10, 13));
         let rule = screen.composer_rule();
         assert!(!rule.contains('↓'), "{rule:?}");
     }
