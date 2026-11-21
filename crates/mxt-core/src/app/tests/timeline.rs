@@ -78,7 +78,7 @@ fn cursor_body(app: &App) -> String {
 fn paginate(room: &str) -> Effect {
     Effect::Matrix(MatrixEffect::PaginateBackwards(id(room)))
 }
-fn receipt(room: &str, n: u32) -> Effect {
+pub(super) fn receipt(room: &str, n: u32) -> Effect {
     Effect::Matrix(MatrixEffect::SendReceipt {
         room: id(room),
         event: event(n),

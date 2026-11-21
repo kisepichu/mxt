@@ -228,8 +228,9 @@ The main types in `mxt-core`:
 - `RoomSummary`: id, `RoomName { network: Option<String>, room: String }`,
   kind (direct message or group), `UnreadCounts`, `NotificationMode`
   (default, mentions and keywords only, mute), time of the latest activity,
-  and the time of the user's own latest read receipt (`last_read`, for the
-  `read` sort key; see "Room list").
+  the time of the user's own latest read receipt (`last_read`, for the
+  `read` sort key; see "Room list"), and the event the SDK counts the
+  unread counts after (`counted_after`; see "Matrix adapter").
   Spaces are not room summaries; their names only feed `RoomName.network`.
 - `UnreadCounts { messages, notifications, mentions, marked }`. `messages`
   counts unread messages even in muted rooms. `notifications` counts unread
@@ -334,11 +335,13 @@ covered by unit tests.
   `Effect::Matrix(PaginateBackwards)` for the shown timeline (the main one
   or the open thread's) when its cursor comes within 10 items of the oldest
   loaded item, with at most one request in flight per timeline.
-- Room summaries come from the SDK room info: display name,
-  `num_unread_messages`, `num_unread_notifications`, `num_unread_mentions`,
-  `is_marked_unread`, the user-defined notification mode and the latest event
-  time, and from the state store the time of the user's own latest read
-  receipt (see "Room list"). The core filters and sorts them itself, so the
+- Room summaries come from the SDK room info: display name, the counts of
+  `Room::read_receipts()` (`num_unread`, `num_notifications`,
+  `num_mentions`) with the event they count after (`latest_active`), read
+  once because the event cache replaces them together, `is_marked_unread`,
+  the user-defined notification mode and the latest event time, and from
+  the state store the time of the user's own latest read receipt (see
+  "Room list"). The core filters and sorts them itself, so the
   meaning of every filter and sort key is defined in one place.
 - Bridge state: classic sync delivers each room's full state (members are
   lazy-loaded), so `m.bridge` and `uk.half-shot.bridge` are read from the
@@ -450,8 +453,37 @@ covered by unit tests.
   runs `room.mark_read`, it sets that room's `UnreadCounts` to zero
   immediately, and the room moves in the room list when the sort keys
   depend on the counts. The next SDK update overwrites it, with the replies
-  in threads after the receipt counted again. This makes action sequences
-  such as `["room.mark_read", <open the next unread room>]` deterministic.
+  in threads after the receipt counted again, unless it is an update for
+  the open room that still counts what the room's receipt covers (next
+  item). This makes action sequences such as `["room.mark_read", <open
+  the next unread room>]` deterministic.
+- Counts from before the open room's receipt: the SDK counts after the
+  receipts it has, so until the next sync brings mxt's receipt back, its
+  counts include the events up to that receipt. matrix-sdk 0.19.1 updates
+  a room's counts before it sends the timeline the same events
+  (`event_cache/caches/room/mod.rs:448-467`, the counts saved at
+  `caches/room/state.rs:663-672`), and the room list reads them on a task
+  of its own, so the update with a new message's count can reach the core
+  after the message's diff and its receipt. The receipt goes out once per
+  event, so nothing would clear the room again, and the open room would
+  show the badge, and sit among the unread rooms under `unread` or
+  `mentions`, until the next sync. So while the last receipt the core
+  requested for the open room is on the newest remote event of its main
+  timeline, and an update's `counted_after` is not that event, the core
+  sets the update's counts to zero and holds them back. It gives them to
+  the room when a timeline diff brings a remote event after the receipt
+  and no receipt goes out for it. A message after the receipt therefore
+  counts once its diff arrives, and an event the main timeline does not
+  show (a reply in a thread, a stable poll, a poll's end, an unknown
+  `msgtype`) once the SDK counts after the receipt, after the next sync.
+  Two cases keep such an event hidden until a newer remote event arrives
+  or, once the room is closed, until the room's next update: a receipt
+  request that failed, and a newer receipt from another device on an
+  event the main timeline does not show. When a thread sends an
+  unthreaded receipt (see "Threads"), `counted_after` is compared with the
+  event of the latest unthreaded receipt the core requested in the room.
+  Counts given back can still count events up to the receipt until the
+  next sync, as without holding them back.
 - Room keys are shared with the SDK's default recipient strategy
   (`CollectStrategy::AllDevices`), which does not refuse to send when another
   user's identity changes.
@@ -2364,7 +2396,10 @@ direct message lookup logs at `info` which step found a room (see
   - `Action::from_spec` rejecting unknown actions, wrong arguments and
     `pick` together with `query`
   - room filtering, ordering, `pick = next` wrapping around, optimistic
-    clearing before a following action, and the `room.mark_read` target
+    clearing before a following action, the `room.mark_read` target, and
+    the open room's counts from before its receipt held back, given back
+    with the diff of a newer message, and passed on once the SDK counts
+    after the receipt
   - badge precedence and the network name order, including direct messages
   - `OwnEvent` construction
   - `render_mentions`: the plain body is unchanged, mentions whose text was
@@ -2448,7 +2483,9 @@ direct message lookup logs at `info` which step found a room (see
   request or not), and `FindThread` on an event in a thread, on one
   outside threads and on one the event cache does not have; and the room
   list's read time from the store, with receipts of both types,
-  unthreaded and `main`, and threaded ones and other users' left out.
+  unthreaded and `main`, and threaded ones and other users' left out,
+  and the room's counts with the event they count after, from the event
+  cache.
 - `mxt-tui`: unit tests, for example of key conversion, the editor keys
   `mxt-tui` handles itself, wrapping and the cursor by grapheme cluster, the
   composers' reports to the core, and the layout; some assert rendered rows

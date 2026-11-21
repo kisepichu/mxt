@@ -93,10 +93,6 @@ impl RoomSort {
         RoomSort { keys: vec![key] }
     }
 
-    pub fn keys(&self) -> &[SortKey] {
-        &self.keys
-    }
-
     /// A total order: room IDs are unique and break every tie.
     fn compare(&self, a: &RoomSummary, b: &RoomSummary) -> Ordering {
         self.keys
@@ -342,6 +338,7 @@ mod tests {
             mode: NotificationMode::Default,
             latest_activity: at.map(Timestamp::from_millis),
             last_read: None,
+            counted_after: None,
         }
     }
 
@@ -629,11 +626,9 @@ mod tests {
             RoomSort::new(vec![Unread, Read, Unread]),
             Err(RoomSortError::Repeated(Unread))
         );
-        assert_eq!(
-            RoomSort::new(vec![Mentions, Read]).unwrap().keys(),
-            [Mentions, Read]
-        );
-        assert_eq!(RoomSort::default().keys(), [SortKey::Recent]);
+        assert_eq!(RoomSort::new(vec![Mentions]), Ok(RoomSort::one(Mentions)));
+        assert!(RoomSort::new(vec![Mentions, Read]).is_ok());
+        assert_eq!(RoomSort::default(), RoomSort::one(SortKey::Recent));
     }
 
     #[test]

@@ -220,7 +220,7 @@ network = "below"
 | `"mentions"` | rooms with unread mentions of you: whether a room has any, not how many |
 | `"unread"` | rooms with unread messages, the rooms that `filter = "unread"` takes: any badge |
 | `"recent"` | the latest activity, newest first; rooms without any last |
-| `"read"` | the rooms you read most recently, by your own latest read receipt in the room, sent from any device; rooms you never read last |
+| `"read"` | the rooms you read most recently, by your own latest read receipt in the room outside threads, sent from any device; rooms you never read last |
 | `"name"` | by the displayed name (`network / room`), ignoring case, which groups rooms by network |
 
 `sort = "mentions, unread, read"` lists the rooms with unread mentions

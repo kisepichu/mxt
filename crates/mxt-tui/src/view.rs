@@ -836,6 +836,7 @@ pub(crate) mod tests {
                 mode: NotificationMode::Default,
                 latest_activity: Some(Timestamp::from_millis(at)),
                 last_read: None,
+                counted_after: None,
             }));
         }
         app
@@ -1169,6 +1170,7 @@ pub(crate) mod tests {
             mode,
             latest_activity: None,
             last_read: None,
+            counted_after: None,
         }
     }
 

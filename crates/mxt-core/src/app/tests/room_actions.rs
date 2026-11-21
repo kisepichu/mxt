@@ -1,4 +1,4 @@
-use super::timeline::{event, msg, status};
+use super::timeline::{event, msg, receipt, status};
 use super::*;
 use crate::room::Badge;
 use crate::rooms::{RoomFilter, RoomSort, SortKey};
@@ -289,4 +289,78 @@ fn optimistic_clearing_moves_the_open_room_with_the_cursor_and_u_follows() {
         no_timers(keys(&mut app, "]u")),
         vec![unsubscribe(A), subscribe(D)]
     );
+}
+
+fn timeline_diff(app: &mut App, room: &str, diff: TimelineDiff) -> Vec<Effect> {
+    app.update(Msg::Timeline {
+        room: id(room),
+        diffs: vec![diff],
+    })
+}
+/// The SDK counts `summary`'s unread messages after message `n`.
+fn counting_after(summary: RoomSummary, n: u32) -> RoomSummary {
+    RoomSummary {
+        counted_after: Some(event(n)),
+        ..summary
+    }
+}
+/// The rooms of `unread_first` with `!b`, which is read, open and read to
+/// message 2: the core requested the receipt on it, and the SDK still
+/// counts after message 1.
+fn b_read_to_message_2() -> App {
+    let mut app = unread_first(vec![]);
+    keys(&mut app, "G<CR>");
+    timeline_diff(&mut app, B, TimelineDiff::Reset(vec![msg(1), msg(2)]));
+    let viewport = Msg::Viewport {
+        pane: Pane::Timeline,
+        first: 0,
+        last: 1,
+    };
+    assert_eq!(app.update(viewport), vec![receipt(B, 2)]);
+    assert_eq!(order(&app), [A, C, B]);
+    app
+}
+
+#[test]
+fn counts_from_before_the_open_rooms_receipt_leave_it_in_place() {
+    let mut app = b_read_to_message_2();
+    // Message 2's count reaches the core after its diff and the receipt.
+    app.update(Msg::RoomUpserted(counting_after(room(B, 20, 1), 1)));
+    assert_eq!(order(&app), [A, C, B]);
+    assert_eq!(
+        app.rooms().get(&id(B)).unwrap().unread,
+        UnreadCounts::default()
+    );
+    assert_eq!((cursor_id(&app), app.room_cursor()), (B, Some(2)));
+    // The next sync brings the receipt back.
+    app.update(Msg::RoomUpserted(counting_after(room(B, 20, 0), 2)));
+    assert_eq!(order(&app), [A, C, B]);
+    // The SDK counts an event after the receipt that the timeline does not
+    // show, such as a poll.
+    app.update(Msg::RoomUpserted(counting_after(room(B, 20, 1), 2)));
+    assert_eq!(order(&app), [A, B, C]);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (B, Some(1)));
+}
+
+#[test]
+fn a_message_after_the_open_rooms_receipt_counts() {
+    // Its count before its diff, which the viewport does not show yet: the
+    // count comes back with the diff.
+    let mut app = b_read_to_message_2();
+    app.update(Msg::RoomUpserted(counting_after(room(B, 30, 2), 1)));
+    assert_eq!(order(&app), [A, C, B]);
+    assert_eq!(
+        timeline_diff(&mut app, B, TimelineDiff::PushBack(msg(3))),
+        vec![]
+    );
+    assert_eq!(order(&app), [A, B, C]);
+    assert_eq!(app.rooms().get(&id(B)).unwrap().unread.messages, 2);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (B, Some(1)));
+
+    // Its count after its diff.
+    let mut app = b_read_to_message_2();
+    timeline_diff(&mut app, B, TimelineDiff::PushBack(msg(3)));
+    app.update(Msg::RoomUpserted(counting_after(room(B, 30, 2), 1)));
+    assert_eq!(order(&app), [A, B, C]);
+    assert_eq!(app.rooms().get(&id(B)).unwrap().unread.messages, 2);
 }

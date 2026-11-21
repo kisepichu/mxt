@@ -16,7 +16,7 @@ use matrix_sdk::{
     },
 };
 use mxt_core::{
-    ids::{RoomId, Timestamp},
+    ids::{EventId, RoomId, Timestamp},
     msg::Msg,
     room::{
         BridgeInfo, Invite, NotificationMode, RoomKind, RoomName, RoomSummary, UnreadCounts,
@@ -44,6 +44,8 @@ pub(crate) struct RoomFacts {
     /// target, or the one joined member besides the user and the bridge bot.
     pub dm_partner_name: Option<String>,
     pub unread: UnreadCounts,
+    /// The event the SDK counts `unread` after (`ReadReceipts::latest_active`).
+    pub counted_after: Option<EventId>,
     pub mode: NotificationMode,
     pub latest: Option<Timestamp>,
     /// The time of the user's own latest read receipt (see `last_read`).
@@ -83,6 +85,7 @@ pub(crate) fn summary(facts: &RoomFacts) -> RoomSummary {
         mode: facts.mode,
         latest_activity: facts.latest,
         last_read: facts.last_read,
+        counted_after: facts.counted_after.clone(),
     }
 }
 
@@ -473,17 +476,23 @@ async fn room_facts(
         None => (false, None),
     };
     let parents = parent_spaces(client, room).await?;
+    // The counts and the event they count after in one reading: the event
+    // cache replaces them together.
+    let receipts = room.read_receipts();
     let facts = RoomFacts {
         id: RoomId::new(room.room_id().as_str()),
         display_name: room.display_name().await?.to_string(),
         is_direct,
         dm_partner_name,
         unread: UnreadCounts {
-            messages: room.num_unread_messages(),
-            notifications: room.num_unread_notifications(),
-            mentions: room.num_unread_mentions(),
+            messages: receipts.num_unread,
+            notifications: receipts.num_notifications,
+            mentions: receipts.num_mentions,
             marked: room.is_marked_unread(),
         },
+        counted_after: receipts
+            .latest_active
+            .map(|receipt| EventId::new(receipt.event_id.as_str())),
         mode: notification_mode(settings, room.room_id()).await,
         latest: room
             .latest_event_timestamp()
@@ -715,6 +724,8 @@ async fn joined_space_name(client: &Client, space: &ruma::RoomId) -> Result<Opti
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use matrix_sdk::{
         ruma::{
             MilliSecondsSinceUnixEpoch, event_id, owned_device_id, owned_event_id, owned_room_id,
@@ -734,6 +745,7 @@ mod tests {
             is_direct: false,
             dm_partner_name: None,
             unread: UnreadCounts::default(),
+            counted_after: None,
             mode: NotificationMode::Default,
             latest: None,
             last_read: None,
@@ -943,6 +955,7 @@ mod tests {
         };
         let room = RoomFacts {
             unread,
+            counted_after: Some(EventId::new("$read:example.org")),
             mode: NotificationMode::Mute,
             latest: Some(Timestamp::from_millis(1_700_000_000_000)),
             last_read: Some(Timestamp::from_millis(1_600_000_000_000)),
@@ -951,6 +964,10 @@ mod tests {
         let summary = summary(&room);
         assert_eq!(summary.id, RoomId::new("!room:example.org"));
         assert_eq!(summary.unread, unread);
+        assert_eq!(
+            summary.counted_after,
+            Some(EventId::new("$read:example.org"))
+        );
         assert_eq!(summary.mode, NotificationMode::Mute);
         assert_eq!(
             summary.latest_activity,
@@ -962,6 +979,17 @@ mod tests {
         );
     }
 
+    /// The user's client of `server`, which knows no room yet.
+    async fn client_of(server: &MatrixMockServer, me: &ruma::UserId) -> Client {
+        server
+            .client_builder()
+            .logged_in_with_token("1234".to_owned(), me.to_owned(), owned_device_id!("DEVICE"))
+            // Plain HTTP; see the adapter's tests.
+            .on_builder(|builder| builder.disable_ssl_verification())
+            .build()
+            .await
+    }
+
     /// The user's latest `m.read` or `m.read.private` receipt, unthreaded or
     /// on the main timeline, from the store; not one in a thread, not
     /// another user's.
@@ -969,13 +997,7 @@ mod tests {
     async fn the_read_time_is_the_latest_of_the_users_receipts_outside_threads() {
         let server = MatrixMockServer::new().await;
         let me = user_id!("@alice:example.org");
-        let client = server
-            .client_builder()
-            .logged_in_with_token("1234".to_owned(), me.to_owned(), owned_device_id!("DEVICE"))
-            // Plain HTTP; see the adapter's tests.
-            .on_builder(|builder| builder.disable_ssl_verification())
-            .build()
-            .await;
+        let client = client_of(&server, me).await;
         let settings = client.notification_settings().await;
         let at = |millis: u32| Some(MilliSecondsSinceUnixEpoch(millis.into()));
         let receipts = EventFactory::new()
@@ -1014,10 +1036,75 @@ mod tests {
         let (facts, _) = room_facts(&client, &settings, &read).await.unwrap();
         assert_eq!(facts.last_read, Some(Timestamp::from_millis(2000)));
 
+        // The unthreaded `m.read`, which mxt sends by default and most
+        // clients send, as the latest.
+        let receipts = EventFactory::new()
+            .read_receipts()
+            .add_with_timestamp(
+                event_id!("$5:example.org"),
+                me,
+                ReceiptType::Read,
+                ReceiptThread::Unthreaded,
+                at(2000),
+            )
+            .add_with_timestamp(
+                event_id!("$6:example.org"),
+                me,
+                ReceiptType::ReadPrivate,
+                ReceiptThread::Main,
+                at(1000),
+            )
+            .into_event();
+        let public = JoinedRoomBuilder::new(room_id!("!public:example.org")).add_receipt(receipts);
+        let public = server.sync_room(&client, public).await;
+        let (facts, _) = room_facts(&client, &settings, &public).await.unwrap();
+        assert_eq!(facts.last_read, Some(Timestamp::from_millis(2000)));
+
         let never = JoinedRoomBuilder::new(room_id!("!never:example.org"));
         let never = server.sync_room(&client, never).await;
         let (facts, _) = room_facts(&client, &settings, &never).await.unwrap();
         assert_eq!(facts.last_read, None);
+    }
+
+    /// The SDK's counts come with the event it counts after: here the
+    /// user's own message, newer than their receipt.
+    #[tokio::test]
+    async fn the_counts_come_with_the_event_they_count_after() {
+        let server = MatrixMockServer::new().await;
+        let (me, bob) = (user_id!("@alice:example.org"), user_id!("@bob:example.org"));
+        let client = client_of(&server, me).await;
+        // As `SyncLoop::start` does: the event cache counts.
+        client.event_cache().subscribe().unwrap();
+        let settings = client.notification_settings().await;
+        let f = EventFactory::new();
+        let receipt = f
+            .read_receipts()
+            .add(
+                event_id!("$1:example.org"),
+                me,
+                ReceiptType::Read,
+                ReceiptThread::Unthreaded,
+            )
+            .into_event();
+        let message = |sender, id| f.text_msg("hello").sender(sender).event_id(id);
+        let joined = JoinedRoomBuilder::new(room_id!("!room:example.org"))
+            .add_timeline_event(message(bob, event_id!("$1:example.org")))
+            .add_timeline_event(message(me, event_id!("$2:example.org")))
+            .add_timeline_event(message(bob, event_id!("$3:example.org")))
+            .add_receipt(receipt);
+        let room = server.sync_room(&client, joined).await;
+        // The event cache counts in the background.
+        let counted = async {
+            while room.num_unread_messages() == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), counted)
+            .await
+            .unwrap();
+        let (facts, _) = room_facts(&client, &settings, &room).await.unwrap();
+        assert_eq!(facts.unread.messages, 1);
+        assert_eq!(facts.counted_after, Some(EventId::new("$2:example.org")));
     }
 
     #[test]

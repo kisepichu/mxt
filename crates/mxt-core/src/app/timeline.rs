@@ -6,6 +6,7 @@ use crate::effect::{Effect, MatrixEffect, UiEffect, ViewContent};
 use crate::ids::{EventId, RoomId};
 use crate::msg::Pane;
 use crate::rich::is_web_url;
+use crate::room::{RoomSummary, UnreadCounts};
 use crate::settings::ImagePreview;
 use crate::timeline::{
     ItemRef, MediaBytes, MessageContent, OwnEvent, SendState, TimelineDiff, TimelineEntry,
@@ -28,6 +29,9 @@ pub(super) struct Timeline {
     pagination: Pagination,
     /// The event of the last receipt requested.
     receipt: Option<EventId>,
+    /// The open room's counts from the SDK that the room list does not show
+    /// (see `App::hold_back_unread`).
+    held_unread: Option<UnreadCounts>,
 }
 
 /// An item and its index in the entries.
@@ -134,6 +138,26 @@ impl Timeline {
                 .is_some_and(|item| matches!(&item.id, ItemRef::Remote(id) if id == event))
         })
     }
+
+    /// The newest remote event: the event a receipt goes on.
+    fn newest_remote_event(&self) -> Option<&EventId> {
+        self.entries
+            .iter()
+            .rev()
+            .find_map(|entry| match &as_item(entry)?.id {
+                ItemRef::Remote(event) => Some(event),
+                ItemRef::Local(_) => None,
+            })
+    }
+
+    /// Whether the SDK's counts may still count events up to the receipt:
+    /// the last receipt requested is on the newest remote event, and the
+    /// SDK does not count after that event (`counted_after`) yet.
+    fn receipt_ahead_of(&self, counted_after: Option<&EventId>) -> bool {
+        self.receipt.as_ref().is_some_and(|receipt| {
+            counted_after != Some(receipt) && self.newest_remote_event() == Some(receipt)
+        })
+    }
 }
 
 impl App {
@@ -151,6 +175,41 @@ impl App {
         self.check_jump_wait(effects);
         self.check_pagination(effects);
         self.check_receipt(effects);
+        self.release_unread();
+    }
+
+    /// `Msg::RoomUpserted` for the open room (design, "Matrix adapter"):
+    /// while its receipt is ahead of the SDK's counts, those counts may
+    /// count the events up to the receipt, which the user has read, so the
+    /// room keeps zero counts and the core holds the counts back. A count
+    /// for an event after the receipt comes back with the event's diff
+    /// (`release_unread`) or, when the timeline does not show the event,
+    /// with the first update that the SDK counts after the receipt.
+    pub(super) fn hold_back_unread(&mut self, summary: &mut RoomSummary) {
+        if self.open_room.as_ref() == Some(&summary.id) {
+            self.timeline.held_unread = self
+                .timeline
+                .receipt_ahead_of(summary.counted_after.as_ref())
+                .then(|| std::mem::take(&mut summary.unread));
+        }
+    }
+
+    /// Gives the open room the counts held back once the timeline has a
+    /// remote event after the receipt that no receipt went out for.
+    fn release_unread(&mut self) {
+        let Some(room) = self.open_room.as_ref().and_then(|id| self.rooms.get(id)) else {
+            return;
+        };
+        if self.timeline.receipt_ahead_of(room.counted_after.as_ref()) {
+            return;
+        }
+        if let Some(unread) = self.timeline.held_unread.take() {
+            let summary = RoomSummary {
+                unread,
+                ..room.clone()
+            };
+            self.upsert_room(summary);
+        }
     }
 
     /// `Msg::PaginationDone`. Pagination goes on while the cursor is still
@@ -270,21 +329,16 @@ impl App {
         if !self.terminal_focused {
             return;
         }
-        let entries = self.timeline.entries();
-        let Some(newest) = newest_item(entries) else {
+        let Some(newest) = newest_item(self.timeline.entries()) else {
             return;
         };
         if !(viewport.first..=viewport.last).contains(&newest) {
             return;
         }
-        let event = entries
-            .iter()
-            .rev()
-            .find_map(|entry| match &as_item(entry)?.id {
-                ItemRef::Remote(event) => Some(event),
-                ItemRef::Local(_) => None,
-            });
-        let Some(event) = event.filter(|&event| self.timeline.receipt.as_ref() != Some(event))
+        let Some(event) = self
+            .timeline
+            .newest_remote_event()
+            .filter(|&event| self.timeline.receipt.as_ref() != Some(event))
         else {
             return;
         };

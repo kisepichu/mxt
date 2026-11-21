@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use crate::ids::{RoomId, Timestamp};
+use crate::ids::{EventId, RoomId, Timestamp};
 
 /// Between the network name and the room name in a displayed name.
 const SEPARATOR: &str = " / ";
@@ -92,6 +92,12 @@ pub struct RoomSummary {
     /// device, for the `read` sort key (design, "Room list"); `None` when
     /// the user never read it.
     pub last_read: Option<Timestamp>,
+    /// The event the SDK counts `unread` after: the latest of the user's
+    /// receipts and own messages that it found among the room's events, from
+    /// the same reading as the counts; `None` when it found none. While it
+    /// is not the event of mxt's receipt in the open room, the counts may
+    /// still count events up to that receipt (design, "Matrix adapter").
+    pub counted_after: Option<EventId>,
 }
 
 /// A pending invite, for `:join`'s completion (design, "Joining rooms and
