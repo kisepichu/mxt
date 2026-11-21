@@ -206,7 +206,7 @@ impl App {
             resolver: Resolver::new(),
             key_context,
             editor: None,
-            rooms: RoomList::new(settings.room_sort),
+            rooms: RoomList::new(settings.room_sort.clone()),
             room_cursor: None,
             open_room: None,
             timeline: Timeline::default(),

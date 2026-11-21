@@ -51,7 +51,7 @@ impl Default for Settings {
     fn default() -> Settings {
         Settings {
             timeoutlen_ms: 1000,
-            room_sort: RoomSort::Recent,
+            room_sort: RoomSort::default(),
             room_list_visible: true,
             image_preview: ImagePreview::Auto,
             read_receipts: ReceiptKind::Public,

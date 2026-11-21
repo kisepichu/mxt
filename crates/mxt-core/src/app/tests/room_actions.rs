@@ -1,8 +1,10 @@
-use super::timeline::status;
+use super::timeline::{event, msg, status};
 use super::*;
 use crate::room::Badge;
-use crate::rooms::RoomFilter;
+use crate::rooms::{RoomFilter, RoomSort, SortKey};
+use crate::timeline::TimelineDiff;
 
+const D: &str = "!d:example.org";
 const C: &str = "!c:example.org";
 const B: &str = "!b:example.org";
 const A: &str = "!a:example.org";
@@ -49,6 +51,22 @@ fn set_mute(room: &str, muted: bool) -> Effect {
         room: id(room),
         muted,
     })
+}
+/// The rooms of `app()` under `sort = "unread"`: `!a` and `!c`, which are
+/// unread, by name, then `!b`.
+fn unread_first(user: Vec<(TableId, KeySeq, Binding)>) -> App {
+    let settings = Settings {
+        room_sort: RoomSort::one(SortKey::Unread),
+        ..Settings::default()
+    };
+    app_in(settings, user)
+}
+fn order(app: &App) -> Vec<&str> {
+    app.rooms()
+        .rooms()
+        .iter()
+        .map(|room| room.id.as_str())
+        .collect()
 }
 
 #[test]
@@ -211,4 +229,134 @@ fn mute_without_a_room_reports_it() {
     assert_eq!(no_timers(keys(&mut app, ":mute<CR>")), vec![]);
     assert_eq!(app.status().unwrap().kind, StatusKind::Error);
     assert_eq!(status(&app), Some("No room"));
+}
+
+#[test]
+fn under_unread_the_cursor_stays_on_its_room_when_rooms_move() {
+    let mut app = unread_first(vec![]);
+    assert_eq!(order(&app), [A, C, B]);
+    keys(&mut app, "G"); // on !b
+    // A message in !b: the room under the cursor moves, the cursor along.
+    app.update(Msg::RoomUpserted(room(B, 20, 1)));
+    assert_eq!(order(&app), [A, B, C]);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (B, Some(1)));
+    // !a, read elsewhere, moves past the cursor's room.
+    app.update(Msg::RoomUpserted(room(A, 10, 0)));
+    assert_eq!(order(&app), [B, C, A]);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (B, Some(0)));
+}
+
+#[test]
+fn under_unread_the_open_room_sorts_as_read_until_another_room_opens() {
+    let mut app = unread_first(vec![]);
+    keys(&mut app, "G<CR>"); // open !b
+    // A message in !b, whose count may come after its receipt: !b stays
+    // among the read rooms, and its badge counts the message.
+    app.update(Msg::RoomUpserted(room(B, 40, 1)));
+    assert_eq!(order(&app), [A, C, B]);
+    assert_eq!(app.rooms().get(&id(B)).unwrap().unread.messages, 1);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (B, Some(2)));
+    // Opening !a: !b goes among the unread rooms by its counts, !a among
+    // the read ones, and the cursor along with !a.
+    assert_eq!(
+        no_timers(keys(&mut app, "]u")),
+        vec![unsubscribe(B), subscribe(A)]
+    );
+    assert_eq!(order(&app), [B, C, A]);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (A, Some(2)));
+    // With no room open, every room sorts by its counts.
+    app.update(Msg::RoomRemoved(id(A)));
+    app.update(Msg::RoomUpserted(room(A, 10, 1)));
+    assert_eq!(order(&app), [A, B, C]);
+}
+
+#[test]
+fn under_mentions_the_open_room_sorts_as_read_until_another_room_opens() {
+    let settings = Settings {
+        room_sort: RoomSort::one(SortKey::Mentions),
+        ..Settings::default()
+    };
+    let mut app = app_in(settings, vec![]);
+    assert_eq!(order(&app), [A, B, C]);
+    keys(&mut app, "G<CR>"); // open !c
+    let mentioned = RoomSummary {
+        unread: UnreadCounts {
+            messages: 3,
+            notifications: 1,
+            mentions: 1,
+            marked: false,
+        },
+        ..room(C, 40, 3)
+    };
+    app.update(Msg::RoomUpserted(mentioned));
+    assert_eq!(order(&app), [A, B, C]);
+    assert_eq!(app.rooms().get(&id(C)).unwrap().unread.mentions, 1);
+    assert_eq!(
+        no_timers(keys(&mut app, "]u")),
+        vec![unsubscribe(C), subscribe(A)]
+    );
+    assert_eq!(order(&app), [C, A, B]);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (A, Some(1)));
+}
+
+#[test]
+fn under_recent_the_open_room_sorts_as_any_other() {
+    let mut app = app();
+    keys(&mut app, "j<CR>"); // open !b
+    app.update(Msg::RoomUpserted(room(B, 40, 1)));
+    assert_eq!(order(&app), [B, C, A]);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (B, Some(0)));
+    assert_eq!(
+        no_timers(keys(&mut app, "]u")),
+        vec![unsubscribe(B), subscribe(C)]
+    );
+    assert_eq!(order(&app), [B, C, A]);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (C, Some(1)));
+}
+
+#[test]
+fn the_open_room_moves_among_the_read_rooms_with_the_cursor_and_u_follows() {
+    let mark = Binding::single(Action::RoomMarkRead);
+    let mut app = unread_first(vec![(TableId::Normal, seq("<Space>r"), mark)]);
+    app.update(Msg::RoomUpserted(room(D, 40, 1)));
+    assert_eq!(order(&app), [A, C, D, B]);
+    keys(&mut app, "j<CR>"); // open !c, which sorts as read
+    assert_eq!(order(&app), [A, D, B, C]);
+    // Optimistic clearing leaves it there.
+    assert_eq!(
+        no_timers(keys(&mut app, "<Space>r")),
+        vec![Effect::Matrix(MatrixEffect::MarkRoomRead(id(C)))]
+    );
+    assert_eq!(order(&app), [A, D, B, C]);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (C, Some(3)));
+    // The next unread room after !c's new place, wrapping around; from its
+    // old place it would have been !d.
+    assert_eq!(
+        no_timers(keys(&mut app, "]u")),
+        vec![unsubscribe(C), subscribe(A)]
+    );
+
+    // !a sorts as read once open too, and its receipt clears it.
+    app.update(Msg::Timeline {
+        room: id(A),
+        diffs: vec![TimelineDiff::Reset(vec![msg(1)])],
+    });
+    let viewport = Msg::Viewport {
+        pane: Pane::Timeline,
+        first: 0,
+        last: 0,
+    };
+    assert_eq!(
+        app.update(viewport),
+        vec![Effect::Matrix(MatrixEffect::SendReceipt {
+            room: id(A),
+            event: event(1),
+        })]
+    );
+    assert_eq!(order(&app), [D, A, B, C]);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (A, Some(1)));
+    assert_eq!(
+        no_timers(keys(&mut app, "]u")),
+        vec![unsubscribe(A), subscribe(D)]
+    );
 }

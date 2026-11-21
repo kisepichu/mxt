@@ -448,10 +448,26 @@ covered by unit tests.
   main timeline's, or the one a thread sends when the main timeline is
   read; see "Threads") or
   runs `room.mark_read`, it sets that room's `UnreadCounts` to zero
-  immediately, and the room moves in the room list when the sort keys
-  depend on the counts. The next SDK update overwrites it, with the replies
+  immediately, and a room other than the open one moves in the room list
+  when the sort keys depend on the counts (the open room already sorts as
+  read; next item). The next SDK update overwrites it, with the replies
   in threads after the receipt counted again. This makes action sequences
   such as `["room.mark_read", <open the next unread room>]` deterministic.
+- The open room sorts as read: under the `mentions` and `unread` sort keys
+  the core places the open room as if it had no unread messages and no
+  mentions, so it never moves into or within those groups while it is
+  open. Once another room is opened, or no room is open, it sorts by its
+  counts again. Its badge and the `filter`s use its real counts, and
+  `recent`, `read` and `name` do not change. The reason: the SDK's counts
+  can arrive after the receipt went out (matrix-sdk 0.19.1 saves a room's
+  counts before it sends the timeline the same events, and the room list
+  reads them on a task of its own), and until the next sync brings the
+  receipt back they still count the events up to it, so the room being
+  read would sit among the unread rooms. The rule relies on no SDK
+  ordering. The badge can still show such a count until the receipt's
+  echo. `RoomList` knows the open room (`RoomList::open`): opening a room
+  places it and the previously open room again, and the room list's
+  cursor goes to the opened room.
 - Room keys are shared with the SDK's default recipient strategy
   (`CollectStrategy::AllDevices`), which does not refuse to send when another
   user's identity changes.
@@ -789,9 +805,11 @@ carry the new value; the user documentation says so.
 - Where the keys' values come from, without a request per room:
   `mentions` and `unread` read the room's `UnreadCounts`, the counts the
   badges and `filter = "unread"` use, so optimistic clearing (see "Matrix
-  adapter") moves a room at once. `recent` reads the latest event time, as
-  before. `read` reads `RoomSummary::last_read`: `mxt-matrix` reads, when
-  it reads the room's facts, the user's own receipts from the state store
+  adapter") moves a room at once; they take the open room as read (see
+  "The open room sorts as read" there). `recent` reads the latest event
+  time, as before. `read` reads `RoomSummary::last_read`: `mxt-matrix`
+  reads, when it reads the room's facts, the user's own receipts from the
+  state store
   (`Room::load_user_receipt`) for the types `m.read` and `m.read.private`
   and the threads `Unthreaded` (no `thread_id`) and `Main`, and takes the
   latest `ts` among the four; receipts without `ts` and a store without
@@ -808,7 +826,8 @@ carry the new value; the user documentation says so.
   written (`SortKey::ALL` lists them, as `RoomFilter::ALL` does for
   `filter`; the configuration loader in `mxt` parses the list with them).
   `RoomList` keeps its rooms in that order, placing a room again when an
-  update replaces it and when optimistic clearing changes its counts.
+  update replaces it, when optimistic clearing changes its counts, and
+  when it is opened or stops being the open room.
 - The room list's cursor stays on its room when the order changes under
   it: a room that moves takes the cursor along when the cursor is on it,
   and otherwise the cursor's index shifts with the rooms that move past
@@ -826,8 +845,9 @@ carry the new value; the user documentation says so.
   `_insert_linearized_receipt_txn` in
   `synapse/storage/databases/main/receipts.py`), so no new `ts` comes back
   for a room already read, here or on another device. With `unread` or
-  `mentions` the room moves among the rooms without unread messages at
-  once (optimistic clearing). The user documentation says so.
+  `mentions` the room moves among the rooms without unread messages when
+  it is opened, since the open room sorts as read. The user documentation
+  says so.
 
 The list is `ui.room_list.width` columns wide, its border included (30 by
 default). Terminals narrower than 90 columns give it a third of their width
@@ -2395,8 +2415,10 @@ direct message lookup logs at `info` which step found a room (see
   - the room list's sort keys: the order for each key and for combinations,
     presence (not the count) for `mentions`, rooms without activity or a
     receipt last, the remaining ties by name and then by room ID, the cursor
-    staying on its room when an update or optimistic clearing moves rooms,
-    and `]u` following the order
+    staying on its room when an update, optimistic clearing or opening a
+    room moves rooms, the open room sorting as read under `mentions` and
+    `unread` (not under `recent`) until another room is opened, and `]u`
+    following the order
   - threads: opening a thread on a root, on a message without replies and
     from within a thread, the refusals, closing with the cursor on the root
     (also when the root has to load), the main timeline's diffs applied

@@ -134,6 +134,17 @@ impl Timeline {
                 .is_some_and(|item| matches!(&item.id, ItemRef::Remote(id) if id == event))
         })
     }
+
+    /// The newest remote event: the event a receipt goes on.
+    fn newest_remote_event(&self) -> Option<&EventId> {
+        self.entries
+            .iter()
+            .rev()
+            .find_map(|entry| match &as_item(entry)?.id {
+                ItemRef::Remote(event) => Some(event),
+                ItemRef::Local(_) => None,
+            })
+    }
 }
 
 impl App {
@@ -270,27 +281,22 @@ impl App {
         if !self.terminal_focused {
             return;
         }
-        let entries = self.timeline.entries();
-        let Some(newest) = newest_item(entries) else {
+        let Some(newest) = newest_item(self.timeline.entries()) else {
             return;
         };
         if !(viewport.first..=viewport.last).contains(&newest) {
             return;
         }
-        let event = entries
-            .iter()
-            .rev()
-            .find_map(|entry| match &as_item(entry)?.id {
-                ItemRef::Remote(event) => Some(event),
-                ItemRef::Local(_) => None,
-            });
-        let Some(event) = event.filter(|&event| self.timeline.receipt.as_ref() != Some(event))
+        let Some(event) = self
+            .timeline
+            .newest_remote_event()
+            .filter(|&event| self.timeline.receipt.as_ref() != Some(event))
         else {
             return;
         };
         let (room, event) = (room.clone(), event.clone());
         self.timeline.receipt = Some(event.clone());
-        self.rooms.clear_unread(&room);
+        self.clear_room_unread(&room);
         effects.push(Effect::Matrix(MatrixEffect::SendReceipt { room, event }));
     }
 

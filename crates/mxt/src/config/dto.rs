@@ -9,7 +9,7 @@ use std::fmt;
 
 use mxt_core::action::ArgValue;
 use mxt_core::keymap::TableId;
-use mxt_core::{rooms, settings};
+use mxt_core::settings;
 use serde::Deserialize;
 use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 use toml::Spanned;
@@ -50,7 +50,8 @@ pub struct Ui {
 #[serde(default, deny_unknown_fields)]
 pub struct RoomList {
     pub visible: Option<bool>,
-    /// One of [`ROOM_SORTS`].
+    /// A comma-separated list of `SortKey::config_name()`s, which the loader
+    /// splits (design, "Layers").
     pub sort: Option<Spanned<String>>,
     /// Any integer, so every value outside the range gets the same message.
     pub width: Option<Spanned<i64>>,
@@ -58,12 +59,8 @@ pub struct RoomList {
     pub network: Option<Spanned<String>>,
 }
 
-/// The values of `ui.room_list.sort`. Settings with fixed values are strings,
-/// so the loader can ignore a value a newer version knows.
-pub const ROOM_SORTS: &[(&str, rooms::RoomSort)] = &[
-    ("recent", rooms::RoomSort::Recent),
-    ("name", rooms::RoomSort::Name),
-];
+// The values of the settings with fixed values. The settings are strings, so
+// the loader can ignore a value a newer version knows.
 
 /// The values of `ui.room_list.network`.
 pub const NETWORK_PLACEMENTS: &[(&str, mxt_tui::NetworkPlacement)] = &[

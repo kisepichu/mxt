@@ -20,6 +20,7 @@ use mxt_core::action::{Action, ActionError, Binding};
 use mxt_core::ids::UserId;
 use mxt_core::keymap::{Keymap, TableId};
 use mxt_core::keys::{Key, KeyCode, KeyParseError, KeySeq, Modifiers};
+use mxt_core::rooms::{RoomSort, RoomSortError, SortKey};
 use mxt_core::settings::{ReceiptKind, Settings};
 use mxt_tui::{RoomListLayout, RoomListWidth, TimeFormat};
 use serde::Deserialize as _;
@@ -166,14 +167,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Config, ConfigError
     };
     let settings = Settings {
         timeoutlen_ms: ui.timeoutlen.unwrap_or(defaults.timeoutlen_ms),
-        room_sort: choice(
-            &source,
-            "ui.room_list.sort",
-            ui.room_list.sort,
-            dto::ROOM_SORTS,
-            &mut warnings,
-        )
-        .unwrap_or(defaults.room_sort),
+        room_sort: room_sort(&source, ui.room_list.sort, &mut warnings),
         room_list_visible: ui.room_list.visible.unwrap_or(defaults.room_list_visible),
         image_preview: choice(
             &source,
@@ -293,11 +287,8 @@ fn choice<T: Copy>(
     let value = value?;
     let known = named(names, value.get_ref());
     if known.is_none() {
-        let mut message = format!("{setting}: unknown value {:?}", value.get_ref());
-        for (index, (name, _)) in names.iter().enumerate() {
-            let separator = if index == 0 { "; expected one of" } else { "," };
-            _ = write!(message, "{separator} {name:?}");
-        }
+        let names = names.iter().map(|&(name, _)| name);
+        let message = unknown_value(setting, value.get_ref(), names);
         warnings.push(source.ignored(&value, message));
     }
     known
@@ -308,6 +299,76 @@ fn named<T: Copy>(names: &[(&str, T)], value: &str) -> Option<T> {
         .iter()
         .find(|(name, _)| *name == value)
         .map(|&(_, known)| known)
+}
+
+/// `<setting>: unknown value "<value>"; expected one of "<name>", …`.
+fn unknown_value<'a>(
+    setting: &str,
+    value: &str,
+    names: impl IntoIterator<Item = &'a str>,
+) -> String {
+    let mut message = format!("{setting}: unknown value {value:?}");
+    for (index, name) in names.into_iter().enumerate() {
+        let separator = if index == 0 { "; expected one of" } else { "," };
+        _ = write!(message, "{separator} {name:?}");
+    }
+    message
+}
+
+/// `ui.room_list.sort`, a comma-separated list of sort keys, each trimmed
+/// and compared as written (design, "Layers"). The default applies when it
+/// is not set and, with a warning, when the list names no key, has an
+/// empty key or names a key twice. An unknown key is skipped with a
+/// warning; when every key is unknown, the default applies. Every warning
+/// is at the value: a key's own column would be wrong in a string with
+/// escapes.
+fn room_sort(
+    source: &Source<'_>,
+    value: Option<Spanned<String>>,
+    warnings: &mut Vec<ConfigWarning>,
+) -> RoomSort {
+    const SETTING: &str = "ui.room_list.sort";
+    let Some(value) = value else {
+        return RoomSort::default();
+    };
+    let keys: Vec<&str> = value.get_ref().split(',').map(str::trim).collect();
+    let unusable = if keys.iter().all(|key| key.is_empty()) {
+        Some(format!("{SETTING}: names no sort key"))
+    } else if keys.iter().any(|key| key.is_empty()) {
+        Some(format!(
+            "{SETTING}: empty sort key in {:?}",
+            value.get_ref()
+        ))
+    } else {
+        None
+    };
+    if let Some(message) = unusable {
+        warnings.push(source.ignored(&value, message));
+        return RoomSort::default();
+    }
+    let mut known = Vec::new();
+    for key in keys {
+        match SortKey::ALL
+            .into_iter()
+            .find(|sort| sort.config_name() == key)
+        {
+            Some(sort) => known.push(sort),
+            None => {
+                let names = SortKey::ALL.map(SortKey::config_name);
+                warnings.push(source.ignored(&value, unknown_value(SETTING, key, names)));
+            }
+        }
+    }
+    match RoomSort::new(known) {
+        Ok(sort) => sort,
+        // Every key was unknown and has its warning.
+        Err(RoomSortError::Empty) => RoomSort::default(),
+        Err(RoomSortError::Repeated(key)) => {
+            let message = format!("{SETTING}: {:?} is listed twice", key.config_name());
+            warnings.push(source.ignored(&value, message));
+            RoomSort::default()
+        }
+    }
 }
 
 #[derive(Debug)]

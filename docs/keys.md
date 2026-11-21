@@ -13,6 +13,10 @@ mxt 0.1.2 did nothing. The leader and the longer bindings work as before.
 
 - The room list is on the left; `<leader>e` hides and shows it. The open
   room's timeline is on the right, with the composer below it.
+- The room list is in the order of `ui.room_list.sort`, by latest activity
+  unless it says otherwise (see [Sort keys](configuration.md#sort-keys)).
+  When rooms move, as messages arrive or as you read them, the cursor stays
+  on its room. `]u`, `[u` and the room picker follow the list's order.
 - The status line at the bottom shows the mode, a count or keys typed so far,
   the open room, the last message or a question, and on the right the sync
   state: `starting` before the first sync, then `synced`, `offline` (no

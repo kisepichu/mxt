@@ -31,6 +31,17 @@ impl App {
         }
     }
 
+    /// Optimistic clearing (design, "Matrix adapter"): the room's counts go
+    /// to zero at once, and the room moves when the sort keys depend on
+    /// them, the cursor staying on its room.
+    pub(super) fn clear_room_unread(&mut self, id: &RoomId) {
+        if let Some((old, new)) = self.rooms.clear_unread(id)
+            && let Some(cursor) = self.room_cursor
+        {
+            self.room_cursor = Some(follow(cursor, Some(old), new));
+        }
+    }
+
     /// A cursor on the removed room moves to the room now at its index.
     pub(super) fn remove_room(&mut self, id: RoomId, effects: &mut Vec<Effect>) {
         if let Some((index, _)) = self.rooms.remove(&id)
@@ -90,10 +101,11 @@ impl App {
 
     /// Opens the room at `index` of the room list: unsubscribes the previous
     /// room, subscribes the new one with a new timeline, and moves the cursor
-    /// to it. An open room only gets the focus. This is the one place where
-    /// the open room becomes another room, so a recorded switch puts the
-    /// position before it into the jump list whichever action or answer
-    /// opens the room (design, "Jump list").
+    /// to it. Both rooms move when the sort keys depend on their counts,
+    /// since the open room sorts as read. An open room only gets the focus.
+    /// This is the one place where the open room becomes another room, so a
+    /// recorded switch puts the position before it into the jump list
+    /// whichever action or answer opens the room (design, "Jump list").
     pub(super) fn open_at(&mut self, index: usize, switch: RoomSwitch, effects: &mut Vec<Effect>) {
         let id = &self.rooms.rooms()[index].id;
         if self.open_room.as_ref() != Some(id) {
@@ -105,8 +117,8 @@ impl App {
                 effects.push(Effect::Matrix(MatrixEffect::UnsubscribeTimeline(previous)));
             }
             self.reset_timeline(effects);
+            self.room_cursor = self.rooms.open(&id);
             effects.push(Effect::Matrix(MatrixEffect::SubscribeTimeline(id)));
-            self.room_cursor = Some(index);
         }
         self.focus = Focus::Timeline;
     }
@@ -129,7 +141,7 @@ impl App {
         let Some(id) = self.target_room().map(|room| room.id.clone()) else {
             return self.set_status(StatusKind::Error, "No room");
         };
-        self.rooms.clear_unread(&id);
+        self.clear_room_unread(&id);
         effects.push(Effect::Matrix(MatrixEffect::MarkRoomRead(id)));
     }
 
