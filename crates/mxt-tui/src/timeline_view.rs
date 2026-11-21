@@ -1,9 +1,10 @@
 //! The timeline pane (design, "Timeline"): the open room's entries, oldest at
-//! the top. The cursor item stays in view. The newest entry is at the bottom
-//! while the cursor follows the newest item, after a frame that showed the
-//! newest entry's last row, and while the cursor item and every entry after
-//! it fit on the pane. Only the entries around the cursor are laid out, so a
-//! long timeline costs no more per frame.
+//! the top. The cursor item stays in view: when the cursor moves off the
+//! pane, the view scrolls just far enough to bring its item in at the edge
+//! it moved towards, so it never jumps. The newest entry is at the bottom
+//! while the cursor follows the newest item and after a frame that showed
+//! the newest entry's last row. Only the entries around the cursor are laid
+//! out, so a long timeline costs no more per frame.
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -356,8 +357,7 @@ impl<'a> Render<'a> {
     }
 
     /// A window that holds the cursor item. The newest entry is at the
-    /// bottom when the last frame showed it, or when the cursor item and
-    /// every entry after it fit on the pane. Otherwise the cursor item is
+    /// bottom when the last frame showed it. Otherwise the cursor item is
     /// placed where the last frame had the anchor, or at the bottom without
     /// one. A lost anchor (its item went away or changed its `ItemRef`, as a
     /// local echo does once the server has it) is replaced by the entry at
@@ -368,8 +368,6 @@ impl<'a> Render<'a> {
         let height = self.pane_rows();
         let mut window = if let Some(Anchor::End) = anchor {
             self.at_bottom(self.entries.len() - 1)
-        } else if let Some(window) = self.to_end(cursor) {
-            return window;
         } else if let Some(Anchor::Item {
             index,
             item: id,
@@ -405,22 +403,6 @@ impl<'a> Render<'a> {
             window.push_front(self.rows(window.first - 1));
         }
         window
-    }
-
-    /// The window of the cursor item and every entry after it, with the
-    /// newest entry at the bottom, if they fit on the pane. Lays out at most
-    /// a pane of rows and one entry more.
-    fn to_end(&self, cursor: usize) -> Option<Window<'a>> {
-        let height = self.pane_rows();
-        let last = self.entries.len() - 1;
-        let mut window = Window::new(cursor, self.rows(cursor), 0);
-        while window.len <= height && window.last() < last {
-            window.push_back(self.rows(window.last() + 1));
-        }
-        (window.len <= height).then(|| {
-            window.shift(height - window.len);
-            window
-        })
     }
 
     /// The window of the entry at `index` with its last row at the bottom.
@@ -1022,6 +1004,22 @@ mod tests {
         ]
     }
 
+    /// About seven panes: twenty items of 2 to 5 rows among date dividers,
+    /// hidden entries and the read marker.
+    fn long_timeline() -> Vec<TimelineEntry> {
+        let mut entries = Vec::new();
+        for id in 0..20 {
+            match id {
+                0 | 7 | 14 => entries.push(TimelineEntry::DateDivider(Timestamp::from_millis(0))),
+                3 | 8 | 13 | 18 => entries.push(TimelineEntry::Hidden),
+                16 => entries.push(TimelineEntry::ReadMarker),
+                _ => {}
+            }
+            entries.push(remote(id, 1 + id % 4));
+        }
+        entries
+    }
+
     fn items(entries: &[TimelineEntry]) -> Vec<usize> {
         (0..entries.len())
             .filter(|&index| matches!(entries[index], TimelineEntry::Item(_)))
@@ -1244,6 +1242,47 @@ mod tests {
         }
     }
 
+    /// The owner's report: well up with `k`, then down with `j`, the view
+    /// scrolled one item at a time until the cursor item and every entry
+    /// after it fit on the pane, and then jumped to put the newest entry at
+    /// the bottom, moving the cursor from the bottom row to the top one.
+    /// Each step keeps the view while the cursor item is on the pane, and
+    /// otherwise scrolls just far enough to bring it in at the edge it moves
+    /// towards, all the way to either end.
+    #[test]
+    fn moving_the_cursor_one_item_at_a_time_never_jumps_the_view() {
+        let entries = long_timeline();
+        let items = items(&entries);
+        let newest = items[items.len() - 1];
+        let zone = TimeZone::UTC;
+        let pane = render(&entries, &zone);
+        let (mut placed, mut anchor) = lay_out(&entries, newest, true, None);
+        // Up to the oldest item, then down to the newest, which follows
+        // again as in the core.
+        let up = items.iter().rev().skip(1).map(|&cursor| (cursor, false));
+        let down = items.iter().skip(1).map(|&cursor| (cursor, true));
+        for (cursor, down) in up.chain(down) {
+            let follows = down && cursor == newest;
+            let (next, next_anchor) = lay_out(&entries, cursor, follows, anchor.as_ref());
+            let (top, len) = place(&next, cursor);
+            let expected = match placed.iter().find(|(index, ..)| *index == cursor) {
+                // On the pane already: the view stays.
+                Some(&(_, top, len)) if top >= 0 && top + len <= HEIGHT as isize => top,
+                // In at the bottom edge.
+                _ if down => HEIGHT as isize - len,
+                // In at the top edge, below the dividers and markers right
+                // above it.
+                _ => pane.top_with_lead(cursor, len),
+            };
+            let direction = if down { "down" } else { "up" };
+            assert_eq!(
+                top, expected,
+                "{direction} to {cursor}: {placed:?} then {next:?}"
+            );
+            (placed, anchor) = (next, next_anchor);
+        }
+    }
+
     #[test]
     fn following_puts_the_newest_entry_at_the_bottom() {
         let mut entries = timeline();
@@ -1413,9 +1452,11 @@ mod tests {
     }
 
     /// Up past the top of the pane to read a little more, a message arrives
-    /// meanwhile, and back down to the old newest message to reply.
+    /// meanwhile, and back down to the old newest message to reply: it comes
+    /// in at the bottom edge like any other, and the hint counts the message
+    /// below it. One more `j` shows that message and follows again.
     #[test]
-    fn moving_back_down_to_the_old_newest_message_shows_what_arrived_meanwhile() {
+    fn moving_back_down_to_the_old_newest_message_counts_what_arrived_meanwhile() {
         let (mut app, mut screen) = open((1..10).map(view::message).collect());
         // The pane shows the last four messages; the cursor goes above them.
         repeat(&mut app, &mut screen, "k", 4);
@@ -1425,8 +1466,11 @@ mod tests {
         assert!(last < newest - 1);
         repeat(&mut app, &mut screen, "j", 4);
         assert_eq!(app.timeline_cursor(), Some(newest - 1));
-        let (last, newest) = last_visible(&app, &mut screen);
-        assert_eq!(last, newest);
+        assert_eq!(last_visible(&app, &mut screen), (newest - 1, newest));
+        let rule = screen.composer_rule();
+        assert!(rule.ends_with("── ↓ 1 newer ─"), "{rule:?}");
+        repeat(&mut app, &mut screen, "j", 1);
+        assert!(app.timeline_follows());
         arrive(&mut app, [view::message(11)]);
         let (last, newest) = last_visible(&app, &mut screen);
         assert_eq!(last, newest);
@@ -1434,20 +1478,23 @@ mod tests {
 
     /// More messages in one batch (a sync catch-up, say) than fit below the
     /// cursor's message keep it at the top of the pane, and the newest ones
-    /// below the pane. Moving down shows them once the cursor's message and
-    /// the ones after it fit on the pane.
+    /// below the pane. Moving down keeps the view until the cursor's message
+    /// is at the bottom edge, then scrolls one message at a time, and the
+    /// newest message ends at the bottom.
     #[test]
-    fn moving_down_after_a_burst_shows_the_newest_message() {
+    fn moving_down_after_a_burst_scrolls_one_message_at_a_time_to_the_newest() {
         let (mut app, mut screen) = open((1..10).map(view::message).collect());
         repeat(&mut app, &mut screen, "k", 1);
         arrive(&mut app, (10..14).map(view::message));
         let visible = screen.draw(&app, None).timeline;
         assert_eq!(visible, Some((7, 10)));
-        // Four messages fit on the pane: from the fourth from the end on.
-        repeat(&mut app, &mut screen, "j", 2);
-        assert!(!app.timeline_follows());
-        let (last, newest) = last_visible(&app, &mut screen);
-        assert_eq!(last, newest);
+        repeat(&mut app, &mut screen, "j", 3);
+        assert_eq!(screen.draw(&app, None).timeline, Some((7, 10)));
+        for visible in [(8, 11), (9, 12)] {
+            repeat(&mut app, &mut screen, "j", 1);
+            assert_eq!(screen.draw(&app, None).timeline, Some(visible));
+        }
+        assert!(app.timeline_follows());
     }
 
     /// After `open` with nine messages, the cursor one message up and a
@@ -1466,12 +1513,17 @@ mod tests {
         burst(&mut app, &mut screen, 5);
         let rule = screen.composer_rule();
         assert!(rule.ends_with("── ↓ 3 newer ─"), "{rule:?}");
-        // The view stays put while the cursor moves inside it.
-        repeat(&mut app, &mut screen, "j", 2);
+        // The view stays put while the cursor moves inside it, down to the
+        // bottom edge.
+        repeat(&mut app, &mut screen, "j", 3);
         let rule = screen.composer_rule();
         assert!(rule.ends_with("── ↓ 3 newer ─"), "{rule:?}");
+        // Then each message it scrolls in leaves the count.
         repeat(&mut app, &mut screen, "j", 1);
-        assert!(!app.timeline_follows());
+        let rule = screen.composer_rule();
+        assert!(rule.ends_with("── ↓ 2 newer ─"), "{rule:?}");
+        repeat(&mut app, &mut screen, "j", 2);
+        assert!(app.timeline_follows());
         let (last, newest) = last_visible(&app, &mut screen);
         assert_eq!(last, newest);
         let rule = screen.composer_rule();
@@ -1535,24 +1587,24 @@ mod tests {
 
     /// The newest message so tall (a long paste, say) that it and the one
     /// before it do not fit on the pane together, so the cursor on the one
-    /// before cuts the newest one's last row. The user's reply arrives, and
-    /// `j` onto the old newest message shows it, and what arrives next.
+    /// before cuts the newest one's last row: the pane does not show the
+    /// newest entry's last row, so the user's reply stays below the pane,
+    /// counted by the hint, also after `j` onto the old newest message,
+    /// until the cursor reaches the reply.
     #[test]
-    fn a_tall_newest_message_does_not_hide_what_arrives_after_it() {
+    fn a_reply_after_a_tall_newest_message_that_the_pane_cuts_stays_below_it() {
         // Four rows and five on the pane's eight.
         let mut entries: Vec<_> = (1..5).map(view::message).collect();
         entries.extend([remote(0, 3), remote(1, 4)]);
         let (mut app, mut screen) = open(entries);
         repeat(&mut app, &mut screen, "k", 1);
-        // The user's reply goes below the pane: the cursor's message and
-        // the newest one already do not fit together.
         arrive(&mut app, [message(ItemRef::Local(TxnId::new("reply")), 1)]);
-        screen.draw(&app, None);
-        repeat(&mut app, &mut screen, "j", 1);
-        assert!(!app.timeline_follows());
-        let (last, newest) = last_visible(&app, &mut screen);
-        assert_eq!(last, newest);
-        arrive(&mut app, [view::message(5)]);
+        for _ in 0..2 {
+            assert_eq!(last_visible(&app, &mut screen), (5, 6));
+            let rule = screen.composer_rule();
+            assert!(rule.ends_with("── ↓ 1 newer ─"), "{rule:?}");
+            repeat(&mut app, &mut screen, "j", 1);
+        }
         let (last, newest) = last_visible(&app, &mut screen);
         assert_eq!(last, newest);
     }
