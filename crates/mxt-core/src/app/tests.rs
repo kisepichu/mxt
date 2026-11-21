@@ -11,6 +11,7 @@ use crate::settings::Settings;
 mod composer;
 mod files;
 mod join;
+mod jumps;
 mod room_actions;
 mod timeline;
 

@@ -86,6 +86,31 @@ impl Key {
             _ => None,
         }
     }
+
+    /// `<Tab>` for ctrl and `i`, keeping alt (`<C-A-i>` is `<A-Tab>`); any
+    /// other key unchanged. Without the kitty keyboard protocol, which mxt
+    /// does not enable, terminals send the same byte for both, so ctrl and
+    /// `i` never arrive.
+    fn ctrl_i_as_tab(self) -> Key {
+        match self {
+            Key {
+                code: KeyCode::Char('i'),
+                mods:
+                    Modifiers {
+                        ctrl: true,
+                        alt,
+                        shift: false,
+                    },
+            } => Key {
+                code: KeyCode::Tab,
+                mods: Modifiers {
+                    alt,
+                    ..Modifiers::default()
+                },
+            },
+            key => key,
+        }
+    }
 }
 
 /// `c` typed with shift: its uppercase form when that is one character.
@@ -202,6 +227,15 @@ impl fmt::Display for Key {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct KeySeq(Vec<Key>);
 
+/// What `<C-i>` parses to.
+#[derive(Clone, Copy)]
+enum CtrlI {
+    /// `<Tab>`, as terminals send it.
+    Tab,
+    /// Ctrl and `i`, as mxt 0.1.2 and earlier parsed it.
+    Apart,
+}
+
 impl KeySeq {
     /// Parses nvim key notation; `<leader>` expands to `leader`.
     ///
@@ -216,21 +250,21 @@ impl KeySeq {
     /// `S-` on a character must leave an uppercase letter (`<S-a>` is `A`).
     /// Otherwise [`Key::new`] would drop the shift, so `<S-1>` and `<C-S-c>`
     /// are errors instead of silently meaning `1` and `<C-c>`.
+    ///
+    /// `<C-i>` is another name for `<Tab>`, and `<C-A-i>` for `<A-Tab>`, as
+    /// in nvim: without the kitty keyboard protocol, which mxt does not
+    /// enable, terminals send the same byte for both.
     pub fn parse(text: &str, leader: &KeySeq) -> Result<KeySeq, KeyParseError> {
-        if text.is_empty() {
-            return Err(KeyParseError::Empty);
-        }
-        let mut keys = Vec::new();
-        let mut at = 0;
-        while let Some(c) = text[at..].chars().next() {
-            if c == '<' {
-                at += 1 + parse_group(&text[at + 1..], at, leader, &mut keys)?;
-            } else {
-                keys.push(Key::char(c));
-                at += c.len_utf8();
-            }
-        }
-        Ok(KeySeq(keys))
+        parse_keys(text, leader, CtrlI::Tab)
+    }
+
+    /// Parses like [`KeySeq::parse`], but keeps `<C-i>` as ctrl and `i`, a
+    /// key that never arrives, as mxt 0.1.2 and earlier did. Only for the
+    /// configuration's check of one key sequence spelled twice in a table:
+    /// two spellings that only the `<C-i>` alias makes one, such as `<C-i>`
+    /// and `<Tab>`, loaded before (design, "Layers").
+    pub fn parse_ctrl_i_apart(text: &str, leader: &KeySeq) -> Result<KeySeq, KeyParseError> {
+        parse_keys(text, leader, CtrlI::Apart)
     }
 
     pub fn from_keys(keys: Vec<Key>) -> KeySeq {
@@ -246,6 +280,23 @@ impl KeySeq {
     }
 }
 
+fn parse_keys(text: &str, leader: &KeySeq, ctrl_i: CtrlI) -> Result<KeySeq, KeyParseError> {
+    if text.is_empty() {
+        return Err(KeyParseError::Empty);
+    }
+    let mut keys = Vec::new();
+    let mut at = 0;
+    while let Some(c) = text[at..].chars().next() {
+        if c == '<' {
+            at += 1 + parse_group(&text[at + 1..], at, leader, ctrl_i, &mut keys)?;
+        } else {
+            keys.push(Key::char(c));
+            at += c.len_utf8();
+        }
+    }
+    Ok(KeySeq(keys))
+}
+
 /// Parses the group of a `<` at byte offset `at` of the text; `body` is the
 /// text after that `<`. Returns the length of `body` the group takes,
 /// including its `>`.
@@ -253,6 +304,7 @@ fn parse_group(
     body: &str,
     at: usize,
     leader: &KeySeq,
+    ctrl_i: CtrlI,
     keys: &mut Vec<Key>,
 ) -> Result<usize, KeyParseError> {
     let close = body.find('>').ok_or(KeyParseError::Unclosed { at })?;
@@ -311,7 +363,10 @@ fn parse_group(
                     key,
                 });
             }
-            keys.push(key);
+            keys.push(match ctrl_i {
+                CtrlI::Tab => key.ctrl_i_as_tab(),
+                CtrlI::Apart => key,
+            });
         }
         None if body[start..end].eq_ignore_ascii_case("leader") => {
             if mods != Modifiers::default() {
@@ -513,6 +568,45 @@ mod tests {
             },
         );
         assert_eq!(keys("<S-Tab>"), vec![shift_tab]);
+    }
+
+    #[test]
+    fn ctrl_i_is_another_name_for_tab() {
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        };
+        for text in ["<C-i>", "<c-I>", "<Tab>"] {
+            assert_eq!(keys(text), vec![code(KeyCode::Tab)], "{text}");
+        }
+        for text in ["<C-A-i>", "<M-C-I>", "<A-Tab>"] {
+            assert_eq!(keys(text), vec![Key::new(KeyCode::Tab, alt)], "{text}");
+        }
+        assert_eq!(keys("<C-w><C-i>").last(), Some(&code(KeyCode::Tab)));
+        assert_eq!(parse("<C-i>").unwrap().to_string(), "<Tab>");
+        // Shift still has to give an uppercase letter.
+        assert!(matches!(
+            parse("<C-S-i>"),
+            Err(KeyParseError::ShiftIgnored { .. })
+        ));
+        // Other ctrl keys and `i` keep their meaning.
+        assert_eq!(keys("<C-o>i"), vec![ctrl('o'), Key::char('i')]);
+    }
+
+    #[test]
+    fn ctrl_i_parses_apart_from_tab_for_the_duplicate_check() {
+        let space = KeySeq::from_keys(vec![Key::char(' ')]);
+        let apart = |text: &str| KeySeq::parse_ctrl_i_apart(text, &space).unwrap();
+        assert_eq!(apart("<C-i>").keys(), &[ctrl('i')]);
+        assert_eq!(apart("<Tab>").keys(), &[code(KeyCode::Tab)]);
+        assert_eq!(apart("<C-i>"), apart("<c-I>"));
+        for text in ["<leader>x<C-w>", "<S-Tab>", "gg"] {
+            assert_eq!(Ok(apart(text)), parse(text), "{text}");
+        }
+        assert_eq!(
+            KeySeq::parse_ctrl_i_apart("<C-x", &space),
+            Err(KeyParseError::Unclosed { at: 0 })
+        );
     }
 
     #[test]

@@ -789,6 +789,86 @@ fn an_unknown_leader_falls_back_to_space() {
 }
 
 #[test]
+fn a_ctrl_i_binding_that_a_tab_binding_duplicates_is_ignored_with_a_warning() {
+    let picker = |bindings: &str| format!("{MINIMAL}[keymap.picker]\n{bindings}");
+    // Whichever comes first, the `<Tab>` binding stays: it was the only one
+    // that could fire.
+    for (bindings, line, message) in [
+        (
+            "\"<Tab>\" = \"picker.prev\"\n\"<C-i>\" = \"picker.cancel\"\n",
+            5,
+            "keymap.picker: \"<C-i>\" is the same key sequence as \"<Tab>\" on line 4, \
+             since <C-i> is another name for <Tab> (ignored)",
+        ),
+        (
+            "\"<C-i>\" = \"picker.cancel\"\n\"<Tab>\" = \"picker.prev\"\n",
+            4,
+            "keymap.picker: \"<C-i>\" is the same key sequence as \"<Tab>\" on line 5, \
+             since <C-i> is another name for <Tab> (ignored)",
+        ),
+    ] {
+        let (c, warnings) = warned(&picker(bindings));
+        assert_eq!(warnings, expected(&[(line, 1, message)]), "{bindings}");
+        assert_eq!(
+            lookup(&c, InputContext::Picker, "<Tab>"),
+            Some(vec!["picker.prev"]),
+            "{bindings}"
+        );
+    }
+    // Inside a sequence and with alt too.
+    let (c, warnings) = warned(&format!(
+        "{MINIMAL}[keymap.normal]\n\"<C-w><Tab>\" = \"focus.timeline\"\n\
+         \"<C-w><C-i>\" = \"app.quit\"\n\"<C-A-i>\" = \"app.quit\"\n\"<A-Tab>\" = \"sidebar.toggle\"\n"
+    ));
+    let lines: Vec<usize> = warnings.iter().map(|(line, _, _)| *line).collect();
+    assert_eq!(lines, vec![5, 6], "{warnings:#?}");
+    assert_eq!(
+        lookup(&c, InputContext::Timeline, "<C-w><Tab>"),
+        Some(vec!["focus.timeline"])
+    );
+    assert_eq!(
+        lookup(&c, InputContext::Timeline, "<A-Tab>"),
+        Some(vec!["sidebar.toggle"])
+    );
+    // An earlier `<C-i>` binding ignored for its action gets no second
+    // warning, and one ignored for the alias leaves an ignored `<Tab>`
+    // binding to the default.
+    let (c, warnings) = warned(&picker(
+        "\"<C-i>\" = \"picker.future\"\n\"<Tab>\" = \"picker.prev\"\n",
+    ));
+    assert_eq!(warnings.len(), 1, "{warnings:#?}");
+    assert!(warnings[0].2.contains("unknown action"), "{warnings:#?}");
+    assert_eq!(
+        lookup(&c, InputContext::Picker, "<Tab>"),
+        Some(vec!["picker.prev"])
+    );
+    let (c, warnings) = warned(&picker(
+        "\"<C-i>\" = \"picker.cancel\"\n\"<Tab>\" = \"picker.future\"\n",
+    ));
+    let lines: Vec<usize> = warnings.iter().map(|(line, _, _)| *line).collect();
+    assert_eq!(lines, vec![4, 5], "{warnings:#?}");
+    assert_eq!(
+        lookup(&c, InputContext::Picker, "<Tab>"),
+        Some(vec!["picker.next"])
+    );
+    // Every other duplicate stays an error, a second spelling of `<C-i>`
+    // too.
+    let (line, msg) = err(&picker(
+        "\"<Tab>\" = \"picker.prev\"\n\"<C-i>\" = \"picker.cancel\"\n\"<C-I>\" = \"nop\"\n",
+    ));
+    assert_eq!(line, 6);
+    assert!(
+        msg.ends_with("\"<C-I>\" is the same key sequence as \"<C-i>\" on line 5"),
+        "{msg}"
+    );
+    let (line, msg) = err(&picker(
+        "\"<Tab>\" = \"picker.prev\"\n\"<tab>\" = \"nop\"\n",
+    ));
+    assert_eq!(line, 5);
+    assert!(msg.ends_with("on line 4"), "{msg}");
+}
+
+#[test]
 fn wrong_types_and_malformed_values_stay_errors() {
     for (text, line, column, message) in [
         (

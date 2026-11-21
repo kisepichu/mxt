@@ -4,6 +4,7 @@
 mod command_line;
 mod composer;
 mod join;
+mod jumps;
 mod picker;
 mod recovery;
 mod rooms;
@@ -35,6 +36,7 @@ pub use recovery::SecretPrompt;
 use command_line::OpenLine;
 use composer::{Composer, MentionMenu, PendingSend};
 use join::JoinWait;
+use jumps::{JumpDirection, JumpList, JumpWait};
 use picker::OpenPicker;
 use search::Direction;
 use timeline::Timeline;
@@ -180,6 +182,10 @@ pub struct App {
     invites: Vec<Invite>,
     /// The answer to the latest `:join` or `y`, until the next key or paste.
     join_wait: Option<JoinWait>,
+    /// The positions before jumps, for `jump.back` and `jump.forward`.
+    jumps: JumpList,
+    /// The entry whose event loads, until the next key or paste.
+    jump_wait: Option<JumpWait>,
 }
 
 impl App {
@@ -219,6 +225,8 @@ impl App {
             secret: None,
             invites: Vec::new(),
             join_wait: None,
+            jumps: JumpList::default(),
+            jump_wait: None,
             settings,
         }
     }
@@ -425,8 +433,10 @@ impl App {
         // Outside `feed`, so a status set by a binding survives the keys fed
         // again after it.
         self.status_shown = false;
-        // Before the key runs anything, so a `:join` it runs waits anew.
+        // Before the key runs anything, so a `:join` it runs waits anew, and
+        // the cursor never jumps under a user who has moved on.
         self.join_wait = None;
+        self.jump_wait = None;
         self.editor = editor;
         // The mention menu belongs to insert mode, and the tui reports the
         // editor mode with every key.
@@ -450,6 +460,7 @@ impl App {
     fn paste(&mut self, text: String, editor: Option<EditorMode>, effects: &mut Vec<Effect>) {
         self.status_shown = false;
         self.join_wait = None;
+        self.jump_wait = None;
         self.editor = editor;
         if editor != Some(EditorMode::Insert) {
             self.cancel_completion();
@@ -588,8 +599,12 @@ impl App {
     }
 
     /// Resolves the pending keys in the context they started in; the keys
-    /// handed back go through `feed` like typed keys.
+    /// handed back go through `feed` like typed keys. The timer of a jump's
+    /// grace period ends that instead.
     fn timeout(&mut self, id: TimerId, effects: &mut Vec<Effect>) {
+        if self.jump_grace_over(id, effects) {
+            return;
+        }
         let context = self.key_context;
         for next in self.resolver.timeout(self.keymap.effective(context), id) {
             self.resolved(context.sink(), next, effects);
@@ -705,6 +720,8 @@ impl App {
             Action::SearchStart => self.start_search(),
             Action::SearchNext => self.search_again(Direction::Forward, effects),
             Action::SearchPrev => self.search_again(Direction::Backward, effects),
+            Action::JumpBack => self.jump(JumpDirection::Back, effects),
+            Action::JumpForward => self.jump(JumpDirection::Forward, effects),
             Action::SidebarToggle => {
                 self.sidebar_visible = !self.sidebar_visible;
                 if !self.sidebar_visible && self.focus == Focus::RoomList {

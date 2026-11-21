@@ -57,7 +57,12 @@ impl App {
         };
         match (found, pane) {
             (Some(index), Pane::RoomList) => self.room_cursor = Some(index),
-            (Some(index), Pane::Timeline) => self.place_timeline_cursor(index, effects),
+            // A jump in the timeline; the room list's cursor is no position
+            // of the jump list (design, "Jump list").
+            (Some(index), Pane::Timeline) => {
+                self.record_jump();
+                self.place_timeline_cursor(index, effects);
+            }
             (None, _) => {
                 let text = format!("Pattern not found: {pattern}");
                 self.set_status(StatusKind::Error, text);

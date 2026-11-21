@@ -261,8 +261,9 @@ The main types in `mxt-core`:
   `:map` or `:messages`), cursor positions, the last known viewport of each
   pane, terminal focus (initially focused), the status message and the
   history of status messages (`:messages`), the pending invites (for
-  `:join`'s completion), and the target of the latest `:join`, whose
-  answer the core waits for.
+  `:join`'s completion), the target of the latest `:join`, whose answer
+  the core waits for, and the jump list with the entry whose message it
+  loads (see "Jump list").
 
 ### Keymap resolver
 
@@ -754,14 +755,16 @@ instead, and it never takes more than half of the width.
   audio) show `[file: <name> <size>]`, without the size when the event has
   none, and stickers `[sticker: <body>]`.
 - The cursor follows the newest message from the room's opening until `k`,
-  `<C-u>`, `gg`, a search or `gd` moves it to another message; moving down
-  onto the newest message or `G` follows again. While the pane shows the
-  newest entry's last row, entries that arrive appear at the bottom whether
-  or not the cursor follows: the view moves up, but never so far that the
-  cursor's message leaves the pane. Whenever the cursor's message and every
-  entry after it fit on the pane, the newest entry is at the bottom too, so
-  moving down near the end shows what arrived meanwhile. Otherwise the view
-  stays put while entries arrive above or below it.
+  `<C-u>`, `gg`, a search, `gd` or the jump list moves it to another
+  message; moving down onto the newest message or `G` follows again, and
+  so does going to a jump list entry without a message. While the pane
+  shows the newest entry's last row, entries that arrive appear at the
+  bottom whether or not the cursor follows: the view moves up, but never so
+  far that the cursor's message leaves the pane. Whenever the cursor's
+  message and every entry after it fit on the pane, the newest entry is at
+  the bottom too, so moving down near the end shows what arrived
+  meanwhile. Otherwise the view stays put while entries arrive above or
+  below it.
 - The newer-messages hint: while items exist after the last entry with a
   row on the pane, the composer's top rule ends with a dim `↓ N newer`. `N`
   counts those items: messages of every kind, deleted, undecryptable and
@@ -798,6 +801,7 @@ instead, and it never takes more than half of the width.
 | `normal` | `<C-w>j`, `<C-w><C-j>` | `{ action = "composer.focus", mode = "keep" }` | window below |
 | `normal` | `<C-w>k`, `<C-w><C-k>` | `focus.timeline` | window above |
 | `normal` | `]u` / `[u` | `{ action = "room.open", filter = "unread", pick = "next" }` / `pick = "prev"` | `]` / `[` motions |
+| `normal` | `<C-o>` / `<Tab>` | `jump.back` / `jump.forward` (see "Jump list") | `<C-o>` / `<C-i>`, which terminals send as `<Tab>` |
 | `room_list`, `timeline` | `j` / `k` | `cursor.down` / `cursor.up` | same |
 | `room_list`, `timeline` | `gg` / `G` | `cursor.first` / `cursor.last` | same |
 | `room_list`, `timeline` | `<C-d>` / `<C-u>` | `cursor.half_page_down` / `cursor.half_page_up` | same |
@@ -852,6 +856,106 @@ next unread room.
   timeline. There is no server-side search. `n` and `N` wrap around.
 - `gd` jumps to the replied-to message if it is loaded. Otherwise the status
   line says that it is not loaded.
+
+### Jump list
+
+`jump.back` (`<C-o>`) and `jump.forward` (`<Tab>`, that is `<C-i>`) go
+back to where the cursor was before a jump and forward again, also across
+rooms, as nvim's jump list does.
+
+- An entry is a position: the open room and the remote event under its
+  timeline cursor. With no item under the cursor (an empty timeline, or
+  one still loading) or a local echo under it, whose ID the remote event
+  does not keep, the entry is the room alone. The list is the core's, for
+  the session only, never stored. It keeps at most 100 entries, oldest
+  first, dropping the oldest. A position equal to the newest entry is not
+  added again.
+- A jump records the position before it: opening another room by any path
+  (`room.open_selected`, the room picker, `room.open` from `]u`, `[u` or
+  `:open`, and `:join` once its room is listed); `cursor.first` and
+  `cursor.last` in the timeline (`gg`, `G`); a search that moves the
+  timeline cursor (`/`, `n`, `N`); and `message.goto_reply` (`gd`) when it
+  moves the cursor. The core records room switches in `App::open_at`, the
+  one place where the open room becomes another room, so every path
+  records without a call of its own, and a path added later does too.
+  Nothing else records: not `cursor.down`, `cursor.up` and the half pages
+  (`j`, `k`, `<C-d>`, `<C-u>`), not the cursor following new messages, not
+  a search or `gg` in the room list, whose cursor is no part of an entry,
+  not losing the open room (`Msg::RoomRemoved`), and not the jump list's
+  own moves. With no room open there is no position to record.
+- The list has an index: the entry the last move went to, or the newest
+  position after every entry, where a jump leaves it. `jump.back` at the
+  newest position first adds the current position, unless the newest
+  entry equals it, so that `jump.forward` returns there, as in nvim; it
+  then goes to the entry before. Elsewhere `jump.back` goes to the entry
+  before the index and `jump.forward` to the entry after it. A jump while
+  the index is on an entry drops the entries after that entry (as nvim's
+  `jumpoptions=stack`) before the position is added, and the index is at
+  the newest position again. Neither action takes a count.
+- Going to an entry opens its room, as `room.open` does but without
+  recording a jump, or only focuses the timeline when the room is open.
+  The cursor goes onto the entry's event; for a room alone it follows the
+  newest message, as in a room just opened. An event that is not loaded,
+  as in a room that opens with a new timeline, is loaded: the status line
+  says `Loading older messages…`, and the core requests back pagination
+  and looks for the event after each change of the timeline and each
+  page, as long as it takes, then puts the cursor on it and clears that
+  status. The next key or paste ends the wait before it does anything
+  else, so the cursor never jumps under a user who has moved on; so do a
+  failed page, whose error the status line shows, opening another room,
+  and losing the open room (`Msg::RoomRemoved`). `gd` loads nothing (see
+  "Search and jumps").
+- An entry whose room is not in the room list (the user left it) is
+  skipped, and so is an entry whose event is not in its room's timeline
+  once the room's start is loaded: the event is gone (a deleted message
+  keeps its event, so it is not). The move goes on to the next entry in
+  the same direction, and the status line says what it skipped:
+  `Skipped a jump to a room you left`, `Skipped 2 jumps to messages that
+  are gone`, `Skipped 3 jumps to rooms you left and messages that are
+  gone`, followed by `; loading older messages…` while the entry it went
+  to loads. Skipped entries stay in the list, so a room joined again can
+  be gone to again.
+- A wait judges the event gone only after a grace period. Nothing orders
+  `Msg::PaginationDone { reached_start: true }` after the diffs of the
+  page that reached the start: matrix-sdk 0.19 hands the page to the
+  timeline's own task and returns, so the adapter reports the start at
+  once while the diffs still pass that task and the adapter's. When the
+  start is loaded without the event, the wait goes on, the status line
+  still says `Loading older messages…`, and the core starts a timer of
+  1 s (`UiEffect::StartTimer` with an ID the resolver hands out, so it
+  never equals a key sequence's, answered by `Msg::Timeout`). Each change
+  of the timeline looks for the event again, without a new timer; the
+  event is gone only when the timer expires while the wait still holds.
+  Whatever ends the wait ends the grace period with it, and its timer
+  then does nothing. A timeline reset (`Clear`, `Reset`) has its start to
+  load again, so the grace period ends, pagination resumes, and a new
+  one starts once the start is loaded again. An entry in the open room
+  whose start was loaded before the move is judged at once.
+- With no entry left in that direction, nothing moves: the index stays,
+  the position `jump.back` would have added is not added, and the status
+  line says `No older jump` or `No newer jump`, after what was skipped
+  (`Skipped a jump to a room you left; no older jump`). An event found
+  gone only once its room has opened, its start has loaded and the grace
+  period has passed is skipped then; when no entry is left after it, its
+  room stays open, with the cursor on the newest message.
+- The keys are in `normal`, so they work in the room list, the timeline,
+  and the composer's normal and visual modes, which they leave for the
+  timeline, as nvim's `<C-o>` jumps from any window. edtui's normal and
+  visual modes have no command on either key. Terminals send the same
+  byte for `<C-i>` and `<Tab>` unless the kitty keyboard protocol is on,
+  which mxt does not enable, so `KeySeq::parse` reads `<C-i>` as another
+  name for `<Tab>`, and `<C-A-i>` for `<A-Tab>`, as nvim does; `:map`
+  shows `<Tab>`. The tables that do not fall back to `normal` keep these
+  keys: in the composer's insert mode both go to edtui, as before, which
+  inserts a tab for `<Tab>`; in the mention menu, whose table falls back
+  to insert mode's, `<Tab>` accepts and `<C-o>` goes to edtui as in
+  insert mode; a picker's `<Tab>` selects the next item and the command
+  line's completes, while `<C-o>` does nothing on those lines; the message
+  view binds neither and passes both to its editor, whose normal mode has
+  no command on them.
+- A configuration that bound both `<C-i>` and `<Tab>` in one table, which
+  mxt 0.1.2 and earlier read as two keys, loads the same, with a warning
+  (see "Layers").
 
 ### Commands
 
@@ -1506,6 +1610,8 @@ Actions are named `<target>.<verb>`. The first release has:
 - movement and search: `cursor.down`, `cursor.up`, `cursor.first`,
   `cursor.last`, `cursor.half_page_down`, `cursor.half_page_up`,
   `search.start`, `search.next`, `search.prev`
+- jump list: `jump.back`, `jump.forward`, added after the first release
+  (see "Jump list")
 - help: `help.commands` (`:help`), `help.keymap` (`:map`), both added after
   the first release; no default keys (see "Help views")
 - status line: `status.messages` (`:messages`), added after the first
@@ -1613,6 +1719,20 @@ action runs (see "Joining rooms and direct messages").
   Such a duplicate, where one of the two spellings uses `<leader>` and the
   fallback makes them the same, is a warning that ignores the later
   binding in the file; every other duplicate stays an error.
+- mxt 0.1.2 and earlier read `<C-i>` as ctrl and `i`, a key that never
+  arrives; now it is another name for `<Tab>` (see "Jump list"). So two
+  spellings of one table that only this makes one key sequence (`"<C-i>"`
+  and `"<Tab>"`, `"<C-w><C-i>"` and `"<C-w><Tab>"`, `"<C-A-i>"` and
+  `"<A-Tab>"`) loaded before. Such a duplicate is a warning that ignores
+  the spelling that writes `<C-i>`, whether it comes first or second, since
+  only the `<Tab>` binding could fire: `keymap.picker: "<C-i>" is the same
+  key sequence as "<Tab>" on line 5, since <C-i> is another name for
+  <Tab> (ignored)`. When both write `<C-i>`, the later is ignored. An
+  earlier `<C-i>` binding already ignored for its action gets no second
+  warning. The loader compares the keys as 0.1.2 read them as well
+  (`KeySeq::parse_ctrl_i_apart`, with `ui.leader` read the same way), so
+  spellings that were one key sequence then stay an error (`"<C-i>"` and
+  `"<C-I>"`, also after a `"<Tab>"`).
 - Within one binding the checks run in order and the first problem
   decides: its keys (malformed notation is an error, an unknown key name a
   warning), the same keys spelled twice in the table, then each action in
@@ -1769,6 +1889,15 @@ direct message lookup logs at `info` which step found a room (see
     included), its completion, opening the answered room when the room
     list has it or once it does, the wait ending at the next key, and the
     `CONFIRM` question before a direct message is created
+  - the jump list: what records a jump and what does not, room switches
+    by every path, back and forward with the position `jump.back` adds,
+    dropping the newer entries on a jump, the 100-entry limit, the newest
+    entry not added twice, loading an entry's message, skipping a left
+    room or a gone message, the grace period (the start reported before
+    the page that holds the message, and the timer expiring without it),
+    the case with nothing left, the wait ending at a key, a paste, a
+    failed page and the room's removal, and `<Tab>` and `<C-o>` where
+    `normal` does not apply
 - `mxt-matrix`: tests with constructed inputs for converting SDK values into
   domain types, HTML rendering, download file names, the dimensions of
   uploaded images and the session file. The send queue paths are tested
@@ -1805,9 +1934,10 @@ direct message lookup logs at `info` which step found a room (see
   snapshots, which would pin incidental layout. The rest is verified by
   running mxt.
 - `mxt`: configuration loading from strings: each error and each warning
-  with its position and text, a document with every key and every table
-  loading without warnings, and the complete example of the user
-  documentation loading without warnings.
+  with its position and text (the `<C-i>` and `<Tab>` duplicate in either
+  order among them), a document with every key and every table loading
+  without warnings, and the complete example of the user documentation
+  loading without warnings.
 - Continuous integration (GitHub Actions, Linux and macOS on Apple Silicon),
   with the flake's toolchain:
   - On every push and pull request, inside `nix develop` with the Cargo cache

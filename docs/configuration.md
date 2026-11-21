@@ -81,7 +81,8 @@ These are errors:
   without `target`, an empty `query`, `path`, `emoji` or `target`, a
   binding table without `action`, and an empty array as a binding;
 - the same key sequence written twice in one table in different spellings,
-  such as `"<leader>x"` and `"<Space>x"`, or `"<C-a>"` and `"<C-A>"`.
+  such as `"<leader>x"` and `"<Space>x"`, or `"<C-a>"` and `"<C-A>"`; for
+  `"<C-i>"` and `"<Tab>"`, see below.
 
 A name that this version of mxt does not know is a warning instead: one
 configuration is often shared between machines that run different versions,
@@ -108,6 +109,21 @@ value sends private receipts, not the default public ones. While an unknown
 `ui.leader` falls back to `<Space>`, two spellings in one table that only
 the fallback makes the same keys, such as `"<leader>x"` and `"<Space>x"`,
 are not an error: the later of the two in the file is ignored with a warning.
+
+Up to mxt 0.1.2, `<C-i>` and `<Tab>` were two keys, and `<C-i>`, which
+terminals send as `<Tab>`, never arrived; now `<C-i>` is another name for
+`<Tab>` (see [Key notation](#key-notation)). A table that binds both, such
+as `"<Tab>"` and `"<C-i>"` or `"<C-w><Tab>"` and `"<C-w><C-i>"`, still
+loads: the binding written with `<C-i>` is ignored with a warning,
+whichever comes first, since only the `<Tab>` one ever ran. For example,
+with `"<Tab>"` on line 4 and `"<C-i>"` on line 5:
+
+```text
+/home/alice/.config/mxt/config.toml:5:1: keymap.picker: "<C-i>" is the same key sequence as "<Tab>" on line 4, since <C-i> is another name for <Tab> (ignored)
+```
+
+Spellings that were one key sequence before stay an error, such as
+`"<C-i>"` and `"<C-I>"`.
 
 A warning has the form of an error and ends in `(ignored)`. For example, with
 a misspelled action on line 5:
@@ -214,6 +230,13 @@ movement keys are in `room_list` and `timeline`, so `j` and `k` still reach
 the composer's editor. Only `room_list` and `timeline` take a count prefix
 (`5j`).
 
+The default `<C-o>` and `<Tab>` (`jump.back` and `jump.forward`) are in
+`normal`, so they work in the room list, the timeline and the composer's
+normal and visual modes. The composer's insert mode, the mention menu,
+pickers, the command line and the message view do not look in `normal`
+and keep their own `<Tab>` and `<C-o>` (see
+[The jump list](keys.md#the-jump-list)).
+
 A table that is checked first wins: with `"]"` in `timeline` and the default
 `"]u"` in `normal`, `]` in the timeline waits for the next key, as in nvim,
 and runs the `timeline` binding when the next key is not `u` or when
@@ -270,9 +293,11 @@ Keys use nvim's notation. Key sequences are TOML strings, so quote them:
   `S-` on a character must give an uppercase letter (`<S-a>` is `A`), so
   write `!` instead of `<S-1>`.
 
-Terminals send some keys alike: `<C-i>` arrives as `<Tab>`, `<C-m>` as
-`<CR>`, `<C-[>` as `<Esc>`, and many terminals send Shift+Enter as `<CR>`.
-Bind the key that arrives.
+`<C-i>` is another name for `<Tab>`, and `<C-A-i>` for `<A-Tab>`, as in
+nvim: without the kitty keyboard protocol, which mxt does not turn on,
+terminals send the same key for both, and `:map` shows `<Tab>`. Terminals
+send other keys alike too: `<C-m>` arrives as `<CR>`, `<C-[>` as `<Esc>`,
+and many terminals send Shift+Enter as `<CR>`. Bind the key that arrives.
 
 ### Examples
 
@@ -378,6 +403,8 @@ arguments; any other argument ignores the binding with a warning. Actions on
 | `cursor.half_page_down`, `cursor.half_page_up` | | Moves it by half of the visible rooms or messages, times the count. |
 | `search.start` | | Opens a `/` line that searches the focused list. |
 | `search.next`, `search.prev` | | Repeats the last search forwards or backwards. |
+| `jump.back` | | Goes back to where the timeline cursor was before the last jump (opening another room, `gg`, `G`, a search or `gd` in the timeline), opening its room and loading older messages when needed, as nvim's `<C-o>` does; see [The jump list](keys.md#the-jump-list). From the newest place it first notes where you are, so `jump.forward` comes back to it. A place in a room you left or with a message that is gone is skipped. |
+| `jump.forward` | | Goes forward again in the jump list, as nvim's `<C-i>` does. |
 | `view.close` | | Closes the message view, also when it shows `:help`, `:map` or `:messages`. |
 | `help.commands` | | Shows the commands with a one-line description each in the full-screen view, as `:help` does. |
 | `help.keymap` | | Shows the bindings of each keymap table after your configuration in the full-screen view, as `:map` does: `keys -> action` or `keys -> action (arguments)`, with `<leader>` written as its key. |

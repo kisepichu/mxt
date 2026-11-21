@@ -3,7 +3,11 @@
 mxt's keys follow nvim. `<leader>` is `<Space>` unless `ui.leader` says
 otherwise. Every binding below can be changed or removed, and any action can
 be bound; see [Configuration](configuration.md#keymap) for the tables, the
-key notation and the actions.
+key notation and the actions. With `ui.leader` set to `<Tab>` or `<C-o>`,
+or a binding such as `"<Tab>x"`, that key alone is now also bound, to
+`jump.forward` or `jump.back` (see [The jump list](#the-jump-list)): when
+no other key follows within `ui.timeoutlen`, it runs that action, where
+mxt 0.1.2 did nothing. The leader and the longer bindings work as before.
 
 ## The screen
 
@@ -109,6 +113,7 @@ visual mode.
 | `<C-w>j`, `<C-w><C-j>` | `composer.focus` with `mode = "keep"` | focus the composer below the timeline, in the mode it was left in |
 | `<C-w>k`, `<C-w><C-k>` | `focus.timeline` | focus the timeline above the composer |
 | `]u` / `[u` | `room.open` with `filter = "unread"` and `pick = "next"` / `"prev"` | open the next or previous unread room, wrapping around |
+| `<C-o>` / `<Tab>` | `jump.back` / `jump.forward` | back to where the cursor was before a jump, and forward again (see [The jump list](#the-jump-list)); `<C-i>` is `<Tab>` |
 
 As in nvim, ctrl can stay held for the key after `<C-w>`.
 
@@ -231,6 +236,45 @@ user_id = "@alice:example.org"
 [keymap.timeline]
 "<leader>+" = { action = "message.react", emoji = "thumbsup" }
 ```
+
+## The jump list
+
+As in nvim, `<C-o>` goes back to where the timeline cursor was before a
+jump, also in another room, and `<Tab>` forward again. These are jumps:
+
+- opening another room, whichever way: `<CR>` in the room list, the room
+  picker, `]u` and `[u`, `:open` and `:join`;
+- `gg` and `G` in the timeline;
+- a search in the timeline with `/`, `n` or `N`;
+- `gd`.
+
+`j`, `k`, `<C-d>` and `<C-u>` are not jumps, nor are a search or `gg` in
+the room list. Before each jump the list notes the room and the message
+under the cursor (the room alone while its timeline is empty), keeps the
+last 100 for as long as mxt runs, and does not note the same place twice
+in a row. `<C-o>` first notes where you are, so `<Tab>` comes back there;
+a jump after going back drops the places after the one you went back to.
+Neither key takes a count.
+
+Going back to a place opens its room, focuses the timeline and puts the
+cursor on the message, after loading older messages when it is not
+loaded; the status line says `Loading older messages…` meanwhile, and any
+key stops the wait. A place in a room you left, or whose message is gone
+(not there a second after the room's oldest message is loaded), is
+skipped, and the status line says so, for example `Skipped a jump to a
+room you left`. With nothing left in that direction nothing moves, and
+the status line says `No older jump` or `No newer jump`.
+
+Terminals send the same key for `<C-i>` and `<Tab>`, so in mxt, as in
+nvim, `<C-i>` is another name for `<Tab>` (mxt does not turn on the kitty
+keyboard protocol, which tells them apart). Both keys are in `normal`, so
+they jump from the room list, the timeline and the composer's normal and
+visual modes, which they leave for the timeline. Elsewhere they keep their
+meaning: in the composer's insert mode both go to the editor, so `<Tab>`
+inserts a tab; in the mention menu `<Tab>` inserts the mention and `<C-o>`
+goes to the editor as in insert mode; in pickers `<Tab>` selects the next
+item and on the command line it completes, while `<C-o>` does nothing
+there; the message view passes both to its editor.
 
 ## Commands
 

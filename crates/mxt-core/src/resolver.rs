@@ -8,7 +8,9 @@ use crate::action::Binding;
 use crate::keymap::EffectiveMap;
 use crate::keys::Key;
 
-/// A timer the resolver asked for. Only the latest one is current.
+/// A timer the core asked for: the resolver's, for pending keys, or another
+/// wait's, as the jump list's grace period. IDs never repeat; for pending
+/// keys only the latest one is current.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TimerId(u64);
 
@@ -78,8 +80,7 @@ impl Resolver {
             None => map.lookup(slice::from_ref(&key)),
         };
         if found.is_prefix {
-            let timer = TimerId(self.next_timer);
-            self.next_timer += 1;
+            let timer = self.new_timer();
             match &mut self.pending {
                 Some(pending) => pending.timer = timer,
                 None => {
@@ -108,6 +109,14 @@ impl Resolver {
             let longest = keys.len() - 1;
             self.finish(map, keys, longest)
         }
+    }
+
+    /// A timer ID that no timer had before, also for the core's other
+    /// waits, whose timers [`Resolver::timeout`] ignores.
+    pub(crate) fn new_timer(&mut self) -> TimerId {
+        let timer = TimerId(self.next_timer);
+        self.next_timer += 1;
+        timer
     }
 
     /// The timer `id` expired, so the pending sequence ends as described at

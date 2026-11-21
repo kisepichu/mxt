@@ -140,6 +140,15 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Config, ConfigError
             Err(error) => return Err(source.invalid(text, key_error("ui.leader", text, &error))),
         },
     };
+    // The leader as mxt 0.1.2 and earlier read it, with `<C-i>` apart from
+    // `<Tab>`, for the check of the same keys spelled twice.
+    let leader_apart = match &ui.leader {
+        Some(text) if !leader_fell_back => {
+            KeySeq::parse_ctrl_i_apart(text.get_ref(), &KeySeq::default())
+                .unwrap_or_else(|_| leader.clone())
+        }
+        _ => leader.clone(),
+    };
     let defaults = Settings::default();
     let read_receipts = match ui.read_receipts {
         None => defaults.read_receipts,
@@ -239,7 +248,12 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Config, ConfigError
         None => vec![DEFAULT_OPENER.to_owned()],
     };
 
-    let bindings = bindings(&source, keymap, &leader, leader_fell_back, &mut warnings)?;
+    let leaders = Leaders {
+        leader: &leader,
+        fell_back: leader_fell_back,
+        apart: &leader_apart,
+    };
+    let bindings = bindings(&source, keymap, &leaders, &mut warnings)?;
     warnings.sort_by_key(|warning| (warning.line, warning.column));
     Ok(Config {
         user_id: UserId::new(user_id.into_inner()),
@@ -373,22 +387,37 @@ impl fmt::Display for ConfigWarning {
     }
 }
 
+/// The leader the bindings are read with.
+struct Leaders<'a> {
+    leader: &'a KeySeq,
+    /// Whether `ui.leader` was ignored and `leader` is `<Space>`.
+    fell_back: bool,
+    /// `leader` as mxt 0.1.2 and earlier read it, with `<C-i>` apart from
+    /// `<Tab>`.
+    apart: &'a KeySeq,
+}
+
 /// The user's bindings of every table, checked in the order of the design's
 /// "Layers": the keys, the same keys spelled twice in the table, then the
 /// actions. A binding with a key name or an action's name this version does
 /// not know is left out with a warning, so the default binding of its keys
 /// stays. Two spellings of one key sequence in a table (`<leader>x` and
 /// `<Space>x`, `<C-a>` and `<C-A>`) are an error at the second, because
-/// `Keymap::new` would keep only one of them; but when `ui.leader` fell back
-/// to `<Space>` and only the fallback makes them one (`<leader>x` and
-/// `<Space>x`, `<leader>x<Space>` and `<Space>x<leader>`), a version that
-/// knows the leader tells them apart, so the second is ignored with a
-/// warning.
+/// `Keymap::new` would keep only one of them. Two exceptions are warnings
+/// that ignore one binding, because the configuration loaded before:
+///
+/// - when `ui.leader` fell back to `<Space>` and only the fallback makes
+///   them one (`<leader>x` and `<Space>x`, `<leader>x<Space>` and
+///   `<Space>x<leader>`), a version that knows the leader tells them apart,
+///   so the second is ignored;
+/// - when only `<C-i>` being another name for `<Tab>` makes them one
+///   (`<C-i>` and `<Tab>`), which mxt 0.1.2 and earlier told apart, the one
+///   that writes `<C-i>` is ignored, whichever comes first: only the
+///   `<Tab>` one could ever fire.
 fn bindings(
     source: &Source<'_>,
     keymap: dto::Keymap,
-    leader: &KeySeq,
-    leader_fell_back: bool,
+    leaders: &Leaders<'_>,
     warnings: &mut Vec<ConfigWarning>,
 ) -> Result<Vec<(TableId, KeySeq, Binding)>, ConfigError> {
     let mut bindings = Vec::new();
@@ -396,9 +425,12 @@ fn bindings(
         let setting = format!("keymap.{}", id.config_name());
         let mut entries: Vec<_> = table.into_iter().collect();
         entries.sort_by_key(|(key, _)| key.span().start);
-        let mut seen: BTreeMap<KeySeq, Spanned<String>> = BTreeMap::new();
+        // Each key sequence's spelling and binding, `None` when ignored.
+        let mut seen: BTreeMap<KeySeq, (Spanned<String>, Option<Binding>)> = BTreeMap::new();
+        // The spelling of each key sequence as mxt 0.1.2 and earlier read it.
+        let mut seen_apart: BTreeMap<KeySeq, Spanned<String>> = BTreeMap::new();
         for (key, value) in entries {
-            let keys = match KeySeq::parse(key.get_ref(), leader) {
+            let keys = match KeySeq::parse(key.get_ref(), leaders.leader) {
                 Ok(keys) => keys,
                 Err(error) if error.is_unknown_name() => {
                     warnings.push(source.ignored(&key, key_error(&setting, &key, &error)));
@@ -406,19 +438,39 @@ fn bindings(
                 }
                 Err(error) => return Err(source.invalid(&key, key_error(&setting, &key, &error))),
             };
-            if let Some(first) = seen.get(&keys) {
-                let message = format!(
-                    "{setting}: {:?} is the same key sequence as {:?} on line {}",
-                    key.get_ref(),
-                    first.get_ref(),
-                    source.position(first.span().start).0,
-                );
-                if leader_fell_back && differ_by_leader(key.get_ref(), first.get_ref()) {
+            // It parses whenever `parse` does: only the keys it gives differ.
+            let keys_apart = KeySeq::parse_ctrl_i_apart(key.get_ref(), leaders.apart)
+                .unwrap_or_else(|_| keys.clone());
+            if let Some(first) = seen_apart.get(&keys_apart) {
+                let message = same_keys(source, &setting, &key, first);
+                if leaders.fell_back && differ_by_leader(key.get_ref(), first.get_ref()) {
                     let message = format!("{message}, since ui.leader fell back to \"<Space>\"");
                     warnings.push(source.ignored(&key, message));
                     continue;
                 }
                 return Err(source.invalid(&key, message));
+            }
+            if let Some((first, first_binding)) = seen.get(&keys) {
+                // Only the `<C-i>` alias makes them one.
+                let writes = |text: &Spanned<String>| writes_ctrl_i(text.get_ref(), leaders.apart);
+                if !writes(first) || writes(&key) {
+                    let message = format!(
+                        "{}{CTRL_I_IS_TAB}",
+                        same_keys(source, &setting, &key, first)
+                    );
+                    warnings.push(source.ignored(&key, message));
+                    seen_apart.insert(keys_apart, key);
+                    continue;
+                }
+                // An earlier binding ignored for its action is not counted
+                // twice.
+                if first_binding.is_some() {
+                    let message = format!(
+                        "{}{CTRL_I_IS_TAB}",
+                        same_keys(source, &setting, first, &key)
+                    );
+                    warnings.push(source.ignored(first, message));
+                }
             }
             let binding = binding(
                 source,
@@ -426,15 +478,36 @@ fn bindings(
                 value,
                 warnings,
             )?;
-            if let Some(binding) = binding {
-                bindings.push((id, keys.clone(), binding));
-            }
             // An ignored binding still takes its keys: a version that knows
             // its action rejects a second spelling of them too.
-            seen.insert(keys, key);
+            seen_apart.insert(keys_apart, key.clone());
+            seen.insert(keys, (key, binding));
         }
+        bindings.extend(
+            seen.into_iter()
+                .filter_map(|(keys, (_, binding))| Some((id, keys, binding?))),
+        );
     }
     Ok(bindings)
+}
+
+/// The end of the warning about a spelling with `<C-i>` that another
+/// spelling with `<Tab>` duplicates.
+const CTRL_I_IS_TAB: &str = ", since <C-i> is another name for <Tab>";
+
+/// `<setting>: "<key>" is the same key sequence as "<other>" on line <n>`.
+fn same_keys(
+    source: &Source<'_>,
+    setting: &str,
+    key: &Spanned<String>,
+    other: &Spanned<String>,
+) -> String {
+    format!(
+        "{setting}: {:?} is the same key sequence as {:?} on line {}",
+        key.get_ref(),
+        other.get_ref(),
+        source.position(other.span().start).0,
+    )
 }
 
 /// Whether two spellings that parse are different key sequences with a
@@ -443,6 +516,16 @@ fn bindings(
 fn differ_by_leader(a: &str, b: &str) -> bool {
     let leader = KeySeq::from_keys(vec![Key::new(KeyCode::F(13), Modifiers::default())]);
     KeySeq::parse(a, &leader) != KeySeq::parse(b, &leader)
+}
+
+/// Whether a spelling that parses has ctrl and `i` in it, as mxt 0.1.2 and
+/// earlier read it: a key that never arrives, since terminals send `<Tab>`.
+fn writes_ctrl_i(text: &str, leader_apart: &KeySeq) -> bool {
+    KeySeq::parse_ctrl_i_apart(text, leader_apart).is_ok_and(|keys| {
+        keys.keys()
+            .iter()
+            .any(|key| key.code() == KeyCode::Char('i') && key.mods().ctrl)
+    })
 }
 
 /// Checks the actions of one binding in order; `setting` names it in

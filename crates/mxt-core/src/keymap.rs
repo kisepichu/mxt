@@ -198,6 +198,11 @@ const DEFAULTS: &[(&[TableId], &str, Action)] = &[
     (&[TableId::Normal], "<C-w><C-k>", Action::FocusTimeline),
     (&[TableId::Normal], "]u", UNREAD_NEXT),
     (&[TableId::Normal], "[u", UNREAD_PREV),
+    // nvim's jump list keys; `<C-i>` is `<Tab>`. The composer's insert mode,
+    // the pickers, the command line and the message view do not fall back to
+    // `normal`, so their `<Tab>` stays theirs.
+    (&[TableId::Normal], "<C-o>", Action::JumpBack),
+    (&[TableId::Normal], "<Tab>", Action::JumpForward),
     (LISTS, "j", Action::CursorDown),
     (LISTS, "k", Action::CursorUp),
     (LISTS, "gg", Action::CursorFirst),

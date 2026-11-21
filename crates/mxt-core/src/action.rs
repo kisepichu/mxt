@@ -91,6 +91,10 @@ pub enum Action {
     SearchStart,
     SearchNext,
     SearchPrev,
+    /// To the older entry of the jump list, like nvim's `<C-o>`.
+    JumpBack,
+    /// To the newer entry of the jump list, like nvim's `<C-i>`.
+    JumpForward,
     ViewClose,
     /// `:help`: the command list.
     HelpCommands,
@@ -188,6 +192,8 @@ impl Action {
             "search.start" => Action::SearchStart,
             "search.next" => Action::SearchNext,
             "search.prev" => Action::SearchPrev,
+            "jump.back" => Action::JumpBack,
+            "jump.forward" => Action::JumpForward,
             "view.close" => Action::ViewClose,
             "help.commands" => Action::HelpCommands,
             "help.keymap" => Action::HelpKeymap,
@@ -254,6 +260,8 @@ impl Action {
             Action::SearchStart => "search.start",
             Action::SearchNext => "search.next",
             Action::SearchPrev => "search.prev",
+            Action::JumpBack => "jump.back",
+            Action::JumpForward => "jump.forward",
             Action::ViewClose => "view.close",
             Action::HelpCommands => "help.commands",
             Action::HelpKeymap => "help.keymap",
@@ -641,6 +649,8 @@ mod tests {
             "search.start",
             "search.next",
             "search.prev",
+            "jump.back",
+            "jump.forward",
             "view.close",
             "help.commands",
             "help.keymap",
