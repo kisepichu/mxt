@@ -1095,6 +1095,24 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_terminal_cursor_sits_on_the_picker_query_cursor() {
+        let mut app = app();
+        let mut screen = Screen::new();
+        // The picker is 48 columns wide, centered in 80: its border on
+        // column 16, `> ` on 17 and 18, the query from 19 on, on the row
+        // under the top border.
+        press(&mut app, "<Space><Space>a日本<Home>");
+        screen.draw(&app, None);
+        assert!(screen.row(1).contains("│> a日本 "), "{:?}", screen.row(1));
+        let cursor = screen.terminal.get_cursor_position().unwrap();
+        assert_eq!(cursor, Position::new(19, 1));
+        press(&mut app, "<End>");
+        screen.draw(&app, None);
+        let cursor = screen.terminal.get_cursor_position().unwrap();
+        assert_eq!(cursor, Position::new(24, 1));
+    }
+
+    #[test]
     fn a_line_wider_than_the_screen_loses_as_much_of_its_start_as_the_cursor_needs() {
         let mut app = app();
         let mut screen = Screen::sized(10, RoomListLayout::default());
