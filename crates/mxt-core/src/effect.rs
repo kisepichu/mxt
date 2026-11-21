@@ -4,7 +4,7 @@ use std::borrow::{Borrow, BorrowMut};
 use std::fmt;
 
 use crate::action::FocusMode;
-use crate::ids::{EventId, RoomId, SendId, TxnId, UserId};
+use crate::ids::{EventId, RoomId, SendId, TimelineId, TxnId, UserId};
 use crate::keys::Key;
 use crate::mention::RenderedBody;
 use crate::resolver::TimerId;
@@ -210,28 +210,29 @@ pub enum UiEffect {
     OpenUrl(String),
     /// Copy to the clipboard (OSC 52) and the shared register.
     Yank(String),
-    /// The room's composer gets the keys, in insert mode unless `mode` is `Keep`.
+    /// The timeline's composer gets the keys, in insert mode unless `mode`
+    /// is `Keep`.
     FocusComposer {
-        room: RoomId,
+        timeline: TimelineId,
         mode: FocusMode,
     },
-    /// Read the room's composer text and answer `Msg::Submit`.
-    RequestSubmit(RoomId),
+    /// Read the timeline's composer text and answer `Msg::Submit`.
+    RequestSubmit(TimelineId),
     /// Insert a line break at the composer's cursor.
-    InsertNewline(RoomId),
+    InsertNewline(TimelineId),
     /// Replace the composer's text (the message being edited).
     LoadComposer {
-        room: RoomId,
+        timeline: TimelineId,
         text: String,
     },
     /// Empty the composer.
-    ClearComposer(RoomId),
+    ClearComposer(TimelineId),
     /// Replace the `@` token at the composer's cursor with `text` and a space.
     ReplaceMentionToken {
-        room: RoomId,
+        timeline: TimelineId,
         text: String,
     },
     /// Edit the composer's text in `$VISUAL` or `$EDITOR`.
-    ExternalEditor(RoomId),
+    ExternalEditor(TimelineId),
     Quit,
 }
