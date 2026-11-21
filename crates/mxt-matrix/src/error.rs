@@ -66,6 +66,12 @@ pub enum Error {
     NotAFile,
     /// An upload is larger than the homeserver's `m.upload.size`, in bytes.
     UploadTooLarge { limit: u64 },
+    /// `:join`'s target is none of the forms ruma reads.
+    NotAJoinTarget,
+    /// `:join` of the user's own user ID.
+    OwnUserId,
+    /// The room directory does not know the alias (`M_NOT_FOUND`).
+    UnknownAlias,
 }
 
 impl Error {
@@ -265,6 +271,11 @@ impl fmt::Display for Error {
                     write!(f, "{what} {:.1} MiB", *limit as f64 / MIB as f64)
                 }
             }
+            Error::NotAJoinTarget => {
+                f.write_str("not a room alias, room ID, user ID or matrix.to link")
+            }
+            Error::OwnUserId => f.write_str("that is your own user ID"),
+            Error::UnknownAlias => f.write_str("no room has this alias"),
         }
     }
 }
@@ -288,7 +299,10 @@ impl std::error::Error for Error {
             | Error::TimelineNotOpen
             | Error::NoAttachment
             | Error::NotAFile
-            | Error::UploadTooLarge { .. } => None,
+            | Error::UploadTooLarge { .. }
+            | Error::NotAJoinTarget
+            | Error::OwnUserId
+            | Error::UnknownAlias => None,
         }
     }
 }

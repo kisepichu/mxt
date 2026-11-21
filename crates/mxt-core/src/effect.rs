@@ -4,7 +4,7 @@ use std::borrow::{Borrow, BorrowMut};
 use std::fmt;
 
 use crate::action::FocusMode;
-use crate::ids::{EventId, RoomId, SendId, TxnId};
+use crate::ids::{EventId, RoomId, SendId, TxnId, UserId};
 use crate::keys::Key;
 use crate::mention::RenderedBody;
 use crate::resolver::TimerId;
@@ -152,6 +152,20 @@ pub enum MatrixEffect {
     /// `Msg::EffectFailed` for a wrong key or an account without secret
     /// storage.
     Recover(RecoveryKey),
+    /// `:join`: join the room `target` names (an alias, a room ID or a
+    /// matrix.to link to one), which accepts its invite, or find the direct
+    /// message with the user it names; answered with `Msg::Joined`, with
+    /// `Msg::NoDirectMessage` when no direct message is found, or with
+    /// `Msg::EffectFailed`.
+    Join {
+        target: String,
+    },
+    /// Create an encrypted direct message with `user`, unless the lookup of
+    /// `Join` finds one by now; answered with `Msg::Joined` with the user ID
+    /// as the target, or with `Msg::EffectFailed`.
+    CreateDm {
+        user: UserId,
+    },
 }
 
 /// What the message view shows.

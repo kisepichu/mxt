@@ -43,6 +43,13 @@ marked **Breaking:**.
   burst of messages arrived while the cursor was on an older one, the
   composer's top rule ends with `↓ N newer`; it goes once the pane shows
   the newest message.
+- `:join <target>` joins a room by its alias (`#name:server`), its ID or a
+  matrix.to link, which also accepts a pending invite, and opens it;
+  `:join @name:server` opens the direct message with that person, bridged
+  ones and a bridge bot's room included. Only when there is none does it
+  ask whether to create one, and it creates an encrypted one after `y`.
+  `<Tab>` after `:join ` completes pending invites by name. The action
+  `room.join` takes `target`.
 - A jump list, as in nvim: `<C-o>` goes back to where the timeline cursor
   was before a jump (opening another room, `gg`, `G`, `/`, `n`, `N`, `gd`),
   opening its room and loading older messages when needed, and `<Tab>`

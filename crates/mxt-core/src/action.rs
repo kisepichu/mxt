@@ -47,6 +47,11 @@ pub enum Action {
     RoomMarkRead,
     RoomMute,
     RoomUnmute,
+    /// `:join`: an alias, a room ID, a user ID, a matrix.to link or the name
+    /// of a pending invite, read when the action runs.
+    RoomJoin {
+        target: String,
+    },
     MessageReply,
     MessageEdit,
     MessageDelete,
@@ -121,6 +126,7 @@ impl Action {
     /// - `file.upload`: `path` (non-empty), required
     /// - `message.react`: `emoji` (an emoji or a shortcode, see
     ///   [`Emoji::parse`]; non-empty)
+    /// - `room.join`: `target` (non-empty), required
     ///
     /// Argument names are unique in a configuration table; if one repeats
     /// anyway, its last value counts.
@@ -147,6 +153,7 @@ impl Action {
             "message.react" => {
                 return message_react(Args::new("message.react", &["emoji"], args)?);
             }
+            "room.join" => return room_join(Args::new("room.join", &["target"], args)?),
             "room.open_selected" => Action::RoomOpenSelected,
             "room.mark_read" => Action::RoomMarkRead,
             "room.mute" => Action::RoomMute,
@@ -215,6 +222,7 @@ impl Action {
             Action::RoomMarkRead => "room.mark_read",
             Action::RoomMute => "room.mute",
             Action::RoomUnmute => "room.unmute",
+            Action::RoomJoin { .. } => "room.join",
             Action::MessageReply => "message.reply",
             Action::MessageEdit => "message.edit",
             Action::MessageDelete => "message.delete",
@@ -271,7 +279,7 @@ impl Action {
     /// The arguments [`Action::from_spec`] builds this action from, as
     /// names and string values: those at their default are left out, the
     /// others follow in the order `filter`, `pick`, `query`, `mode`, `path`,
-    /// `emoji`. An emoji is the emoji itself, not a shortcode.
+    /// `emoji`, `target`. An emoji is the emoji itself, not a shortcode.
     pub fn arguments(&self) -> Vec<(&'static str, &str)> {
         let filter = |filter: RoomFilter| {
             (filter != RoomFilter::default()).then(|| ("filter", filter.config_name()))
@@ -291,6 +299,7 @@ impl Action {
             }
             Action::FileUpload { path } => vec![("path", path.as_str())],
             Action::MessageReact(Some(emoji)) => vec![("emoji", emoji.as_str())],
+            Action::RoomJoin { target } => vec![("target", target.as_str())],
             _ => Vec::new(),
         }
     }
@@ -341,6 +350,18 @@ fn file_upload(args: Args<'_>) -> Result<Action, ActionError> {
         })?;
     Ok(Action::FileUpload {
         path: path.to_owned(),
+    })
+}
+
+fn room_join(args: Args<'_>) -> Result<Action, ActionError> {
+    let target = args
+        .non_empty_string("target")?
+        .ok_or(ActionError::MissingArgument {
+            action: args.action,
+            arg: "target",
+        })?;
+    Ok(Action::RoomJoin {
+        target: target.to_owned(),
     })
 }
 
@@ -647,6 +668,8 @@ mod tests {
         }
         let upload = Action::from_spec("file.upload", &[s("path", "/tmp/a b.png")]).unwrap();
         assert_eq!(upload.name(), "file.upload");
+        let join = Action::from_spec("room.join", &[s("target", "#mxt:example.org")]).unwrap();
+        assert_eq!(join.name(), "room.join");
     }
 
     /// `arguments()` as the configuration would give them to `from_spec`.
@@ -690,6 +713,10 @@ mod tests {
             (
                 Action::from_spec("message.react", &[s("emoji", "thumbsup")]),
                 vec![("emoji", "👍")],
+            ),
+            (
+                Action::from_spec("room.join", &[s("target", "#mxt:example.org")]),
+                vec![("target", "#mxt:example.org")],
             ),
         ];
         for (action, arguments) in cases {
@@ -784,6 +811,13 @@ mod tests {
                 arg: "path"
             })
         );
+        assert_eq!(
+            Action::from_spec("room.join", &[]),
+            Err(ActionError::MissingArgument {
+                action: "room.join",
+                arg: "target"
+            })
+        );
     }
 
     #[test]
@@ -812,6 +846,13 @@ mod tests {
             Err(ActionError::Empty {
                 action: "message.react",
                 arg: "emoji"
+            })
+        );
+        assert_eq!(
+            Action::from_spec("room.join", &[s("target", "")]),
+            Err(ActionError::Empty {
+                action: "room.join",
+                arg: "target"
             })
         );
     }

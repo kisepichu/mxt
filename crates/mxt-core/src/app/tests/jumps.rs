@@ -3,6 +3,7 @@
 use super::timeline::{event, msg, status};
 use super::*;
 use crate::mention::Member;
+use crate::msg::JoinedHow;
 use crate::timeline::{ReplyPreview, TimelineDiff, TimelineEntry};
 
 const A: &str = "!a:example.org";
@@ -118,6 +119,29 @@ fn every_way_of_opening_another_room_records_a_jump() {
     keys(&mut app, "<C-o>");
     assert_eq!(status(&app), Some("No older jump"));
     assert_eq!(open_room(&app), C);
+}
+
+#[test]
+fn join_records_a_jump_whether_its_room_opens_at_once_or_on_the_answer() {
+    // A room ID of a listed room opens at once.
+    let mut app = opened_with(3);
+    keys(&mut app, ":join !b:example.org<CR>");
+    assert_eq!(open_room(&app), B);
+    keys(&mut app, "<C-o>");
+    load(&mut app, C, msgs(1..=3));
+    assert_eq!((open_room(&app), cursor_body(&app)), (C, body(3)));
+    // The answered room opens without a key of its own, through the same
+    // place.
+    keys(&mut app, "k:join #a:example.org<CR>");
+    app.update(Msg::Joined {
+        target: "#a:example.org".into(),
+        room: id(A),
+        how: JoinedHow::Joined,
+    });
+    assert_eq!(open_room(&app), A);
+    keys(&mut app, "<C-o>");
+    load(&mut app, C, msgs(1..=3));
+    assert_eq!((open_room(&app), cursor_body(&app)), (C, body(2)));
 }
 
 #[test]

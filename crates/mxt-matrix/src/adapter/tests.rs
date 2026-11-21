@@ -1,4 +1,4 @@
-//! The send queue paths against a mock homeserver (matrix-sdk's
+//! The send queue paths and `:join` against a mock homeserver (matrix-sdk's
 //! `MatrixMockServer` on 127.0.0.1): the effects run as `Matrix::start` runs
 //! them, without the sync loop and the room list, and the tests read what
 //! reaches the core.
@@ -31,6 +31,8 @@ use tokio::time::timeout;
 use super::*;
 use crate::test_dir::TestDir;
 
+mod join;
+
 const ROOM: &str = "!room:example.org";
 const ME: &str = "@alice:example.org";
 /// The user's message in `ROOM`.
@@ -46,8 +48,8 @@ fn sent() -> ItemRef {
     ItemRef::Remote(EventId::new(SENT))
 }
 
-/// The adapter for the user's client of a mock homeserver, with `ROOM`
-/// open, which holds the user's message `SENT`.
+/// The adapter for the user's client of a mock homeserver; `start` opens
+/// `ROOM`, which holds the user's message `SENT`.
 struct Adapter {
     server: MatrixMockServer,
     client: Client,
@@ -58,22 +60,8 @@ struct Adapter {
 
 impl Adapter {
     async fn start() -> Adapter {
-        let server = MatrixMockServer::new().await;
+        let mut adapter = Adapter::without_rooms().await;
         let me = ruma::UserId::parse(ME).unwrap();
-        let client = server
-            .client_builder()
-            // The access token the mocks expect.
-            .logged_in_with_token("1234".to_owned(), me.clone(), owned_device_id!("DEVICE"))
-            // The mock homeserver speaks plain HTTP. Otherwise building the
-            // HTTP client loads the system's CA certificates, which fails on
-            // hosts without any.
-            .on_builder(|builder| builder.disable_ssl_verification())
-            .build()
-            .await;
-        server.mock_room_state_encryption().plain().mount().await;
-        // As `SyncLoop::start` does, so the event cache has the message, as
-        // an edit's target.
-        client.event_cache().subscribe().unwrap();
         let event = ruma::EventId::parse(SENT).unwrap();
         let message = EventFactory::new()
             .text_msg("hello")
@@ -81,7 +69,33 @@ impl Adapter {
             .event_id(&event);
         let room_id = ruma::RoomId::parse(ROOM).unwrap();
         let joined = JoinedRoomBuilder::new(&room_id).add_timeline_event(message);
-        server.sync_room(&client, joined).await;
+        adapter.server.sync_room(&adapter.client, joined).await;
+        adapter.effect(MatrixEffect::SubscribeTimeline(room()));
+        adapter
+            .core
+            .until("the timeline", |entries| item(entries, &sent()).is_some())
+            .await;
+        adapter
+    }
+
+    /// The adapter of a client that knows no room yet.
+    async fn without_rooms() -> Adapter {
+        let server = MatrixMockServer::new().await;
+        let me = ruma::UserId::parse(ME).unwrap();
+        let client = server
+            .client_builder()
+            // The access token the mocks expect.
+            .logged_in_with_token("1234".to_owned(), me, owned_device_id!("DEVICE"))
+            // The mock homeserver speaks plain HTTP. Otherwise building the
+            // HTTP client loads the system's CA certificates, which fails on
+            // hosts without any.
+            .on_builder(|builder| builder.disable_ssl_verification())
+            .build()
+            .await;
+        server.mock_room_state_encryption().plain().mount().await;
+        // As `SyncLoop::start` does, so the event cache has the messages, as
+        // an edit's target.
+        client.event_cache().subscribe().unwrap();
 
         let (to_core, from_adapter) = mpsc::unbounded_channel();
         let (effects, queue) = mpsc::unbounded_channel();
@@ -100,19 +114,13 @@ impl Adapter {
             to_core,
             queue,
         );
-        let mut adapter = Adapter {
+        Adapter {
             server,
             client,
             effects,
             core: Core::new(from_adapter),
             _tasks: tasks,
-        };
-        adapter.effect(MatrixEffect::SubscribeTimeline(room()));
-        adapter
-            .core
-            .until("the timeline", |entries| item(entries, &sent()).is_some())
-            .await;
-        adapter
+        }
     }
 
     fn effect(&self, effect: MatrixEffect) {
@@ -159,9 +167,9 @@ impl Core {
         }
     }
 
-    /// The next answer of a send, of a recovery, or report of a failure
-    /// (`SendQueued`, `SendFailed`, `Recovered`, `EffectFailed`); other
-    /// messages are skipped.
+    /// The next answer of a send, of a recovery or of a `:join`, or report
+    /// of a failure (`SendQueued`, `SendFailed`, `Recovered`, `Joined`,
+    /// `NoDirectMessage`, `EffectFailed`); other messages are skipped.
     async fn report(&mut self) -> Msg {
         loop {
             if let Some(report) = self.reports.pop_front() {
@@ -178,6 +186,8 @@ impl Core {
                 report @ (Msg::SendQueued { .. }
                 | Msg::SendFailed { .. }
                 | Msg::Recovered
+                | Msg::Joined { .. }
+                | Msg::NoDirectMessage { .. }
                 | Msg::EffectFailed { .. }),
             )) => self.reports.push_back(report),
             Ok(Some(_)) => {}

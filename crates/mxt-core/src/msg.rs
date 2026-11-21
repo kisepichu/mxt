@@ -1,10 +1,10 @@
 //! Messages: what the adapters report to `App::update`.
 
-use crate::ids::{RoomId, SendId};
+use crate::ids::{RoomId, SendId, UserId};
 use crate::keys::Key;
 use crate::mention::Member;
 use crate::resolver::TimerId;
-use crate::room::RoomSummary;
+use crate::room::{Invite, RoomSummary};
 use crate::timeline::{ItemRef, MediaBytes, TimelineDiff};
 
 /// The mode of the edtui editor that has focus, reported with every key.
@@ -36,6 +36,18 @@ pub enum SyncState {
     Synced,
     Offline,
     Retrying,
+}
+
+/// How the user is in the room a `MatrixEffect::Join` or
+/// `MatrixEffect::CreateDm` answered with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinedHow {
+    /// The user was in the room before.
+    Already,
+    /// The user joined it, or accepted its invite.
+    Joined,
+    /// A new direct message.
+    Created,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -142,5 +154,20 @@ pub enum Msg {
     /// were ignored (design, "Layers").
     ConfigWarnings {
         warnings: Vec<String>,
+    },
+    /// The pending invites, sorted by name; replaces the ones before.
+    Invites(Vec<Invite>),
+    /// The room of `MatrixEffect::Join` or `MatrixEffect::CreateDm` with
+    /// `target` (for `CreateDm`, the user ID).
+    Joined {
+        target: String,
+        room: RoomId,
+        how: JoinedHow,
+    },
+    /// `MatrixEffect::Join` with `target`, a user ID or a link to one, found
+    /// no direct message with `user`.
+    NoDirectMessage {
+        target: String,
+        user: UserId,
     },
 }

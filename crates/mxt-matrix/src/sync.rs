@@ -39,7 +39,8 @@ const INITIAL_POLL: Duration = Duration::from_secs(120);
 /// room.
 const RESPONSES_CAPACITY: usize = 16;
 
-/// The joined and left rooms of one sync response.
+/// The joined, left and invited rooms of one sync response; the room list
+/// reads the pending invites again after a response with invited rooms too.
 pub(crate) type SyncedRooms = Arc<[OwnedRoomId]>;
 
 /// The classic sync loop. Started once per process; the first login starts
@@ -124,6 +125,7 @@ async fn run(
                     .joined
                     .keys()
                     .chain(response.rooms.left.keys())
+                    .chain(response.rooms.invited.keys())
                     .cloned()
                     .collect();
                 if !updated.is_empty() {
