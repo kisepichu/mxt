@@ -34,6 +34,11 @@ marked **Breaking:**.
 - `:messages` lists the status line's recent messages (the last 200), the
   configuration's warnings included, in the full-screen view; the action
   `status.messages` opens it from a key.
+- The command line, the `/` search line, picker queries and the recovery
+  key prompt have a cursor: `<Left>`, `<Right>`, `<Home>` or `<C-b>`,
+  `<End>` or `<C-e>`, `<S-Left>` and `<S-Right>` by word, and typing,
+  `<BS>` and `<Del>` at the cursor. They work by grapheme cluster, so an
+  emoji with a skin tone is one character, also for the recovery key's `*`.
 
 ### Changed
 
@@ -56,6 +61,10 @@ marked **Breaking:**.
   arguments and malformed keys still stop it. At startup the status line
   says how many settings were ignored, and the log names each with its
   line.
+- On the command line, the `/` search line, picker queries and the recovery
+  key prompt, `<C-u>` deletes the text before the cursor and `<C-w>` the
+  word before it, with words split as in the editors: `foo.bar` loses `bar`
+  first, and kanji, hiragana and katakana are separate words.
 
 ### Fixed
 

@@ -19,6 +19,7 @@ use crate::effect::{Effect, MatrixEffect, RecoveryKey, UiEffect};
 use crate::ids::{RoomId, SendId, UserId};
 use crate::keymap::{InputContext, KeySink, Keymap, keymap_text};
 use crate::keys::Key;
+use crate::line::LineEditor;
 use crate::msg::{EditorMode, Msg, Pane, SyncState};
 use crate::resolver::{Resolved, Resolver, TimerId};
 use crate::rooms::RoomList;
@@ -27,6 +28,7 @@ use crate::timeline::{ItemRef, TimelineEntry};
 
 pub use command_line::{CommandLine, LineKind};
 pub use picker::{Picker, PickerItem, PickerKey, PickerKind};
+pub use recovery::SecretPrompt;
 
 use command_line::OpenLine;
 use composer::{Composer, MentionMenu, PendingSend};
@@ -161,8 +163,8 @@ pub struct App {
     picker: Option<OpenPicker>,
     /// `CONFIRM` mode: the next key answers.
     confirm: Option<Confirm>,
-    /// `SECRET` mode: the recovery key typed so far.
-    secret: Option<RecoveryKey>,
+    /// `SECRET` mode: the recovery key typed so far, and its cursor.
+    secret: Option<LineEditor<RecoveryKey>>,
 }
 
 impl App {
@@ -412,14 +414,14 @@ impl App {
     /// A paste (design, "Input routing") goes where typed text would go,
     /// without the keymap: to the editor that has the keys, the first line
     /// to the command line, the picker query or, in `SECRET` mode, the
-    /// recovery key, and nowhere in the room list and the timeline. Where
-    /// the text would go, a paste larger than [`PASTE_LIMIT`] goes nowhere,
-    /// and the status line says so. Pending keys end first, as on their
-    /// timeout, so they keep their order with the text; keys pending in
-    /// another input context end or are dropped as a key would end or drop
-    /// them (see [`App::enter_context`]). Like any key but `y`, a paste
-    /// cancels a question, and it never answers one that a binding ending
-    /// before it asks.
+    /// recovery key, at its cursor, and nowhere in the room list and the
+    /// timeline. Where the text would go, a paste larger than
+    /// [`PASTE_LIMIT`] goes nowhere, and the status line says so. Pending
+    /// keys end first, as on their timeout, so they keep their order with
+    /// the text; keys pending in another input context end or are dropped
+    /// as a key would end or drop them (see [`App::enter_context`]). Like
+    /// any key but `y`, a paste cancels a question, and it never answers one
+    /// that a binding ending before it asks.
     fn paste(&mut self, text: String, editor: Option<EditorMode>, effects: &mut Vec<Effect>) {
         self.status_shown = false;
         self.editor = editor;

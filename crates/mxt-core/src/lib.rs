@@ -12,6 +12,7 @@ pub mod fuzzy;
 pub mod ids;
 pub mod keymap;
 pub mod keys;
+pub mod line;
 pub mod mention;
 pub mod msg;
 pub mod resolver;

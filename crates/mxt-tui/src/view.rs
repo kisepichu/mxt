@@ -197,7 +197,8 @@ pub(crate) struct Visible {
 /// and the picker is drawn over the panes. The terminal cursor goes to the
 /// focused editor, the picker's query or the bottom line's prompt, whichever
 /// is drawn last. In `SECRET` mode the bottom line is the masked recovery
-/// key prompt, drawn from the number of characters typed only.
+/// key prompt, drawn from the key's length and cursor in grapheme clusters
+/// only.
 pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
     let [main, bottom] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
@@ -259,11 +260,16 @@ pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
     // The message view's editor while it is open, else the focused composer's.
     let editor = view_mode.or_else(|| composer.filter(|_| focused).map(|composer| composer.mode()));
     match (app.secret_prompt(), app.command_line(), search) {
-        (Some((prompt, typed)), _, _) => {
-            draw_prompt_line(frame, bottom, prompt, &MASK.repeat(typed))
+        (Some(secret), _, _) => {
+            let masked = MASK.repeat(secret.clusters);
+            let cursor = secret.cursor * MASK.len();
+            draw_prompt_line(frame, bottom, secret.prompt, &masked, cursor);
         }
         (None, Some(line), _) => draw_command_line(frame, bottom, line),
-        (None, None, Some(pattern)) => draw_prompt_line(frame, bottom, "/", &pattern),
+        // edtui's own search in the editors: the cursor after the pattern.
+        (None, None, Some(pattern)) => {
+            draw_prompt_line(frame, bottom, "/", &pattern, pattern.len());
+        }
         (None, None, None) => draw_status_line(frame, bottom, app, editor),
     }
     visible
@@ -638,33 +644,47 @@ fn sync_label(state: SyncState) -> &'static str {
     }
 }
 
-/// `:` or `/` and the text, with the terminal cursor after the text.
+/// `:` or `/` and the text, with the terminal cursor at the line's cursor.
 fn draw_command_line(frame: &mut Frame, area: Rect, line: &CommandLine) {
     let prompt = match line.kind {
         LineKind::Command => ":",
         LineKind::Search(_) => "/",
     };
-    draw_prompt_line(frame, area, prompt, &line.text);
+    draw_prompt_line(frame, area, prompt, line.input.text(), line.input.cursor());
 }
 
-/// The prompt and the text, with the terminal cursor after the text. A text
-/// wider than the line loses its start, so its end and the cursor stay
-/// visible.
-pub(crate) fn draw_prompt_line(frame: &mut Frame, area: Rect, prompt: &str, full: &str) {
+/// The prompt and the text, with the terminal cursor at `cursor`, a byte
+/// offset in `text` on a grapheme cluster boundary: on the first column of
+/// the cluster after it, or after the text at its end (design, "Line
+/// editing"). A text wider than the line loses whole clusters at its start,
+/// as few as it takes for the cluster after the cursor (a column at the end)
+/// to fit, so with the cursor at the end, the end of the text stays visible;
+/// the line's end cuts off the rest.
+pub(crate) fn draw_prompt_line(
+    frame: &mut Frame,
+    area: Rect,
+    prompt: &str,
+    text: &str,
+    cursor: usize,
+) {
     let prompt_columns = text_width(prompt);
-    // The cursor takes a column.
-    let room = usize::from(area.width).saturating_sub(prompt_columns + 1);
-    let mut text = full;
-    let mut text_columns = text_width(text);
-    for (at, grapheme) in full.grapheme_indices(true) {
-        if text_columns <= room {
+    let (before, after) = text.split_at(cursor);
+    let under_cursor = after.graphemes(true).next().map_or(0, grapheme_width);
+    let room = usize::from(area.width).saturating_sub(prompt_columns + under_cursor.max(1));
+    let mut start = 0;
+    let mut before_columns = text_width(before);
+    for (at, grapheme) in before.grapheme_indices(true) {
+        if before_columns <= room {
             break;
         }
-        text = &full[at + grapheme.len()..];
-        text_columns -= grapheme_width(grapheme);
+        start = at + grapheme.len();
+        before_columns -= grapheme_width(grapheme);
     }
-    frame.render_widget(Line::from(vec![Span::raw(prompt), Span::raw(text)]), area);
-    let column = u16::try_from(prompt_columns + text_columns).unwrap_or(u16::MAX);
+    frame.render_widget(
+        Line::from(vec![Span::raw(prompt), Span::raw(&text[start..])]),
+        area,
+    );
+    let column = u16::try_from(prompt_columns + before_columns).unwrap_or(u16::MAX);
     let x = area.x.saturating_add(column);
     frame.set_cursor_position(Position::new(x.min(area.right().saturating_sub(1)), area.y));
 }
@@ -867,12 +887,28 @@ pub(crate) mod tests {
             visible
         }
 
+        /// The bottom line as drawn, without the cells wide characters
+        /// cover.
         fn bottom_line(&self) -> String {
             let buffer = self.terminal.backend().buffer();
             let y = buffer.area.bottom() - 1;
-            (buffer.area.left()..buffer.area.right())
-                .map(|x| buffer[(x, y)].symbol())
-                .collect()
+            let mut line = String::new();
+            let mut x = buffer.area.left();
+            while x < buffer.area.right() {
+                let symbol = buffer[(x, y)].symbol();
+                line.push_str(symbol);
+                x += u16::try_from(grapheme_width(symbol).max(1)).unwrap();
+            }
+            line
+        }
+
+        /// The bottom line without trailing spaces, and the terminal
+        /// cursor's column.
+        fn prompt(&mut self, app: &App) -> (String, u16) {
+            self.draw(app, None);
+            let cursor = self.terminal.get_cursor_position().unwrap();
+            assert_eq!(cursor.y, 11);
+            (self.bottom_line().trim_end().to_owned(), cursor.x)
         }
 
         fn cell(&self, x: u16, y: u16) -> &Cell {
@@ -988,6 +1024,35 @@ pub(crate) mod tests {
             "{:?}",
             screen.bottom_line()
         );
+    }
+
+    #[test]
+    fn the_terminal_cursor_sits_on_the_line_cursor() {
+        let mut app = app();
+        let mut screen = Screen::new();
+        press(&mut app, ":ab日本語<Left><Left>");
+        assert_eq!(screen.prompt(&app), (":ab日本語".into(), 5));
+        press(&mut app, "<Home>");
+        assert_eq!(screen.prompt(&app), (":ab日本語".into(), 1));
+        press(&mut app, "<End>");
+        assert_eq!(screen.prompt(&app), (":ab日本語".into(), 9));
+        press(&mut app, "<Esc>:recover<CR>abc<Left><Left>");
+        assert_eq!(screen.prompt(&app), ("Recovery key: ***".into(), 15));
+    }
+
+    #[test]
+    fn a_line_wider_than_the_screen_loses_as_much_of_its_start_as_the_cursor_needs() {
+        let mut app = app();
+        let mut screen = Screen::sized(10, RoomListLayout::default());
+        // 16 columns. At the end, the end of the text and a column for the
+        // cursor fit.
+        press(&mut app, ":日本語のテキスト");
+        assert_eq!(screen.prompt(&app), (":テキスト".into(), 9));
+        // Before `ス`, both of its columns fit; `ト` is cut off.
+        press(&mut app, "<Left><Left>");
+        assert_eq!(screen.prompt(&app), (":のテキス".into(), 7));
+        press(&mut app, "<Home>");
+        assert_eq!(screen.prompt(&app), (":日本語の".into(), 1));
     }
 
     const FAMILY: &str = "👨\u{200d}👩\u{200d}👧";

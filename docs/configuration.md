@@ -196,8 +196,8 @@ table, and every other default stays.
 | `composer.insert` | the composer's editor is in insert mode | pass the key to the editor |
 | `composer.completion` | the mention menu is open in insert mode | look in `composer.insert`, then pass the key to the editor |
 | `message_view` | the message view (also `:help`, `:map` and `:messages`) is open and its editor is in normal or visual mode | pass the key to the editor |
-| `picker` | a picker (rooms, emoji or links) is open | type the key into the query |
-| `command_line` | the `:` command line or a `/` search line is open | type the key into the line |
+| `picker` | a picker (rooms, emoji or links) is open | edit the query with the key (see [Line editing](keys.md#line-editing)) |
+| `command_line` | the `:` command line or a `/` search line is open | edit the line with the key (see [Line editing](keys.md#line-editing)) |
 
 `normal` holds bindings that make sense everywhere outside text input. The
 movement keys are in `room_list` and `timeline`, so `j` and `k` still reach

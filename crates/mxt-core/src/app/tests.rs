@@ -84,9 +84,9 @@ fn last_timer(effects: &[Effect]) -> TimerId {
         _ => panic!("{effects:?}"),
     }
 }
-/// The number of characters on the recovery key prompt.
+/// The number of grapheme clusters on the recovery key prompt.
 fn secret_len(app: &App) -> Option<usize> {
-    app.secret_prompt().map(|(_, typed)| typed)
+    app.secret_prompt().map(|secret| secret.clusters)
 }
 
 #[test]
@@ -706,11 +706,11 @@ fn the_command_line_and_pickers_take_the_first_line_of_a_paste() {
     keys(&mut app, "<Esc><Space><Space>");
     assert_eq!(paste(&mut app, "b:ex\n<CR>", None), vec![]);
     let picker = app.picker().unwrap();
-    assert_eq!(picker.query, "b:ex");
+    assert_eq!(picker.query.text(), "b:ex");
     assert_eq!(picker.items[0].key, PickerKey::Room(id("!b:example.org")));
     // A paste that starts with a line break adds nothing.
     paste(&mut app, "\nmore", None);
-    assert_eq!(app.picker().unwrap().query, "b:ex");
+    assert_eq!(app.picker().unwrap().query.text(), "b:ex");
 }
 
 #[test]
@@ -762,7 +762,7 @@ fn a_paste_larger_than_256_kib_is_refused() {
 }
 
 fn line(app: &App) -> Option<(LineKind, &str)> {
-    app.command_line().map(|l| (l.kind, l.text.as_str()))
+    app.command_line().map(|l| (l.kind, l.input.text()))
 }
 
 #[test]
@@ -886,6 +886,146 @@ fn an_edit_after_tab_starts_a_new_completion() {
     assert_eq!(line(&app), Some((LineKind::Command, "unmut")));
     keys(&mut app, "<Tab>");
     assert_eq!(line(&app), Some((LineKind::Command, "unmute")));
+}
+
+fn line_cursor(app: &App) -> usize {
+    app.command_line().unwrap().input.cursor()
+}
+
+#[test]
+fn the_command_and_search_lines_edit_at_the_cursor() {
+    let mut app = app();
+    keys(&mut app, ":open foo.bar<C-w><S-Left>x<End><BS><Home><Del>");
+    assert_eq!(line(&app), Some((LineKind::Command, "pen foox")));
+    assert_eq!(line_cursor(&app), 0);
+    // `<BS>` at the start of a line with text does nothing; on an empty
+    // line it closes the line.
+    keys(&mut app, "<BS>");
+    assert_eq!(line(&app), Some((LineKind::Command, "pen foox")));
+    keys(&mut app, "<End><C-u>");
+    assert_eq!(line(&app), Some((LineKind::Command, "")));
+    keys(&mut app, "<BS>");
+    assert_eq!(line(&app), None);
+
+    keys(&mut app, "/exmple<Left><Left><Left><Left>a");
+    assert_eq!(
+        line(&app),
+        Some((LineKind::Search(Pane::RoomList), "example"))
+    );
+    assert_eq!(line_cursor(&app), 3);
+    keys(&mut app, "<CR>");
+    assert_eq!(cursor_id(&app), "!b:example.org");
+    keys(&mut app, "/<BS>");
+    assert_eq!(line(&app), None);
+}
+
+#[test]
+fn completion_reads_the_whole_line_and_leaves_the_cursor_at_the_end() {
+    let mut app = app();
+    keys(&mut app, ":u<Left>");
+    assert_eq!(line_cursor(&app), 0);
+    for shown in ["unmute", "upload ", "u", "unmute"] {
+        keys(&mut app, "<Tab>");
+        assert_eq!(line(&app), Some((LineKind::Command, shown)));
+        assert_eq!(line_cursor(&app), shown.len());
+    }
+    // A cursor move ends the cycle: `<Tab>` completes `unmute`, its only
+    // candidate, instead of showing `upload `.
+    keys(&mut app, "<Left><Tab>");
+    assert_eq!(line(&app), Some((LineKind::Command, "unmute")));
+    assert_eq!(line_cursor(&app), 6);
+}
+
+#[test]
+fn moving_in_a_picker_query_keeps_the_ranking_and_the_selection() {
+    let mut app = app();
+    keys(&mut app, "<Space><Space>example<C-n>");
+    let ranked = app.picker().unwrap().items.clone();
+    assert_eq!(ranked.len(), 3);
+    // `<BS>` at the start moves and edits nothing, and keeps the picker.
+    keys(&mut app, "<Left><Home><S-Right><C-b><BS><C-e><Left>");
+    let picker = app.picker().unwrap();
+    assert_eq!((picker.query.text(), picker.query.cursor()), ("example", 6));
+    assert_eq!((&picker.items, picker.selected), (&ranked, 1));
+    // Typing at the cursor ranks the items again and selects the first.
+    keys(&mut app, "<Home>b:");
+    let picker = app.picker().unwrap();
+    assert_eq!(
+        (picker.query.text(), picker.query.cursor()),
+        ("b:example", 2)
+    );
+    assert_eq!(picker.items[0].key, PickerKey::Room(id("!b:example.org")));
+    assert_eq!(picker.items.len(), 1);
+    assert_eq!(picker.selected, 0);
+}
+
+#[test]
+fn a_paste_goes_in_at_the_cursor() {
+    let mut app = app();
+    keys(&mut app, ":open .org<Home><S-Right><Right>");
+    assert_eq!(paste(&mut app, "c:example\nrest", None), vec![]);
+    assert_eq!(line(&app), Some((LineKind::Command, "open c:example.org")));
+    assert_eq!(line_cursor(&app), "open c:example".len());
+
+    keys(&mut app, "<Esc><Space><Space>.org<Home>");
+    paste(&mut app, "b:example", None);
+    let picker = app.picker().unwrap();
+    assert_eq!(
+        (picker.query.text(), picker.query.cursor()),
+        ("b:example.org", 9)
+    );
+    assert_eq!(picker.items[0].key, PickerKey::Room(id("!b:example.org")));
+    assert_eq!(picker.items.len(), 1);
+}
+
+#[test]
+fn a_binding_in_picker_takes_a_line_editing_key_first() {
+    let cancel = Binding::single(Action::PickerCancel);
+    let mut app = app_with(vec![(TableId::Picker, seq("<C-e>"), cancel)]);
+    keys(&mut app, "<Space><Space>ab<Home><C-e>");
+    assert!(app.picker().is_none());
+    // Without it, `<C-e>` moves the cursor to the end.
+    let mut app = self::app();
+    keys(&mut app, "<Space><Space>ab<Home><C-e>");
+    assert_eq!(app.picker().unwrap().query.cursor(), 2);
+}
+
+#[test]
+fn the_recovery_key_is_edited_at_its_cursor_in_its_own_buffer() {
+    let mut app = app();
+    keys(&mut app, ":recover<CR>");
+    // A recovery key of 59 characters with a typo in its second group.
+    let typo = "EsTa bcdX fghi jkmn opqr stuv wxyz ABCD EFGH JKLM NPQR STUV";
+    paste(&mut app, typo, None);
+    keys(&mut app, "<Home><S-Right><S-Right><BS>e");
+    let prompt = app.secret_prompt().unwrap();
+    assert_eq!((prompt.clusters, prompt.cursor), (59, 9));
+    let effects = keys(&mut app, "<CR>");
+    let [Effect::Matrix(MatrixEffect::Recover(key))] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    let fixed = typo.replace('X', "e");
+    assert_eq!(key.expose(), fixed);
+    // The 128 bytes `start_recovery` allocated, never reallocated.
+    let buffer: &String = std::borrow::Borrow::borrow(key);
+    assert_eq!(buffer.capacity(), 128);
+
+    // One `*` per grapheme cluster, the cursor among them.
+    keys(&mut app, ":recover<CR>");
+    paste(&mut app, "pass 👨\u{200d}👩\u{200d}👧 word", None);
+    keys(&mut app, "<S-Left><S-Left>");
+    let prompt = app.secret_prompt().unwrap();
+    assert_eq!(
+        (prompt.prompt, prompt.clusters, prompt.cursor),
+        ("Recovery key: ", 11, 5)
+    );
+    keys(&mut app, "<BS><Del>");
+    let prompt = app.secret_prompt().unwrap();
+    assert_eq!((prompt.clusters, prompt.cursor), (9, 4));
+    // `<BS>` at the start, also of an empty key, keeps the prompt.
+    keys(&mut app, "<C-u><End><C-u><BS>");
+    let prompt = app.secret_prompt().unwrap();
+    assert_eq!((prompt.clusters, prompt.cursor), (0, 0));
 }
 
 fn text_view(text: String) -> Effect {

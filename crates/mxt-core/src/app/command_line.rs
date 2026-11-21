@@ -6,7 +6,8 @@ use crate::command::{Argument, COMMANDS, parse_command};
 use crate::effect::Effect;
 use crate::emoji;
 use crate::fuzzy;
-use crate::keys::{Key, KeyCode, Modifiers};
+use crate::keys::Key;
+use crate::line::{LineChange, LineEditor};
 use crate::msg::Pane;
 use crate::rooms::RoomList;
 
@@ -18,11 +19,12 @@ pub enum LineKind {
     Search(Pane),
 }
 
-/// The open command line, rendered as `:` or `/` followed by `text`.
+/// The open command line, rendered as `:` or `/` followed by its text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandLine {
     pub kind: LineKind,
-    pub text: String,
+    /// The text after the prompt, and its cursor.
+    pub input: LineEditor,
 }
 
 /// The open line and its completion, which ends with the line.
@@ -31,7 +33,8 @@ pub(super) struct OpenLine {
     completion: Option<Completion>,
 }
 
-/// The candidates of `command_line.complete` since the last edit.
+/// The candidates of `command_line.complete` since the last edit or cursor
+/// move.
 struct Completion {
     /// The text before the first press.
     typed: String,
@@ -41,59 +44,8 @@ struct Completion {
     shown: usize,
 }
 
-/// An edit of a text the core owns: the line text or the picker query.
-pub(super) enum Edit {
-    Insert(char),
-    /// `<BS>`: delete the last character.
-    Backspace,
-    /// `<C-u>`
-    Clear,
-    /// `<C-w>`
-    DeleteWord,
-}
-
-impl Edit {
-    pub(super) fn of(key: Key) -> Option<Edit> {
-        if let Some(c) = key.text() {
-            return Some(Edit::Insert(c));
-        }
-        const NONE: Modifiers = Modifiers {
-            ctrl: false,
-            alt: false,
-            shift: false,
-        };
-        const CTRL: Modifiers = Modifiers {
-            ctrl: true,
-            alt: false,
-            shift: false,
-        };
-        match (key.code(), key.mods()) {
-            (KeyCode::Backspace, NONE) => Some(Edit::Backspace),
-            (KeyCode::Char('u'), CTRL) => Some(Edit::Clear),
-            (KeyCode::Char('w'), CTRL) => Some(Edit::DeleteWord),
-            _ => None,
-        }
-    }
-
-    /// Applies the edit; `false` when a backspace finds `text` empty.
-    pub(super) fn apply(self, text: &mut String) -> bool {
-        match self {
-            Edit::Insert(c) => text.push(c),
-            Edit::Backspace => return text.pop().is_some(),
-            Edit::Clear => text.clear(),
-            // Trailing whitespace, then the word before it.
-            Edit::DeleteWord => {
-                let word_end = text.trim_end().len();
-                let kept = text[..word_end].trim_end_matches(|c: char| !c.is_whitespace());
-                text.truncate(kept.len());
-            }
-        }
-        true
-    }
-}
-
 impl App {
-    /// The open command line, rendered as `:` or `/` followed by `text`.
+    /// The open command line, rendered as `:` or `/` followed by its text.
     pub fn command_line(&self) -> Option<&CommandLine> {
         self.command_line.as_ref().map(|open| &open.line)
     }
@@ -102,31 +54,31 @@ impl App {
         self.command_line = Some(OpenLine {
             line: CommandLine {
                 kind,
-                text: String::new(),
+                input: LineEditor::default(),
             },
             completion: None,
         });
     }
 
-    /// A key released to the line: edits the text, and a backspace on an
-    /// empty line closes it; other keys are ignored.
+    /// A key released to the line: the line editor's. Editing the text or
+    /// moving the cursor ends a completion, and a backspace on an empty line
+    /// closes it.
     pub(super) fn type_into_line(&mut self, key: Key) {
-        let (Some(open), Some(edit)) = (&mut self.command_line, Edit::of(key)) else {
+        let Some(open) = &mut self.command_line else {
             return;
         };
-        if !edit.apply(&mut open.line.text) {
-            self.command_line = None;
-            return;
+        match open.line.input.key(key) {
+            LineChange::Text | LineChange::Cursor => open.completion = None,
+            LineChange::BackspaceOnEmpty => self.command_line = None,
+            LineChange::Nothing => {}
         }
-        open.completion = None;
     }
 
-    /// Pasted text without line breaks, added to the line's text.
+    /// Pasted text without line breaks, inserted at the cursor.
     pub(super) fn paste_into_line(&mut self, text: &str) {
         if let Some(open) = &mut self.command_line
-            && !text.is_empty()
+            && open.line.input.insert(text)
         {
-            open.line.text.push_str(text);
             open.completion = None;
         }
     }
@@ -141,7 +93,8 @@ impl App {
         let Some(open) = self.command_line.take() else {
             return;
         };
-        let CommandLine { kind, text } = open.line;
+        let CommandLine { kind, input } = open.line;
+        let text = input.into_text();
         match kind {
             LineKind::Command => match parse_command(&text) {
                 Ok(Some(action)) => self.run(&action, 1, effects),
@@ -152,7 +105,8 @@ impl App {
         }
     }
 
-    /// Replaces the text with the next candidate; after the last one the
+    /// Replaces the whole text, wherever the cursor is, with the next
+    /// candidate and puts the cursor at the end; after the last one the
     /// typed text comes back, then the cycle repeats. A single candidate ends
     /// the completion, so the next press completes the new text (`open `
     /// goes on to room names), like vim.
@@ -166,15 +120,16 @@ impl App {
         let completion = match &mut open.completion {
             Some(completion) => completion,
             None => {
-                let mut candidates = candidates(&open.line.text, &self.rooms);
+                let text = open.line.input.text();
+                let mut candidates = candidates(text, &self.rooms);
                 if candidates.len() <= 1 {
                     if let Some(only) = candidates.pop() {
-                        open.line.text = only;
+                        open.line.input.set_text(&only);
                     }
                     return;
                 }
                 open.completion.insert(Completion {
-                    typed: open.line.text.clone(),
+                    typed: text.to_owned(),
                     shown: candidates.len(),
                     candidates,
                 })
@@ -185,7 +140,7 @@ impl App {
             .candidates
             .get(completion.shown)
             .unwrap_or(&completion.typed);
-        open.line.text.clone_from(shown);
+        open.line.input.set_text(shown);
     }
 }
 

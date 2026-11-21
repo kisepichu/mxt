@@ -56,7 +56,7 @@ break stays a line break and never sends the message.
   place of the selection; `u` undoes it, and mxt's register keeps the last
   yank.
 - The command line, `/` and the pickers hold one line, so they take the
-  text up to its first line break.
+  text up to its first line break and put it in at the line's cursor.
 - The recovery key prompt of `:recover` takes the text up to its first line
   break too, masked as `*` like typed text, so a key copied with a line break
   is not submitted yet; `<CR>` submits it. The text never reaches the
@@ -199,9 +199,10 @@ The composer and the message view put the terminal cursor at the editor's
 cursor, so an input method shows its preedit and candidate window there,
 also after wide characters and on wrapped rows, and committed text is
 inserted at the cursor. In the editors' search mode the cursor is on the
-bottom line instead. Text committed in the command line and in pickers is
-typed into them, so `:open` and the room picker take room names in any
-script.
+bottom line instead. The command line, the `/` search line, picker queries
+and the recovery key prompt put the terminal cursor at the line's cursor
+too, and text committed in them is typed in there, so `:open` and the room
+picker take room names in any script.
 
 - `<Esc>` while a preedit is open goes to the input method, not to mxt, and
   the editor stays in insert mode. Press `<Esc>` again once the preedit is
