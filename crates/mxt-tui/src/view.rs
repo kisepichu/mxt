@@ -12,6 +12,7 @@ use ratatui::Frame;
 use ratatui::buffer::CellWidth;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::symbols::line::HORIZONTAL;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding};
 use unicode_segmentation::UnicodeSegmentation;
@@ -21,7 +22,7 @@ use crate::composer::Composer;
 use crate::editor::Editor;
 use crate::image_view::Images;
 use crate::overlay::Overlays;
-use crate::timeline_view::{TimelinePane, file_size};
+use crate::timeline_view::{MAX_SHOWN_NEWER, TimelinePane, file_size, newer_items};
 
 /// Terminals narrower than this give the room list a third of their width,
 /// whatever `ui.room_list.width` says.
@@ -43,6 +44,8 @@ pub(crate) const ERROR: Style = Style::new().fg(Color::Red);
 /// Between the groups of the status line.
 const GAP: &str = "  ";
 const ELLIPSIS: &str = "…";
+/// What the composer's top rule is drawn of: the block's border.
+const RULE: &str = HORIZONTAL;
 /// Between the network part and the room part of a displayed name.
 const SEPARATOR: &str = " / ";
 /// A name keeps at least this many columns where the layout can make room:
@@ -234,7 +237,17 @@ pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
                     Layout::vertical([Constraint::Fill(1), Constraint::Length(height)])
                         .areas(right);
                 visible.timeline = draw_timeline(frame, timeline, app, panes.timeline);
-                draw_composer(frame, composer_area, app, composer.as_deref_mut(), focused);
+                let newer = visible
+                    .timeline
+                    .map_or(0, |(_, last)| newer_items(app.timeline(), last));
+                draw_composer(
+                    frame,
+                    composer_area,
+                    app,
+                    composer.as_deref_mut(),
+                    focused,
+                    newer,
+                );
                 if let Some((members, selected)) = app.mention_menu() {
                     panes.overlays.draw_mention_menu(
                         frame,
@@ -535,29 +548,62 @@ fn composer_height(composer: Option<&Composer>, pane: Rect) -> u16 {
     u16::try_from(rows.min(most)).unwrap_or(1) + 1
 }
 
-/// The open room's composer: a rule naming a reply or an edit, then the
-/// text. A room whose composer never had focus shows an empty one.
+/// The open room's composer: a rule naming a reply or an edit and ending in
+/// the hint for the `newer` items below the timeline pane, then the text. A
+/// room whose composer never had focus shows an empty one.
 fn draw_composer(
     frame: &mut Frame,
     area: Rect,
     app: &App,
     composer: Option<&mut Composer>,
     focused: bool,
+    newer: usize,
 ) {
     let mut block = Block::new()
         .borders(Borders::TOP)
         .border_style(DIM)
         .padding(ENTRIES_PADDING);
+    // The columns the label takes from the rule's left end.
+    let mut label_width = 0;
     if let Some(label) = draft_label(app) {
-        block = block.title(Line::from(vec![
-            Span::styled("─", DIM),
-            Span::raw(format!(" {label} ")),
-        ]));
+        let label = format!(" {label} ");
+        label_width = text_width(RULE) + text_width(&label);
+        block = block.title(Line::from(vec![Span::styled(RULE, DIM), Span::raw(label)]));
     }
     match composer {
         Some(composer) => composer.draw(frame, area, block, focused),
         None => frame.render_widget(block, area),
     }
+    draw_newer_hint(frame, area, label_width, newer);
+}
+
+/// The newer-messages hint (design, "Timeline") over the right end of the
+/// rule, `area`'s first row: ` ↓ N newer ` and a `─`, dim, with `99+` for
+/// counts above 99, after the label's `label_width` columns and at least
+/// one `─`. Where that does not fit, ` ↓ N ` and the `─`; else nothing, so
+/// the label is never cut for it.
+fn draw_newer_hint(frame: &mut Frame, area: Rect, label_width: usize, newer: usize) {
+    if newer == 0 || area.height == 0 {
+        return;
+    }
+    let count = newer.min(MAX_SHOWN_NEWER);
+    let plus = if newer > MAX_SHOWN_NEWER { "+" } else { "" };
+    let room = usize::from(area.width).saturating_sub(label_width + text_width(RULE));
+    let mut hint = format!(" ↓ {count}{plus} newer {RULE}");
+    if text_width(&hint) > room {
+        hint = format!(" ↓ {count}{plus} {RULE}");
+        if text_width(&hint) > room {
+            return;
+        }
+    }
+    let width = u16::try_from(text_width(&hint)).unwrap_or(area.width);
+    let hint_area = Rect {
+        x: area.right() - width,
+        width,
+        height: 1,
+        ..area
+    };
+    frame.render_widget(Line::styled(hint, DIM), hint_area);
 }
 
 /// What the open room's draft is, unless it is a new message.
@@ -857,7 +903,7 @@ pub(crate) mod tests {
         }
 
         /// A terminal `width` columns wide and 12 rows high.
-        fn sized(width: u16, room_list_layout: RoomListLayout) -> Screen {
+        pub(crate) fn sized(width: u16, room_list_layout: RoomListLayout) -> Screen {
             Screen {
                 terminal: Terminal::new(TestBackend::new(width, 12)).unwrap(),
                 room_list: ListState::default(),
@@ -887,11 +933,9 @@ pub(crate) mod tests {
             visible
         }
 
-        /// The bottom line as drawn, without the cells wide characters
-        /// cover.
-        fn bottom_line(&self) -> String {
+        /// Row `y` as drawn, without the cells wide characters cover.
+        fn row(&self, y: u16) -> String {
             let buffer = self.terminal.backend().buffer();
-            let y = buffer.area.bottom() - 1;
             let mut line = String::new();
             let mut x = buffer.area.left();
             while x < buffer.area.right() {
@@ -900,6 +944,16 @@ pub(crate) mod tests {
                 x += u16::try_from(grapheme_width(symbol).max(1)).unwrap();
             }
             line
+        }
+
+        fn bottom_line(&self) -> String {
+            self.row(self.terminal.backend().buffer().area.bottom() - 1)
+        }
+
+        /// The row of the composer's top rule: over its one row of text
+        /// and the bottom line.
+        pub(crate) fn composer_rule(&self) -> String {
+            self.row(self.terminal.backend().buffer().area.bottom() - 3)
         }
 
         /// The bottom line without trailing spaces, and the terminal
@@ -1038,6 +1092,29 @@ pub(crate) mod tests {
         assert_eq!(screen.prompt(&app), (":ab日本語".into(), 9));
         press(&mut app, "<Esc>:recover<CR>abc<Left><Left>");
         assert_eq!(screen.prompt(&app), ("Recovery key: ***".into(), 15));
+    }
+
+    #[test]
+    fn the_terminal_cursor_sits_on_the_picker_query_cursor() {
+        let mut app = app();
+        let mut screen = Screen::new();
+        press(&mut app, "<Space><Space>a日本<Home>");
+        screen.draw(&app, None);
+        assert!(screen.row(1).contains("│> a日本 "), "{:?}", screen.row(1));
+        // The query starts in the cell after the picker's `> `, on the row
+        // under its top border.
+        let width = screen.terminal.backend().buffer().area.width;
+        let start = (1..width)
+            .find(|&x| screen.cell(x - 1, 1).symbol() == ">" && screen.cell(x, 1).symbol() == " ")
+            .unwrap()
+            + 1;
+        let cursor = screen.terminal.get_cursor_position().unwrap();
+        assert_eq!(cursor, Position::new(start, 1));
+        press(&mut app, "<End>");
+        screen.draw(&app, None);
+        // `a日本` takes five columns.
+        let cursor = screen.terminal.get_cursor_position().unwrap();
+        assert_eq!(cursor, Position::new(start + 5, 1));
     }
 
     #[test]
