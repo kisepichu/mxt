@@ -1,7 +1,8 @@
 //! The composers (design, "Terminal adapter and the composer", "Mention
-//! completion"): an edtui editor per room, created on first focus and kept
-//! when switching rooms. The core only knows whether a composer is empty and
-//! the `@` token at its cursor, which a composer reports when they change.
+//! completion"): an edtui editor per timeline, created on first focus and
+//! kept when switching rooms. The core only knows whether a composer is
+//! empty and the `@` token at its cursor, which a composer reports when
+//! they change.
 
 use std::collections::HashMap;
 use std::io;
@@ -9,7 +10,7 @@ use std::io;
 use edtui::actions::{LineBreak, MoveForward, OpenSystemEditor, SwitchMode};
 use edtui::{EditorState, Index2, Lines, RowIndex};
 use mxt_core::action::FocusMode;
-use mxt_core::ids::RoomId;
+use mxt_core::ids::TimelineId;
 use mxt_core::keys::Key;
 use mxt_core::msg::{EditorMode, Msg};
 use ratatui::Frame;
@@ -21,49 +22,50 @@ use crate::editor::Editor;
 
 pub(crate) struct Composers {
     register: SharedRegister,
-    rooms: HashMap<RoomId, Composer>,
-    /// The room of the last `FocusComposer`, whose editor `ReplayKeys` feeds.
-    focused: Option<RoomId>,
+    timelines: HashMap<TimelineId, Composer>,
+    /// The timeline of the last `FocusComposer`, whose editor `ReplayKeys`
+    /// feeds.
+    focused: Option<TimelineId>,
 }
 
 impl Composers {
     pub(crate) fn new(register: SharedRegister) -> Composers {
         Composers {
             register,
-            rooms: HashMap::new(),
+            timelines: HashMap::new(),
             focused: None,
         }
     }
 
-    pub(crate) fn get(&self, room: &RoomId) -> Option<&Composer> {
-        self.rooms.get(room)
+    pub(crate) fn get(&self, timeline: &TimelineId) -> Option<&Composer> {
+        self.timelines.get(timeline)
     }
 
-    pub(crate) fn get_mut(&mut self, room: &RoomId) -> Option<&mut Composer> {
-        self.rooms.get_mut(room)
+    pub(crate) fn get_mut(&mut self, timeline: &TimelineId) -> Option<&mut Composer> {
+        self.timelines.get_mut(timeline)
     }
 
-    /// The room's composer, created in normal mode if it does not exist.
-    pub(crate) fn get_or_create(&mut self, room: &RoomId) -> &mut Composer {
-        self.rooms
-            .entry(room.clone())
-            .or_insert_with(|| Composer::new(room.clone(), self.register.clone()))
+    /// The timeline's composer, created in normal mode if it does not exist.
+    pub(crate) fn get_or_create(&mut self, timeline: &TimelineId) -> &mut Composer {
+        self.timelines
+            .entry(timeline.clone())
+            .or_insert_with(|| Composer::new(timeline.clone(), self.register.clone()))
     }
 
-    /// `FocusComposer`: the room's composer gets the keys from now on.
-    pub(crate) fn focus(&mut self, room: RoomId, mode: FocusMode, msgs: &mut Vec<Msg>) {
-        self.get_or_create(&room).focus(mode, msgs);
-        self.focused = Some(room);
+    /// `FocusComposer`: the timeline's composer gets the keys from now on.
+    pub(crate) fn focus(&mut self, timeline: TimelineId, mode: FocusMode, msgs: &mut Vec<Msg>) {
+        self.get_or_create(&timeline).focus(mode, msgs);
+        self.focused = Some(timeline);
     }
 
     /// The composer that last got the focus.
     pub(crate) fn focused_mut(&mut self) -> Option<&mut Composer> {
-        self.rooms.get_mut(self.focused.as_ref()?)
+        self.timelines.get_mut(self.focused.as_ref()?)
     }
 }
 
 pub(crate) struct Composer {
-    room: RoomId,
+    timeline: TimelineId,
     editor: Editor,
     register: SharedRegister,
     /// Whether the composer is empty as the core knows it: as last reported,
@@ -74,9 +76,9 @@ pub(crate) struct Composer {
 }
 
 impl Composer {
-    fn new(room: RoomId, register: SharedRegister) -> Composer {
+    fn new(timeline: TimelineId, register: SharedRegister) -> Composer {
         Composer {
-            room,
+            timeline,
             editor: Editor::new("", register.clone()),
             register,
             empty: true,
@@ -129,7 +131,7 @@ impl Composer {
         }
         self.query = self.token();
         msgs.push(Msg::MentionQuery {
-            room: self.room.clone(),
+            timeline: self.timeline.clone(),
             query: self.query.clone(),
         });
     }
@@ -252,7 +254,7 @@ impl Composer {
         if empty != self.empty {
             self.empty = empty;
             msgs.push(Msg::ComposerEdited {
-                room: self.room.clone(),
+                timeline: self.timeline.clone(),
                 empty,
             });
         }
@@ -262,7 +264,7 @@ impl Composer {
         if query != self.query {
             self.query.clone_from(&query);
             msgs.push(Msg::MentionQuery {
-                room: self.room.clone(),
+                timeline: self.timeline.clone(),
                 query,
             });
         }
@@ -306,7 +308,7 @@ mod tests {
     use mxt_core::action::{Action, Binding};
     use mxt_core::app::{App, Focus};
     use mxt_core::effect::{Effect, UiEffect};
-    use mxt_core::ids::{Timestamp, UserId};
+    use mxt_core::ids::{RoomId, Timestamp, UserId};
     use mxt_core::keymap::{Keymap, TableId};
     use mxt_core::keys::KeySeq;
     use mxt_core::resolver::TimerId;
@@ -315,8 +317,12 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    fn main_of(room: &str) -> TimelineId {
+        TimelineId::main(RoomId::new(room))
+    }
+
     fn composer() -> Composer {
-        Composer::new(RoomId::new("!room:example.org"), SharedRegister::default())
+        Composer::new(main_of("!room:example.org"), SharedRegister::default())
     }
 
     /// A composer that got the focus in insert mode, then the keys in `text`
@@ -338,14 +344,14 @@ mod tests {
 
     fn edited(empty: bool) -> Msg {
         Msg::ComposerEdited {
-            room: RoomId::new("!room:example.org"),
+            timeline: main_of("!room:example.org"),
             empty,
         }
     }
 
     fn query(query: Option<&str>) -> Msg {
         Msg::MentionQuery {
-            room: RoomId::new("!room:example.org"),
+            timeline: main_of("!room:example.org"),
             query: query.map(str::to_owned),
         }
     }
@@ -667,13 +673,14 @@ mod tests {
     }
 
     /// Types `text` as the terminal does: each key goes to the core with
-    /// the open room's composer's key mode while the composer has focus,
-    /// and the effects go to [`apply`]. The last timer the core started.
+    /// the shown timeline's composer's key mode while the composer has
+    /// focus, and the effects go to [`apply`]. The last timer the core
+    /// started.
     fn run(app: &mut App, composers: &mut Composers, text: &str) -> Option<TimerId> {
         let mut timer = None;
         for key in keys(text) {
             let editor = (app.focus() == Focus::Composer)
-                .then(|| app.open_room().and_then(|room| composers.get(room)))
+                .then(|| app.shown_timeline().and_then(|shown| composers.get(&shown)))
                 .flatten()
                 .map(Composer::key_mode);
             let effects = app.update(Msg::Key { key, editor });
@@ -691,16 +698,16 @@ mod tests {
         for effect in effects {
             match effect {
                 Effect::Ui(UiEffect::StartTimer { id, .. }) => timer = Some(id),
-                Effect::Ui(UiEffect::FocusComposer { room, mode }) => {
-                    composers.focus(room, mode, &mut msgs);
+                Effect::Ui(UiEffect::FocusComposer { timeline, mode }) => {
+                    composers.focus(timeline, mode, &mut msgs);
                 }
                 Effect::Ui(UiEffect::ReplayKeys(keys)) => {
                     if let Some(composer) = composers.focused_mut() {
                         composer.replay(&keys, &mut msgs);
                     }
                 }
-                Effect::Ui(UiEffect::InsertNewline(room)) => {
-                    if let Some(composer) = composers.get_mut(&room) {
+                Effect::Ui(UiEffect::InsertNewline(timeline)) => {
+                    if let Some(composer) = composers.get_mut(&timeline) {
                         composer.insert_newline(&mut msgs);
                     }
                 }
@@ -714,10 +721,7 @@ mod tests {
     }
 
     fn text_of(composers: &Composers) -> String {
-        composers
-            .get(&RoomId::new("!a:example.org"))
-            .unwrap()
-            .text()
+        composers.get(&main_of("!a:example.org")).unwrap().text()
     }
 
     #[test]
@@ -814,7 +818,7 @@ mod tests {
         // second once `timeoutlen` passes.
         let (mut app, mut composers) = composing_with(keymap(), "one<C-j>two");
         let row = |composers: &Composers| {
-            let composer = composers.get(&RoomId::new("!a:example.org")).unwrap();
+            let composer = composers.get(&main_of("!a:example.org")).unwrap();
             (composer.editor.state.cursor.row, composer.key_mode())
         };
         let timer = run(&mut app, &mut composers, "gg").unwrap();
@@ -836,7 +840,7 @@ mod tests {
             Keymap::new(&leader(), [(TableId::Normal, keys, binding)])
         };
         let row = |composers: &Composers| {
-            let composer = composers.get(&RoomId::new("!a:example.org")).unwrap();
+            let composer = composers.get(&main_of("!a:example.org")).unwrap();
             composer.editor.state.cursor.row
         };
         // `gg` keeps the column, as in nvim, so `x` deletes the `e`.

@@ -117,7 +117,7 @@ pub(crate) struct Panes<'a> {
     /// The decoded images, if there is a picker for the terminal's graphics
     /// protocol.
     pub(crate) images: Option<&'a mut Images>,
-    /// The open room's composer, once it had focus.
+    /// The shown timeline's composer, once it had focus.
     pub(crate) composer: Option<&'a mut Composer>,
     pub(crate) overlays: &'a mut Overlays,
 }
@@ -548,9 +548,9 @@ fn composer_height(composer: Option<&Composer>, pane: Rect) -> u16 {
     u16::try_from(rows.min(most)).unwrap_or(1) + 1
 }
 
-/// The open room's composer: a rule naming a reply or an edit and ending in
-/// the hint for the `newer` items below the timeline pane, then the text. A
-/// room whose composer never had focus shows an empty one.
+/// The shown timeline's composer: a rule naming a reply or an edit and
+/// ending in the hint for the `newer` items below the timeline pane, then
+/// the text. A timeline whose composer never had focus shows an empty one.
 fn draw_composer(
     frame: &mut Frame,
     area: Rect,
@@ -606,9 +606,9 @@ fn draw_newer_hint(frame: &mut Frame, area: Rect, label_width: usize, newer: usi
     frame.render_widget(Line::styled(hint, DIM), hint_area);
 }
 
-/// What the open room's draft is, unless it is a new message.
+/// What the shown timeline's draft is, unless it is a new message.
 fn draft_label(app: &App) -> Option<String> {
-    match app.draft(app.open_room()?)? {
+    match app.draft(&app.shown_timeline()?)? {
         Draft::New => None,
         Draft::Reply { to } => {
             let sender = app.timeline().iter().find_map(|entry| match entry {

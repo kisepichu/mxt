@@ -1,7 +1,7 @@
 use super::*;
 use crate::action::{Action, Binding};
 use crate::effect::{Effect, MatrixEffect, RecoveryKey, UiEffect};
-use crate::ids::{RoomId, Timestamp, UserId};
+use crate::ids::{RoomId, TimelineId, Timestamp, UserId};
 use crate::keymap::{Keymap, TableId};
 use crate::keys::KeySeq;
 use crate::msg::{EditorMode, Msg, Pane};
@@ -26,6 +26,10 @@ fn seq(text: &str) -> KeySeq {
 }
 fn id(s: &str) -> RoomId {
     RoomId::new(s)
+}
+/// The room's main timeline.
+fn main_of(s: &str) -> TimelineId {
+    TimelineId::main(id(s))
 }
 fn room(rid: &str, at: u64, messages: u64) -> RoomSummary {
     RoomSummary {

@@ -16,7 +16,7 @@ use edtui::system_editor;
 use futures_util::StreamExt as _;
 use mxt_core::app::{App, Focus};
 use mxt_core::effect::UiEffect;
-use mxt_core::ids::RoomId;
+use mxt_core::ids::TimelineId;
 use mxt_core::msg::{EditorMode, Msg, Pane};
 use mxt_core::resolver::TimerId;
 use mxt_core::rich::is_web_url;
@@ -177,7 +177,9 @@ impl Tui {
             overlays,
             ..
         } = self;
-        let composer = app.open_room().and_then(|room| composers.get_mut(room));
+        let composer = app
+            .shown_timeline()
+            .and_then(|shown| composers.get_mut(&shown));
         let mut visible = view::Visible::default();
         terminal.draw(|frame| {
             let panes = Panes {
@@ -223,10 +225,11 @@ impl Tui {
     /// and pastes `Msg::Paste` (with `\n` line breaks; an empty paste is
     /// dropped), both with the key mode (see `Editor::key_mode`) of the
     /// editor that has the keys: the message view's while it is open,
-    /// otherwise the open room's composer's while it has focus. Focus events
-    /// become `Msg::TerminalFocus`. A resize produces nothing (the loop
-    /// redraws after every event anyway) but takes tmux's cell size again
-    /// for images (see [`Images::resized`]). Mouse events are not enabled.
+    /// otherwise the shown timeline's composer's while it has focus. Focus
+    /// events become `Msg::TerminalFocus`. A resize produces nothing (the
+    /// loop redraws after every event anyway) but takes tmux's cell size
+    /// again for images (see [`Images::resized`]). Mouse events are not
+    /// enabled.
     pub fn handle_event(&mut self, app: &App, event: Event) -> Vec<Msg> {
         let msg = match event {
             Event::Key(event) => key_from_crossterm(event).map(|key| Msg::Key {
@@ -258,8 +261,8 @@ impl Tui {
         if app.focus() != Focus::Composer {
             return None;
         }
-        let room = app.open_room()?;
-        self.composers.get(room).map(Composer::key_mode)
+        let shown = app.shown_timeline()?;
+        self.composers.get(&shown).map(Composer::key_mode)
     }
 
     /// Executes a UI effect and returns what it reports to the core.
@@ -276,7 +279,7 @@ impl Tui {
     ///   URLs. A refusal or a failure to start it becomes `Msg::EffectFailed`.
     /// - `Yank` copies into the register, and the next draw sends it to the
     ///   terminal clipboard.
-    /// - `FocusComposer` creates the room's composer on first focus.
+    /// - `FocusComposer` creates the timeline's composer on first focus.
     ///   `RequestSubmit` answers `Msg::Submit` with the composer's text.
     /// - A composer reports `Msg::ComposerEdited` when edits change whether
     ///   it is empty and, in insert mode, `Msg::MentionQuery` when they
@@ -334,32 +337,36 @@ impl Tui {
             }),
             UiEffect::CloseView => self.close_view(),
             UiEffect::Yank(text) => self.register.copy(text),
-            UiEffect::FocusComposer { room, mode } => self.composers.focus(room, mode, &mut msgs),
-            UiEffect::RequestSubmit(room) => {
-                if let Some(composer) = self.composers.get(&room) {
+            UiEffect::FocusComposer { timeline, mode } => {
+                self.composers.focus(timeline, mode, &mut msgs);
+            }
+            UiEffect::RequestSubmit(timeline) => {
+                if let Some(composer) = self.composers.get(&timeline) {
                     let body = composer.text();
-                    msgs.push(Msg::Submit { room, body });
+                    msgs.push(Msg::Submit { timeline, body });
                 }
             }
-            UiEffect::InsertNewline(room) => {
-                if let Some(composer) = self.composers.get_mut(&room) {
+            UiEffect::InsertNewline(timeline) => {
+                if let Some(composer) = self.composers.get_mut(&timeline) {
                     composer.insert_newline(&mut msgs);
                 }
             }
-            UiEffect::LoadComposer { room, text } => {
-                self.composers.get_or_create(&room).load(&text, &mut msgs);
+            UiEffect::LoadComposer { timeline, text } => {
+                self.composers
+                    .get_or_create(&timeline)
+                    .load(&text, &mut msgs);
             }
-            UiEffect::ClearComposer(room) => {
-                if let Some(composer) = self.composers.get_mut(&room) {
+            UiEffect::ClearComposer(timeline) => {
+                if let Some(composer) = self.composers.get_mut(&timeline) {
                     composer.clear();
                 }
             }
-            UiEffect::ReplaceMentionToken { room, text } => {
-                if let Some(composer) = self.composers.get_mut(&room) {
+            UiEffect::ReplaceMentionToken { timeline, text } => {
+                if let Some(composer) = self.composers.get_mut(&timeline) {
                     composer.replace_token(&text, &mut msgs);
                 }
             }
-            UiEffect::ExternalEditor(room) => self.edit_externally(&room, &mut msgs),
+            UiEffect::ExternalEditor(timeline) => self.edit_externally(&timeline, &mut msgs),
             UiEffect::Quit => self.should_quit = true,
         }
         msgs
@@ -376,7 +383,7 @@ impl Tui {
         self.repaint |= image && self.images.as_ref().is_some_and(Images::stored_by_tmux);
     }
 
-    /// Runs the external editor on the room's composer.
+    /// Runs the external editor on the timeline's composer.
     ///
     /// - The event stream is dropped first. While a poll of it is pending,
     ///   as after a timer won the event loop's `select!`, its reader thread
@@ -396,8 +403,8 @@ impl Tui {
     ///   terminal under it, and edtui enters raw mode and the alternate
     ///   screen again afterwards, so they are left again. The next draw
     ///   then ends the event loop.
-    fn edit_externally(&mut self, room: &RoomId, msgs: &mut Vec<Msg>) {
-        let Some(composer) = self.composers.get_mut(room) else {
+    fn edit_externally(&mut self, timeline: &TimelineId, msgs: &mut Vec<Msg>) {
+        let Some(composer) = self.composers.get_mut(timeline) else {
             return;
         };
         self.events = None;
@@ -531,7 +538,7 @@ mod tests {
     use super::*;
     use crate::view::tests::{Screen, app, press, reset};
     use mxt_core::effect::{Effect, MatrixEffect};
-    use mxt_core::ids::EventId;
+    use mxt_core::ids::{EventId, RoomId};
     use ratatui::backend::Backend as _;
 
     /// Draws a frame and gives the core the timeline report it makes.

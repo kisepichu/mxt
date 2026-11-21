@@ -1,6 +1,6 @@
 //! Messages: what the adapters report to `App::update`.
 
-use crate::ids::{RoomId, SendId, UserId};
+use crate::ids::{RoomId, SendId, TimelineId, UserId};
 use crate::keys::Key;
 use crate::mention::Member;
 use crate::resolver::TimerId;
@@ -112,18 +112,18 @@ pub enum Msg {
     },
     /// The composer's text, answering `UiEffect::RequestSubmit`.
     Submit {
-        room: RoomId,
+        timeline: TimelineId,
         body: String,
     },
-    /// The room's composer became empty or non-empty.
+    /// The timeline's composer became empty or non-empty.
     ComposerEdited {
-        room: RoomId,
+        timeline: TimelineId,
         empty: bool,
     },
     /// The `@` token at the composer's cursor in insert mode changed;
     /// `query` is the text after `@`, `None` without a token.
     MentionQuery {
-        room: RoomId,
+        timeline: TimelineId,
         query: Option<String>,
     },
     /// The room's members, answering `MatrixEffect::LoadMembers`.
