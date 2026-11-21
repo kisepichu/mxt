@@ -275,8 +275,9 @@ timeline cursor also while the room list has focus, whereas `:mute` and
 The status line says `Joining…`, then `Joined <room>` when the room opens,
 or why it failed. A room you are already in just opens. A key you press
 before the answer arrives keeps the room from opening under you; it still
-appears in the room list. mxt does not list spaces, so joining one is an
-error.
+appears in the room list. mxt does not list spaces: a space you are in is
+an error, and `:join` of another space joins it, then says that mxt does
+not list it.
 
 `:join @name:server` looks for a direct message with that person, in this
 order, and opens the first room it finds (the most recently active one
@@ -293,7 +294,9 @@ when a step finds several):
 Only when none is found does it ask `Create a direct message with
 <user>? (y/n)`. `y` creates an encrypted direct message and invites them,
 and the status line says `Created a direct message` when it opens; any
-other key cancels, and nothing is created. Opening an existing direct
+other key cancels, and nothing is created. A key you press before the
+question would appear means no question: the status line says `No direct
+message found; :join again to create one`. Opening an existing direct
 message and joining a room by its alias, ID or link never ask.
 
 ## The editors

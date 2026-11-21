@@ -139,6 +139,18 @@ impl Adapter {
             .await;
     }
 
+    /// The `m.room.create` state request with `content`, expected once.
+    async fn mock_create_event(&self, content: Value) {
+        Mock::given(method("GET"))
+            .and(path_regex(
+                "^/_matrix/client/v3/rooms/[^/]+/state/m\\.room\\.create/?$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(content))
+            .expect(1)
+            .mount(self.server.server())
+            .await;
+    }
+
     /// No room is created: the server checks it when the test ends.
     async fn creates_nothing(&self) {
         self.server.mock_create_room().ok().expect(0).mount().await;
@@ -180,6 +192,10 @@ async fn an_alias_is_resolved_and_joined() {
         .mount()
         .await;
     adapter.mock_join("!mxt:example.org", 1).await;
+    // The store has not seen the room: one request tells it is no space.
+    adapter
+        .mock_create_event(json!({ "room_version": "11" }))
+        .await;
     assert_eq!(
         adapter.answer(join("#mxt:example.org")).await,
         joined("#mxt:example.org", "!mxt:example.org", JoinedHow::Joined)
@@ -311,6 +327,19 @@ async fn a_joined_space_is_an_error_without_a_request() {
     assert_eq!(
         adapter.answer(join("!space:example.org")).await,
         failed("The room is a space, which mxt does not list")
+    );
+}
+
+#[tokio::test]
+async fn a_space_the_join_entered_is_an_error() {
+    let mut adapter = Adapter::without_rooms().await;
+    adapter.mock_join("!space:example.org", 1).await;
+    adapter
+        .mock_create_event(json!({ "room_version": "11", "type": "m.space" }))
+        .await;
+    assert_eq!(
+        adapter.answer(join("!space:example.org")).await,
+        failed("Joined, but the room is a space, which mxt does not list")
     );
 }
 
@@ -449,6 +478,31 @@ async fn with_an_invited_member_one_members_request_decides() {
         adapter.answer(join(BOB)).await,
         joined(BOB, "!dm:example.org", JoinedHow::Already)
     );
+}
+
+#[tokio::test]
+async fn two_member_rooms_with_someone_else_are_passed_over_without_a_request() {
+    let mut adapter = Adapter::without_rooms().await;
+    adapter.creates_nothing().await;
+    adapter
+        .server
+        .mock_get_members()
+        .ok(Vec::new())
+        .expect(0)
+        .mount()
+        .await;
+    // The store has Carol as the other joined member.
+    let with_carol = room_with("!carol:example.org", &[ME, "@carol:example.org"], 0);
+    adapter.server.sync_room(&adapter.client, with_carol).await;
+    // The store has the user's member event only; the heroes are Dave and
+    // nobody is invited.
+    let with_dave = room_with("!dave:example.org", &[ME], 0).set_room_summary(json!({
+        "m.heroes": ["@dave:example.org"],
+        "m.joined_member_count": 2,
+        "m.invited_member_count": 0,
+    }));
+    adapter.server.sync_room(&adapter.client, with_dave).await;
+    assert_eq!(adapter.answer(join(BOB)).await, no_dm(BOB));
 }
 
 #[tokio::test]

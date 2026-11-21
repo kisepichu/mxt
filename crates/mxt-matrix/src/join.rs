@@ -9,8 +9,14 @@ use matrix_sdk::{
     Client, Room, RoomState,
     ruma::{
         MatrixToUri, OwnedRoomId, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomId,
-        RoomOrAliasId, UserId, api::error::ErrorKind, events::room::member::MembershipState,
+        RoomOrAliasId, UserId,
+        api::{client::state::get_state_event_for_key, error::ErrorKind},
+        events::{
+            StateEventType,
+            room::{create::RoomCreateEventContent, member::MembershipState},
+        },
         matrix_uri::MatrixId,
+        room::RoomType::Space,
     },
 };
 use mxt_core::{
@@ -18,7 +24,7 @@ use mxt_core::{
     msg::{JoinedHow, Msg},
 };
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     Error,
@@ -184,7 +190,7 @@ async fn join_room(
                 without_url(error).into()
             })
         })?;
-    if room.is_space() {
+    if entered_space(client, &room).await {
         return Err(Failure::Space { joined: true });
     }
     Ok(joined(target, &room, JoinedHow::Joined))
@@ -199,6 +205,37 @@ fn joined_room(client: &Client, id: &RoomOrAliasId) -> Option<Room> {
             room.canonical_alias().as_deref() == Some(alias)
                 || room.alt_aliases().iter().any(|alt| alt == alias)
         }),
+    }
+}
+
+/// Whether the room the join just entered is a space. The store has a
+/// room's `m.room.create` only once a sync or its invite brought it, so for
+/// a room it never saw, one request reads the event. A failed request is
+/// logged and leaves the store's answer: the room is then answered
+/// `Joined`, and opens when the room list lists it.
+async fn entered_space(client: &Client, room: &Room) -> bool {
+    if room.create_content().is_some() {
+        return room.is_space();
+    }
+    let request = get_state_event_for_key::v3::Request::new(
+        room.room_id().to_owned(),
+        StateEventType::RoomCreate,
+        String::new(),
+    );
+    let content = match client.send(request).await {
+        Ok(response) => response
+            .into_content()
+            .deserialize_as_unchecked::<RoomCreateEventContent>()
+            .map_err(matrix_sdk::Error::from),
+        Err(error) => Err(error.into()),
+    };
+    match content {
+        Ok(content) => content.room_type == Some(Space),
+        Err(error) => {
+            let error = Error::from(without_url(error));
+            warn!("reading the joined room's type failed: {}", error.brief());
+            room.is_space()
+        }
     }
 }
 
@@ -388,20 +425,26 @@ fn is_bots_room(room: &Room, bridge: &Bridge, user: &UserId) -> bool {
         && matches!(bridge.room_type, None | Some(RoomType::Dm))
 }
 
-/// Whether `user` is a joined member of a room with two joined members:
-/// the store decides when it has their member event; otherwise the heroes
-/// when they are exactly that user and nobody is invited (heroes list
-/// invited members too); otherwise one `/members` request.
+/// Whether `user` is a joined member of a room with two joined members.
+/// The store decides when it has their member event, and says no when it
+/// has another joined member besides the user's own account, since only one
+/// other member is joined. Otherwise, with nobody invited (heroes list
+/// invited members too), the heroes decide when they are exactly one user:
+/// that user or someone else. Otherwise one `/members` request.
 async fn is_joined_member(room: &Room, user: &UserId) -> Result<bool, Error> {
     let joined = |membership: &MembershipState| *membership == MembershipState::Join;
     if let Some(member) = room.get_member_no_sync(user).await? {
         return Ok(joined(member.membership()));
     }
+    let own = room.own_user_id();
+    let stored = room.joined_user_ids().await?;
+    if stored.iter().any(|member| member != own && member != user) {
+        return Ok(false);
+    }
     if room.invited_members_count() == 0
         && let [hero] = room.heroes().await.as_slice()
-        && hero.user_id == user
     {
-        return Ok(true);
+        return Ok(hero.user_id == user);
     }
     let member = room
         .get_member(user)

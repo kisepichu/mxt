@@ -650,11 +650,15 @@ Core:
      event keeps it; heroes are not read);
   2. a joined, non-space room with `joined_members_count` 2 where the
      user is joined: `get_member_no_sync` decides when it has the user;
-     else the heroes decide when they are exactly `[user]` and
-     `invited_members_count` is 0; else one `get_member` (a `/members`
-     request) decides. Without bridge state, or with bridge state whose
-     bot is the user, with no `Room::name` and a room type of none or
-     `Dm` (`bridges::Bridge`);
+     else a joined member in the store (`joined_user_ids`) other than the
+     own user and the user rules it out; else, with
+     `invited_members_count` 0, the heroes decide when they are exactly
+     one user (`[user]` finds it, anyone else rules it out); else one
+     `get_member` (a `/members` request) decides. A wrong "not here" can
+     only lead to the question, never to a room created without `y`.
+     Without bridge state, or with bridge state whose bot is the user,
+     with no `Room::name` and a room type of none or `Dm`
+     (`bridges::Bridge`);
   3. the bridged DM rule, sharing `DmCandidate` with the room list so
      both agree;
   4. a pending direct invite from the user, joined: `Joined`.
@@ -685,7 +689,10 @@ Core:
     user and the bot is not taken for the bot's room; a room with no
     member event of the user, heroes `[user]` and no invited members,
     found with `mock_get_members()` expected never; the same with one
-    invited member, decided by one `/members` request; a bridged DM
+    invited member, decided by one `/members` request; two-member rooms
+    with someone else (Carol in the store, or a single other hero with
+    nobody invited) passed over with `mock_get_members()` expected never
+    and `NoDirectMessage` for Bob; a bridged DM
     (bridge state with the bot, the bot, the user and the person) found
     by the person's ID; a pending direct invite from the user is
     accepted. Nothing found: `Msg::NoDirectMessage` with the user.
