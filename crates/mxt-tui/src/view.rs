@@ -7,7 +7,7 @@ use mxt_core::app::{App, CommandLine, Focus, LineKind, StatusKind};
 use mxt_core::effect::ViewContent;
 use mxt_core::msg::{EditorMode, SyncState};
 use mxt_core::room::{Badge, RoomName, RoomSummary};
-use mxt_core::timeline::{Draft, ItemRef, TimelineEntry};
+use mxt_core::timeline::{Draft, ItemRef, TimelineEntry, TimelineItem};
 use ratatui::Frame;
 use ratatui::buffer::CellWidth;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
@@ -56,6 +56,10 @@ const MIN_NAME_WIDTH: usize = 6;
 const NETWORK_INDENT: &str = "  ";
 /// Each character of the recovery key in `SECRET` mode.
 const MASK: &str = "*";
+/// A thread's title row without its root.
+const THREAD: &str = "Thread";
+/// Before the root's sender on a thread's title row.
+const THREAD_ROOT: &str = "Thread · ";
 
 /// `ui.room_list.width` and `ui.room_list.network` (design, "Room list").
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -511,7 +515,9 @@ fn name_width(name: &RoomName) -> usize {
     prefix + text_width(&name.room)
 }
 
-/// The open room's displayed name as a header, and its entries below.
+/// The open room's displayed name as a header, a thread's title row while
+/// a thread is shown in place of the timeline, and the shown timeline's
+/// entries below.
 fn draw_timeline(
     frame: &mut Frame,
     area: Rect,
@@ -519,22 +525,48 @@ fn draw_timeline(
     pane: &mut TimelinePane,
 ) -> Option<(usize, usize)> {
     let block = Block::new().padding(ENTRIES_PADDING);
-    let header = Rect {
-        height: area.height.min(1),
+    let row = |top: u16| Rect {
+        y: area.y + top,
+        height: area.height.saturating_sub(top).min(1),
         ..block.inner(area)
     };
+    let header = row(0);
     let Some(room) = app.open_room().and_then(|id| app.rooms().get(id)) else {
         frame.render_widget(Line::styled("No room open", DIM), header);
         return None;
     };
     let name = Line::from(fit_name(&room.name, BOLD, usize::from(header.width)).0);
     frame.render_widget(name, header);
+    let mut top = header.height;
+    if let Some(thread) = app.thread() {
+        let title = row(top);
+        draw_thread_title(frame, title, thread.item);
+        top += title.height;
+    }
     let entries = Rect {
-        y: area.y + header.height,
-        height: area.height - header.height,
+        y: area.y + top,
+        height: area.height - top,
         ..area
     };
     pane.draw(frame, entries, app)
+}
+
+/// A thread's title row (design, "Threads"): `Thread · ` dim, the root's
+/// sender bold, and the first line of the root's text as `yy` copies it,
+/// cut with `…`; `Thread` alone without the root's item.
+fn draw_thread_title(frame: &mut Frame, area: Rect, root: Option<&TimelineItem>) {
+    let root = root.map(|root| (root, root.content.plain_text()));
+    let segments = match &root {
+        Some((root, text)) => vec![
+            (THREAD_ROOT, DIM),
+            (root.sender_name.as_str(), BOLD),
+            (": ", PLAIN),
+            (text.lines().next().unwrap_or_default(), PLAIN),
+        ],
+        None => vec![(THREAD, DIM)],
+    };
+    let line = Line::from(fit(&segments, usize::from(area.width)).0);
+    frame.render_widget(line, area);
 }
 
 /// The composer's height in `pane`: a rule, and the rows of its text, from
@@ -1447,5 +1479,154 @@ pub(crate) mod tests {
         assert_eq!(screen.draw(&app, None).room_list, Some((1, 11)));
         let rows = screen.list_rows(11);
         assert_eq!([rows[0].as_str(), &rows[10]], ["room 1", "room 11"]);
+    }
+
+    /// The thread of `!a` whose root is `$<root>`.
+    fn thread_of_a(root: u32) -> TimelineId {
+        TimelineId {
+            room: RoomId::new("!a:example.org"),
+            thread: Some(EventId::new(format!("${root}:example.org"))),
+        }
+    }
+
+    /// `message(n)`, sent by Bob.
+    fn from_bob(n: u32) -> TimelineEntry {
+        let mut entry = message(n);
+        if let TimelineEntry::Item(item) = &mut entry {
+            item.sender = UserId::new("@bob:example.org");
+            item.sender_name = "Bob".to_owned();
+        }
+        entry
+    }
+
+    /// Every row as drawn, without trailing spaces.
+    fn screen_rows(screen: &Screen) -> Vec<String> {
+        let height = screen.terminal.backend().buffer().area.height;
+        (0..height)
+            .map(|y| screen.row(y).trim_end().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_thread_shows_its_title_row_under_the_rooms_name() {
+        let mut app = app();
+        press(&mut app, "<CR>");
+        app.update(reset("!a:example.org", 1..4));
+        press(&mut app, "kt");
+        let mut screen = Screen::new();
+        screen.draw(&app, None);
+        let rows = screen_rows(&screen);
+        assert!(rows[0].ends_with("!a:example.org"), "{rows:#?}");
+        assert!(
+            rows[1].ends_with("  Thread · Alice: message 2"),
+            "{rows:#?}"
+        );
+        let title = rows[1].find("Thread").unwrap();
+        let style = |offset: usize| {
+            let x = u16::try_from(rows[1][..title + offset].chars().count()).unwrap();
+            screen.cell(x, 1).modifier
+        };
+        assert!(style(0).contains(Modifier::DIM));
+        assert!(style("Thread · ".len()).contains(Modifier::BOLD));
+
+        // Cut with `…` on a narrow pane.
+        press(&mut app, "<Space>e");
+        let mut narrow = Screen::sized(20, RoomListLayout::default());
+        narrow.draw(&app, None);
+        assert_eq!(screen_rows(&narrow)[1].trim(), "Thread · Alice: …");
+
+        // Neither the thread nor the timeline holds the root.
+        app.update(reset("!a:example.org", 3..4));
+        app.update(Msg::Timeline {
+            timeline: thread_of_a(2),
+            diffs: vec![TimelineDiff::Reset(vec![message(10)])],
+        });
+        narrow.draw(&app, None);
+        assert_eq!(screen_rows(&narrow)[1].trim(), "Thread");
+    }
+
+    #[test]
+    fn a_threads_root_shows_its_row_without_the_unread_mark() {
+        let mut app = app();
+        press(&mut app, "<CR>");
+        let mut root = message(1);
+        if let TimelineEntry::Item(item) = &mut root {
+            item.timestamp = Timestamp::from_millis(1_000);
+            item.thread_summary = Some(mxt_core::timeline::ThreadSummary {
+                replies: std::num::NonZeroU32::new(1).unwrap(),
+                latest: Some(Timestamp::from_millis(5_000)),
+            });
+        }
+        let mut newest = message(2);
+        if let TimelineEntry::Item(item) = &mut newest {
+            item.timestamp = Timestamp::from_millis(2_000);
+        }
+        app.update(Msg::Timeline {
+            timeline: TimelineId::main(RoomId::new("!a:example.org")),
+            diffs: vec![TimelineDiff::Reset(vec![root.clone(), newest])],
+        });
+        let mut screen = Screen::new();
+        let (first, last) = screen.draw(&app, None).timeline.unwrap();
+        // The receipt goes on message 2; the SDK counts the reply after it
+        // again.
+        app.update(Msg::Viewport {
+            pane: mxt_core::msg::Pane::Timeline,
+            first,
+            last,
+        });
+        app.update(Msg::RoomUpserted(RoomSummary {
+            id: RoomId::new("!a:example.org"),
+            name: name(None, "!a:example.org"),
+            kind: RoomKind::Group,
+            unread: UnreadCounts {
+                messages: 1,
+                ..UnreadCounts::default()
+            },
+            mode: NotificationMode::Default,
+            latest_activity: Some(Timestamp::from_millis(5_000)),
+            last_read: None,
+        }));
+        let summary_row = |screen: &Screen| {
+            let rows = screen_rows(screen);
+            rows.into_iter().find(|row| row.contains("💬 1")).unwrap()
+        };
+        screen.draw(&app, None);
+        assert!(summary_row(&screen).ends_with(" · unread"));
+
+        press(&mut app, "kt");
+        app.update(Msg::Timeline {
+            timeline: thread_of_a(1),
+            diffs: vec![TimelineDiff::Reset(vec![root])],
+        });
+        screen.draw(&app, None);
+        assert!(!summary_row(&screen).contains("unread"));
+    }
+
+    #[test]
+    fn a_thread_shows_its_own_composer_draft() {
+        let mut app = app();
+        press(&mut app, "<CR>");
+        app.update(reset("!a:example.org", 1..4));
+        let mut screen = Screen::new();
+        // A reply to message 2 in the room's composer, then back to the
+        // timeline.
+        press(&mut app, "kr<C-w>k");
+        screen.draw(&app, None);
+        assert!(screen.composer_rule().contains("Reply to Alice"));
+
+        press(&mut app, "t");
+        app.update(Msg::Timeline {
+            timeline: thread_of_a(2),
+            diffs: vec![TimelineDiff::Reset(vec![message(2), from_bob(10)])],
+        });
+        screen.draw(&app, None);
+        assert!(!screen.composer_rule().contains("Reply"));
+        press(&mut app, "r<C-w>k");
+        screen.draw(&app, None);
+        assert!(screen.composer_rule().contains("Reply to Bob"));
+
+        press(&mut app, "q");
+        screen.draw(&app, None);
+        assert!(screen.composer_rule().contains("Reply to Alice"));
     }
 }

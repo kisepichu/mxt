@@ -85,6 +85,17 @@ impl fmt::Debug for RecoveryKey {
 pub enum MatrixEffect {
     SubscribeTimeline(RoomId),
     UnsubscribeTimeline(RoomId),
+    /// The thread of `room` whose root is `root`, shown in place of the
+    /// room's main timeline: its diffs come as `Msg::Timeline` for the
+    /// thread's `TimelineId`. Replaces a thread subscribed before.
+    SubscribeThread {
+        room: RoomId,
+        root: EventId,
+    },
+    UnsubscribeThread {
+        room: RoomId,
+        root: EventId,
+    },
     /// `room.mark_read`: a receipt for the room's latest event, and clear its
     /// manual unread mark.
     MarkRoomRead(RoomId),
@@ -97,13 +108,28 @@ pub enum MatrixEffect {
         room: RoomId,
         event: EventId,
     },
-    /// Send through the room's timeline; answered with `Msg::SendQueued`
-    /// once the room's send queue has it, or `Msg::SendFailed` when it
-    /// cannot be queued. The local echo shows the send state after that. An
-    /// edit of a sent message has no local echo, so it is answered when it
-    /// leaves the queue: `SendQueued` once sent, `SendFailed` when refused.
-    Send {
+    /// One receipt of the configured kind on `event`, the newest remote
+    /// event of the thread rooted at `root` (design, "Threads"): unthreaded
+    /// when `unthreaded` (the main timeline is read and older than `event`),
+    /// else threaded with `root` as its `thread_id`. Never both: `/sync`
+    /// carries one receipt per user, kind and event, and Synapse keeps the
+    /// unthreaded one. The fully read marker stays the main timeline's.
+    SendThreadReceipt {
         room: RoomId,
+        root: EventId,
+        event: EventId,
+        unthreaded: bool,
+    },
+    /// Send through the timeline, a room's main timeline or one of its
+    /// threads, which adds the thread relation; answered with
+    /// `Msg::SendQueued` once the room's send queue has it, or
+    /// `Msg::SendFailed` when it cannot be queued (the timeline is not
+    /// open, for example). The local echo shows the send state after that.
+    /// An edit of a sent message has no local echo, so it is answered when
+    /// it leaves the queue: `SendQueued` once sent, `SendFailed` when
+    /// refused.
+    Send {
+        timeline: TimelineId,
         id: SendId,
         message: Outgoing,
     },
@@ -137,9 +163,10 @@ pub enum MatrixEffect {
         room: RoomId,
         item: ItemRef,
     },
-    /// Send the file at `path` as an image or file message.
+    /// Send the file at `path` as an image or file message into the
+    /// timeline, with the thread relation for a thread.
     Upload {
-        room: RoomId,
+        timeline: TimelineId,
         path: String,
     },
     /// The item's image for the message view; answered with
@@ -147,6 +174,12 @@ pub enum MatrixEffect {
     FetchImage {
         room: RoomId,
         item: ItemRef,
+    },
+    /// The thread that holds `event`, from the room's event cache without a
+    /// request; answered with `Msg::ThreadFound`.
+    FindThread {
+        room: RoomId,
+        event: EventId,
     },
     /// Import the secrets from secret storage with the key, which signs this
     /// device (design, "Startup"); answered with `Msg::Recovered`, or with

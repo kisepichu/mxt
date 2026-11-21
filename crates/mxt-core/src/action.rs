@@ -95,6 +95,11 @@ pub enum Action {
     JumpBack,
     /// To the newer entry of the jump list, like nvim's `<C-i>`.
     JumpForward,
+    /// Shows the thread of the message under the timeline cursor in place
+    /// of the main timeline.
+    ThreadOpen,
+    /// Back from the thread to the main timeline.
+    ThreadClose,
     ViewClose,
     /// `:help`: the command list.
     HelpCommands,
@@ -194,6 +199,8 @@ impl Action {
             "search.prev" => Action::SearchPrev,
             "jump.back" => Action::JumpBack,
             "jump.forward" => Action::JumpForward,
+            "thread.open" => Action::ThreadOpen,
+            "thread.close" => Action::ThreadClose,
             "view.close" => Action::ViewClose,
             "help.commands" => Action::HelpCommands,
             "help.keymap" => Action::HelpKeymap,
@@ -262,6 +269,8 @@ impl Action {
             Action::SearchPrev => "search.prev",
             Action::JumpBack => "jump.back",
             Action::JumpForward => "jump.forward",
+            Action::ThreadOpen => "thread.open",
+            Action::ThreadClose => "thread.close",
             Action::ViewClose => "view.close",
             Action::HelpCommands => "help.commands",
             Action::HelpKeymap => "help.keymap",
@@ -651,6 +660,8 @@ mod tests {
             "search.prev",
             "jump.back",
             "jump.forward",
+            "thread.open",
+            "thread.close",
             "view.close",
             "help.commands",
             "help.keymap",

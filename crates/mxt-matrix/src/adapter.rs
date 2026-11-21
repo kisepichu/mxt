@@ -5,18 +5,21 @@ use std::{fmt::Display, path::PathBuf, sync::Arc};
 
 use matrix_sdk::{
     Client, Room, RoomMemberships,
+    event_cache::EventCacheError,
     latest_events::LatestEventValue,
     notification_settings::{NotificationSettings, RoomNotificationMode},
     room::{Receipts, RoomMember},
-    ruma::OwnedEventId,
+    ruma::{OwnedEventId, api::client::receipt::create_receipt, events::receipt::ReceiptThread},
+    serde_helpers::extract_thread_root,
 };
 use matrix_sdk_ui::Timeline;
 use mxt_core::{
     effect::{MatrixEffect, Outgoing},
-    ids::{EventId, RoomId, SendId, UserId},
+    ids::{EventId, RoomId, SendId, TimelineId, UserId},
     mention::Member,
     msg::{Msg, SyncState},
     settings::ReceiptKind,
+    timeline::ItemRef,
 };
 use tokio::{
     sync::{
@@ -31,9 +34,12 @@ use crate::{
     Error, SyncLoop,
     error::without_url,
     join::{self, DirectMessages},
-    media, recovery, rooms,
+    media::{self, ThreadUpload},
+    recovery, rooms,
     send_queue::{self, Edits},
-    timeline::{Answer, Subscription, event_id, redact, resend, send_message, toggle_reaction},
+    timeline::{
+        Answer, Subscription, event_id, holds, redact, resend, send_message, toggle_reaction,
+    },
 };
 
 /// The running matrix adapter.
@@ -176,7 +182,8 @@ fn spawn_send_paths(
 /// A request for a room's send queue, see `send_messages`.
 enum Queued {
     Message(Arc<Timeline>, SendId, Outgoing),
-    Upload(Room, PathBuf),
+    /// An upload, into the thread when it names one.
+    Upload(Room, PathBuf, Option<ThreadUpload>),
 }
 
 /// Subscriptions run in order, so the last one wins; messages and uploads
@@ -203,20 +210,35 @@ async fn run_effects(
         to_mute,
         to_core.clone(),
     ));
-    // The open room's timeline; at most one.
-    let mut timeline: Option<Subscription> = None;
+    // The open room's main timeline, and the thread shown in its place; at
+    // most one of each.
+    let mut main: Option<Subscription> = None;
+    let mut thread: Option<Subscription> = None;
     let dms = DirectMessages::default();
     loop {
         tokio::select! {
             effect = queue.recv() => match effect {
                 Some(MatrixEffect::SubscribeTimeline(room)) => {
-                    if let Some(previous) = timeline.take() {
+                    if let Some(previous) = main.take() {
                         previous.stop().await;
                     }
-                    timeline = subscribe(&client, room, &to_core).await;
+                    main = subscribe(&client, TimelineId::main(room), &to_core).await;
                 }
                 Some(MatrixEffect::UnsubscribeTimeline(room)) => {
-                    if let Some(open) = timeline.take_if(|open| *open.room() == room) {
+                    if let Some(open) = main.take_if(|open| *open.room() == room) {
+                        open.stop().await;
+                    }
+                }
+                Some(MatrixEffect::SubscribeThread { room, root }) => {
+                    if let Some(previous) = thread.take() {
+                        previous.stop().await;
+                    }
+                    let id = TimelineId { room, thread: Some(root) };
+                    thread = subscribe(&client, id, &to_core).await;
+                }
+                Some(MatrixEffect::UnsubscribeThread { room, root }) => {
+                    let id = TimelineId { room, thread: Some(root) };
+                    if let Some(open) = thread.take_if(|open| *open.id() == id) {
                         open.stop().await;
                     }
                 }
@@ -230,11 +252,24 @@ async fn run_effects(
                     let sent = async move { send_receipt(&client, &room, &event, receipts).await };
                     running.spawn(reported(&to_core, "Sending the read receipt failed", sent));
                 }
+                Some(MatrixEffect::SendThreadReceipt { room, root, event, unthreaded }) => {
+                    let client = client.clone();
+                    let sent = async move {
+                        let thread = (!unthreaded).then_some(&root);
+                        send_thread_receipt(&client, &room, thread, &event, receipts).await
+                    };
+                    running.spawn(reported(&to_core, "Sending the read receipt failed", sent));
+                }
                 Some(MatrixEffect::PaginateBackwards(id)) => {
-                    match timeline.as_mut().filter(|open| *open.id() == id) {
+                    let open = [main.as_mut(), thread.as_mut()]
+                        .into_iter()
+                        .flatten()
+                        .find(|open| *open.id() == id);
+                    match open {
                         Some(open) => open.paginate_backwards(to_core.clone()),
-                        // Opening the room failed, or the timeline is
-                        // another; the answer ends the core's request.
+                        // Opening the room or the thread failed, or the
+                        // timeline is another; the answer ends the core's
+                        // request.
                         None => {
                             let _ = to_core.send(Msg::PaginationFailed {
                                 timeline: id,
@@ -243,27 +278,36 @@ async fn run_effects(
                         }
                     }
                 }
-                Some(MatrixEffect::Send { room, id, message }) => {
-                    match open_timeline(&timeline, &room) {
-                        Ok(open) => {
-                            let _ = sends.send(Queued::Message(open, id, message));
+                Some(MatrixEffect::Send { timeline, id, message }) => {
+                    match subscribed(&main, &thread, &timeline) {
+                        Some(open) => {
+                            let _ = sends.send(Queued::Message(open.timeline(), id, message));
                         }
-                        Err(error) => report_send(&to_core, id, &error),
+                        None => report_send(&to_core, id, &Error::TimelineNotOpen),
                     }
                 }
                 Some(MatrixEffect::ToggleReaction { room, item, key }) => {
-                    let open = open_timeline(&timeline, &room);
-                    let toggled = async move { toggle_reaction(&*open?, &item, &key).await };
+                    let open = ItemTimelines::of(&main, &thread, &room);
+                    let toggled = async move {
+                        let timeline = open?.holding(&item).await;
+                        toggle_reaction(&timeline, &item, &key).await
+                    };
                     running.spawn(reported(&to_core, "Reacting failed", toggled));
                 }
                 Some(MatrixEffect::Redact { room, item }) => {
-                    let open = open_timeline(&timeline, &room);
-                    let redacted = async move { redact(&*open?, &item).await };
+                    let open = ItemTimelines::of(&main, &thread, &room);
+                    let redacted = async move {
+                        let timeline = open?.holding(&item).await;
+                        redact(&timeline, &item).await
+                    };
                     running.spawn(reported(&to_core, "Deleting the message failed", redacted));
                 }
                 Some(MatrixEffect::Resend { room, txn }) => {
-                    let open = open_timeline(&timeline, &room);
-                    let resent = async move { resend(&*open?, &txn).await };
+                    let open = ItemTimelines::of(&main, &thread, &room);
+                    let resent = async move {
+                        let timeline = open?.holding(&ItemRef::Local(txn.clone())).await;
+                        resend(&timeline, &txn).await
+                    };
                     running.spawn(reported(&to_core, "Resending the message failed", resent));
                 }
                 Some(MatrixEffect::LoadMembers(room)) => {
@@ -274,23 +318,33 @@ async fn run_effects(
                 }
                 Some(MatrixEffect::Download { room, item }) => {
                     let (client, dir) = (client.clone(), files.download_dir.clone());
-                    let open = open_timeline(&timeline, &room);
-                    let downloaded =
-                        async move { media::download(&client, &*open?, &item, dir).await };
+                    let open = ItemTimelines::of(&main, &thread, &room);
+                    let downloaded = async move {
+                        let timeline = open?.holding(&item).await;
+                        media::download(&client, &timeline, &item, dir).await
+                    };
                     running.spawn(answered(&to_core, "Downloading the file failed", downloaded));
                 }
-                Some(MatrixEffect::Upload { room, path }) => match sdk_room(&client, &room) {
-                    Ok(room) => {
-                        let path = media::expand_home(&path, &files.home);
-                        let _ = sends.send(Queued::Upload(room, path));
+                Some(MatrixEffect::Upload { timeline, path }) => {
+                    match upload_target(&client, &thread, &timeline) {
+                        Ok((room, into)) => {
+                            let path = media::expand_home(&path, &files.home);
+                            let _ = sends.send(Queued::Upload(room, path, into));
+                        }
+                        Err(error) => report(&to_core, "Uploading the file failed", &error),
                     }
-                    Err(error) => report(&to_core, "Uploading the file failed", &error),
-                },
+                }
                 Some(MatrixEffect::FetchImage { room, item }) => {
                     let client = client.clone();
-                    let open = open_timeline(&timeline, &room);
-                    let fetched = async move { media::fetch_image(&client, &*open?, item).await };
+                    let open = ItemTimelines::of(&main, &thread, &room);
+                    let fetched = async move {
+                        let timeline = open?.holding(&item).await;
+                        media::fetch_image(&client, &timeline, item).await
+                    };
                     running.spawn(answered(&to_core, "Loading the image failed", fetched));
+                }
+                Some(MatrixEffect::FindThread { room, event }) => {
+                    running.spawn(find_thread(client.clone(), room, event, to_core.clone()));
                 }
                 Some(MatrixEffect::Recover(key)) => {
                     let client = client.clone();
@@ -311,7 +365,8 @@ async fn run_effects(
                 None => break,
             },
             Some(finished) = running.join_next(), if !running.is_empty() => pass_on(finished),
-            Some(finished) = timeline_task(&mut timeline) => pass_on(finished),
+            Some(finished) = timeline_task(&mut main) => pass_on(finished),
+            Some(finished) = timeline_task(&mut thread) => pass_on(finished),
         }
     }
 }
@@ -380,8 +435,8 @@ async fn send_messages(
                     Err(error) => report_send(&to_core, id, &error),
                 }
             }
-            Queued::Upload(room, path) => {
-                if let Err(error) = media::upload(&room, path).await {
+            Queued::Upload(room, path, thread) => {
+                if let Err(error) = media::upload(&room, path, thread).await {
                     report(&to_core, "Uploading the file failed", &error);
                 }
             }
@@ -433,14 +488,78 @@ async fn set_mute(
     changed.map_err(Error::NotificationSettings)
 }
 
-/// `room`'s timeline if it is the open one: sending, reactions and
-/// redactions act on its items.
-fn open_timeline(timeline: &Option<Subscription>, room: &RoomId) -> Result<Arc<Timeline>, Error> {
-    timeline
-        .as_ref()
+/// `room`'s main timeline if it is the open one.
+fn open_timeline(main: &Option<Subscription>, room: &RoomId) -> Result<Arc<Timeline>, Error> {
+    main.as_ref()
         .filter(|open| open.room() == room)
         .map(Subscription::timeline)
         .ok_or(Error::TimelineNotOpen)
+}
+
+/// The subscription of `id`: the open room's main timeline or its thread.
+fn subscribed<'a>(
+    main: &'a Option<Subscription>,
+    thread: &'a Option<Subscription>,
+    id: &TimelineId,
+) -> Option<&'a Subscription> {
+    [main, thread]
+        .into_iter()
+        .flatten()
+        .find(|open| open.id() == id)
+}
+
+/// The timelines an effect on an item of a room acts on (reactions,
+/// redactions, resending, downloads, images): the open thread's, which
+/// alone holds the replies in the thread, when it holds the item, else the
+/// room's main timeline, which holds the root too.
+struct ItemTimelines {
+    main: Arc<Timeline>,
+    thread: Option<Arc<Timeline>>,
+}
+
+impl ItemTimelines {
+    /// `room`'s timelines while it is the open room.
+    fn of(
+        main: &Option<Subscription>,
+        thread: &Option<Subscription>,
+        room: &RoomId,
+    ) -> Result<ItemTimelines, Error> {
+        let thread = thread.as_ref().filter(|open| open.room() == room);
+        Ok(ItemTimelines {
+            main: open_timeline(main, room)?,
+            thread: thread.map(Subscription::timeline),
+        })
+    }
+
+    async fn holding(self, item: &ItemRef) -> Arc<Timeline> {
+        if let Some(thread) = self.thread
+            && holds(&thread, item).await
+        {
+            return thread;
+        }
+        self.main
+    }
+}
+
+/// Where an upload to `timeline` goes: the room, and for a thread its root
+/// and timeline, which has to be the open thread's.
+fn upload_target(
+    client: &Client,
+    thread: &Option<Subscription>,
+    timeline: &TimelineId,
+) -> Result<(Room, Option<ThreadUpload>), Error> {
+    let Some(root) = &timeline.thread else {
+        return Ok((sdk_room(client, &timeline.room)?, None));
+    };
+    let open = thread
+        .as_ref()
+        .filter(|open| open.id() == timeline)
+        .ok_or(Error::TimelineNotOpen)?;
+    let thread = ThreadUpload {
+        root: event_id(root)?,
+        timeline: open.timeline(),
+    };
+    Ok((thread.timeline.room().clone(), Some(thread)))
 }
 
 /// Answers with `Msg::MembersLoaded` at least once, so mention completion
@@ -490,23 +609,29 @@ fn member(member: &RoomMember) -> Member {
     }
 }
 
-/// The room's timeline; classic sync delivers every room's events already.
+/// The timeline `id`, the room's main timeline or a thread's; classic sync
+/// delivers every room's events already.
 async fn subscribe(
     client: &Client,
-    room: RoomId,
+    id: TimelineId,
     to_core: &UnboundedSender<Msg>,
 ) -> Option<Subscription> {
-    let started = match sdk_room(client, &room) {
-        Ok(sdk_room) => Subscription::start(&sdk_room, room, to_core.clone()).await,
+    let what = match id.thread {
+        None => "Opening the room failed",
+        Some(_) => "Opening the thread failed",
+    };
+    let started = match sdk_room(client, &id.room) {
+        Ok(sdk_room) => Subscription::start(&sdk_room, id, to_core.clone()).await,
         Err(error) => Err(error),
     };
     started
-        .inspect_err(|error| report(to_core, "Opening the room failed", error))
+        .inspect_err(|error| report(to_core, what, error))
         .ok()
 }
 
-/// The next task of the open timeline that ended; `None` without a timeline
-/// or without tasks, which disables the `select!` branch until the next turn.
+/// The next task of the subscription that ended; `None` without a
+/// subscription or without tasks, which disables the `select!` branch until
+/// the next turn.
 async fn timeline_task(timeline: &mut Option<Subscription>) -> Option<Result<(), JoinError>> {
     timeline.as_mut()?.join_next().await
 }
@@ -551,6 +676,59 @@ async fn send_receipt(
     room.send_multiple_receipts(read_up_to(event, receipts))
         .await
         .map_err(|error| without_url(error).into())
+}
+
+/// One receipt of the configured kind on `event`, threaded in `thread`, or
+/// unthreaded without one (design, "Threads"). It moves no fully read
+/// marker, and an unthreaded one clears the room's manual unread mark.
+async fn send_thread_receipt(
+    client: &Client,
+    room: &RoomId,
+    thread: Option<&EventId>,
+    event: &EventId,
+    receipts: ReceiptKind,
+) -> Result<(), Error> {
+    let room = sdk_room(client, room)?;
+    let thread = match thread {
+        Some(root) => ReceiptThread::Thread(event_id(root)?),
+        None => ReceiptThread::Unthreaded,
+    };
+    let kind = match receipts {
+        ReceiptKind::Public => create_receipt::v3::ReceiptType::Read,
+        ReceiptKind::Private => create_receipt::v3::ReceiptType::ReadPrivate,
+    };
+    room.send_single_receipt(kind, thread, event_id(event)?)
+        .await
+        .map_err(|error| without_url(error).into())
+}
+
+/// `MatrixEffect::FindThread`: answers `Msg::ThreadFound` with the root of
+/// the thread that holds `event`, from the room's event cache, in memory
+/// and in its store, without a request. An event it does not have, or a
+/// failure, which goes to `debug` only, answers that the event is in no
+/// thread.
+async fn find_thread(client: Client, room: RoomId, event: EventId, to_core: UnboundedSender<Msg>) {
+    let root = thread_root(&client, &room, &event)
+        .await
+        .unwrap_or_else(|error| {
+            debug!("Looking for the thread of a replied-to message failed: {error}");
+            None
+        });
+    let _ = to_core.send(Msg::ThreadFound { room, event, root });
+}
+
+async fn thread_root(
+    client: &Client,
+    room: &RoomId,
+    event: &EventId,
+) -> Result<Option<EventId>, Error> {
+    let room = sdk_room(client, room)?;
+    let event = event_id(event)?;
+    let cache_error = |error: EventCacheError| Error::Timeline(error.into());
+    let (cache, _drop_handles) = room.event_cache().await.map_err(cache_error)?;
+    let found = cache.find_event(&event).await.map_err(cache_error)?;
+    let root = found.and_then(|found| extract_thread_root(found.raw()));
+    Ok(root.map(|root| EventId::new(root.as_str())))
 }
 
 /// The fully read marker and a receipt of the configured kind, both on `event`.

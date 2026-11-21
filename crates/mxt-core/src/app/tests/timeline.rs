@@ -479,7 +479,18 @@ fn gd_jumps_to_a_loaded_reply_target_and_reports_a_missing_one() {
     };
     let mut app = opened();
     reset(&mut app, vec![msg(1), divider(), reply(2, 1), reply(3, 9)]);
-    keys(&mut app, "gd");
+    // Not in the timeline: the adapter says in which thread, here none.
+    let find = Effect::Matrix(MatrixEffect::FindThread {
+        room: id("!c:example.org"),
+        event: event(9),
+    });
+    assert_eq!(no_timers(keys(&mut app, "gd")), vec![find]);
+    assert_eq!(status(&app), None);
+    app.update(Msg::ThreadFound {
+        room: id("!c:example.org"),
+        event: event(9),
+        root: None,
+    });
     assert_eq!(status(&app), Some("The replied-to message is not loaded"));
     assert_eq!(cursor_body(&app), "message 3");
     keys(&mut app, "kgd");

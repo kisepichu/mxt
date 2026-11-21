@@ -22,12 +22,26 @@ marked **Breaking:**.
   you have open sorts as read until you open another. The cursor stays on
   its room when rooms move. mxt 0.1.3 ignores such a value with a warning
   and sorts by `recent`, so a configuration shared with it can carry it.
+- Threads. `t` shows the thread of the message under the cursor in place of
+  the timeline, or starts a thread on a message without replies; the
+  timeline's keys work in it, the composer sends into it (`r` replies within
+  the thread, `:upload` uploads into it), each thread keeps its own draft,
+  and `q` or `<Esc>` goes back to the timeline with the cursor on the root.
+  Opening and closing a thread are jumps for `<C-o>` and `<Tab>`, and `gd`
+  goes to a replied-to message in a thread. Reading a thread sends a
+  threaded read receipt, or, when you have read the timeline, an unthreaded
+  one, so the room counts as read. The actions are `thread.open` and
+  `thread.close`; the keymap table `thread` holds keys that apply only in a
+  thread.
 
 ### Changed
 
 - Replies in threads are no longer shown in the timeline. Their root shows
   `💬 N` with the time of the latest reply, and `· unread` while the room's
   unread count includes replies in that thread.
+- `t` in the timeline opens a thread, so a binding of `t` in
+  `[keymap.normal]` no longer applies while the timeline has focus; bind it
+  in `[keymap.timeline]` too to keep it there.
 
 ### Fixed
 

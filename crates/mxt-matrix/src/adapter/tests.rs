@@ -141,15 +141,19 @@ impl Adapter {
     }
 }
 
-/// What the adapter sends to the core: the open room's entries, built as
-/// the core builds them, and the answers of sends and the failures (see
-/// `report`).
+/// What the adapter sends to the core: the open room's entries and its
+/// thread's, built as the core builds them, and the answers of sends and
+/// the failures (see `report`).
 struct Core {
     from_adapter: UnboundedReceiver<Msg>,
+    /// The main timeline's.
     entries: Vec<TimelineEntry>,
-    /// Received and not applied yet: `until` applies one at a time, so it
-    /// sees every state of the entries.
-    diffs: VecDeque<TimelineDiff>,
+    /// The thread's.
+    thread: Vec<TimelineEntry>,
+    /// Received and not applied yet, each with whether it is the thread's:
+    /// `until` applies one at a time, so it sees every state of the
+    /// entries.
+    diffs: VecDeque<(bool, TimelineDiff)>,
     /// The timelines the diffs received so far were for.
     timelines: HashSet<TimelineId>,
     reports: VecDeque<Msg>,
@@ -160,26 +164,43 @@ impl Core {
         Core {
             from_adapter,
             entries: Vec::new(),
+            thread: Vec::new(),
             diffs: VecDeque::new(),
             timelines: HashSet::new(),
             reports: VecDeque::new(),
         }
     }
 
-    /// Applies the timeline's diffs until `done` holds.
+    /// Applies the diffs until `done` holds for the main timeline's entries.
     async fn until(&mut self, what: &str, done: impl Fn(&[TimelineEntry]) -> bool) {
-        while !done(&self.entries) {
+        self.until_in(false, what, done).await;
+    }
+
+    /// Applies the diffs until `done` holds for the thread's entries.
+    async fn until_thread(&mut self, what: &str, done: impl Fn(&[TimelineEntry]) -> bool) {
+        self.until_in(true, what, done).await;
+    }
+
+    async fn until_in(
+        &mut self,
+        thread: bool,
+        what: &str,
+        done: impl Fn(&[TimelineEntry]) -> bool,
+    ) {
+        while !done(if thread { &self.thread } else { &self.entries }) {
             match self.diffs.pop_front() {
-                Some(diff) => apply_diff(&mut self.entries, diff),
+                Some((true, diff)) => apply_diff(&mut self.thread, diff),
+                Some((false, diff)) => apply_diff(&mut self.entries, diff),
                 None => self.receive(what).await,
             }
         }
     }
 
-    /// The next answer of a send, of a pagination, of a recovery or of a
-    /// `:join`, or report of a failure (`SendQueued`, `SendFailed`,
-    /// `PaginationDone`, `PaginationFailed`, `Recovered`, `Joined`,
-    /// `NoDirectMessage`, `EffectFailed`); other messages are skipped.
+    /// The next answer of a send, of a pagination, of a recovery, of a
+    /// `:join` or of `FindThread`, or report of a failure (`SendQueued`,
+    /// `SendFailed`, `PaginationDone`, `PaginationFailed`, `Recovered`,
+    /// `Joined`, `NoDirectMessage`, `ThreadFound`, `EffectFailed`); other
+    /// messages are skipped.
     async fn report(&mut self) -> Msg {
         loop {
             if let Some(report) = self.reports.pop_front() {
@@ -192,8 +213,10 @@ impl Core {
     async fn receive(&mut self, what: &str) {
         match timeout(WAIT, self.from_adapter.recv()).await {
             Ok(Some(Msg::Timeline { timeline, diffs })) => {
+                let thread = timeline.thread.is_some();
                 self.timelines.insert(timeline);
-                self.diffs.extend(diffs);
+                self.diffs
+                    .extend(diffs.into_iter().map(|diff| (thread, diff)));
             }
             Ok(Some(
                 report @ (Msg::SendQueued { .. }
@@ -203,6 +226,7 @@ impl Core {
                 | Msg::Recovered
                 | Msg::Joined { .. }
                 | Msg::NoDirectMessage { .. }
+                | Msg::ThreadFound { .. }
                 | Msg::EffectFailed { .. }),
             )) => self.reports.push_back(report),
             Ok(Some(_)) => {}
@@ -254,7 +278,7 @@ async fn a_refused_edit_of_a_sent_message_answers_its_send_with_send_failed() {
     let id = SendId::new(1);
     let message = edit_of_sent("fixed");
     adapter.effect(MatrixEffect::Send {
-        room: room(),
+        timeline: TimelineId::main(room()),
         id,
         message,
     });
@@ -284,7 +308,7 @@ async fn an_edit_of_a_sent_message_is_answered_with_send_queued_once_sent() {
     let id = SendId::new(1);
     let message = edit_of_sent("fixed");
     adapter.effect(MatrixEffect::Send {
-        room: room(),
+        timeline: TimelineId::main(room()),
         id,
         message,
     });
@@ -314,7 +338,7 @@ async fn a_refused_upload_stays_as_a_failed_echo_and_is_reported() {
     fs::write(&path, "notes").unwrap();
 
     adapter.effect(MatrixEffect::Upload {
-        room: room(),
+        timeline: TimelineId::main(room()),
         path: path.to_string_lossy().into_owned(),
     });
 
