@@ -63,7 +63,8 @@ Included:
 
 Not included in the first release:
 
-- Threads, desktop notifications, typing notifications.
+- Threads (added after the first release; see "Threads"), desktop
+  notifications, typing notifications.
 - Event-level mention lists (see "Mentions").
 - Room-wide mentions (`@room`).
 - SSO or OAuth login, logout, and account management.
@@ -226,7 +227,9 @@ The main types in `mxt-core`:
 
 - `RoomSummary`: id, `RoomName { network: Option<String>, room: String }`,
   kind (direct message or group), `UnreadCounts`, `NotificationMode`
-  (default, mentions and keywords only, mute), time of the latest activity.
+  (default, mentions and keywords only, mute), time of the latest activity,
+  and the time of the user's own latest read receipt (`last_read`, for the
+  `read` sort key; see "Room list").
   Spaces are not room summaries; their names only feed `RoomName.network`.
 - `UnreadCounts { messages, notifications, mentions, marked }`. `messages`
   counts unread messages even in muted rooms. `notifications` counts unread
@@ -237,9 +240,16 @@ The main types in `mxt-core`:
 - `RoomTarget`, `RoomFilter` and `Pick` (see "Action registry").
 - `TimelineItem`: `id: ItemRef`, sender, timestamp, `MessageContent`,
   optional reply preview, reaction groups (key, count, whether the user
-  reacted), an edited flag, and the local send state (sending, sent, failed).
+  reacted), an edited flag, the local send state (sending, sent, failed),
+  the thread's root when the item is a reply in a thread (`thread_root`),
+  and for a thread root its `ThreadSummary` (the number of replies and the
+  latest reply's time; see "Threads").
   The timeline also contains date dividers and the read marker, which the SDK
   provides as virtual items.
+- `TimelineId { room: RoomId, thread: Option<EventId> }`: a room's main
+  timeline, or one of its threads by the root's event ID. Composers,
+  timeline diffs, pagination and jump list entries name their timeline
+  with it.
 - `MessageContent`: `Text { body, rich }` (the event's plain `body`, which
   `message.edit` loads, and its `RichText`), `Notice(RichText)`, `Emote(RichText)`,
   `Image { name, size, dimensions }`, `File { name, size, mime }` (also used
@@ -250,11 +260,12 @@ The main types in `mxt-core`:
   with bold, italic, strikethrough, inline code or spoiler style; links with a
   URL; mentions of users or rooms; custom emoticons shown by their alt text.
   The terminal adapter maps it to ratatui lines.
-- Composers: per room, the `Draft`, the mentions inserted so far
+- Composers: per timeline (`TimelineId`), so each room and each of its
+  threads has its own: the `Draft`, the mentions inserted so far
   (`MentionRef { user: UserId, text: String }`), and whether the composer is
-  empty. They are kept when switching rooms.
+  empty. They are kept when switching rooms and threads.
 - Room members: user ID and display name, loaded per room on demand, used for
-  mention completion.
+  mention completion in the room's composers, its threads' included.
 - UI state: focus (room list, timeline, composer), mode, keymap resolver
   state, picker state, the line editors' texts and cursors (see "Line
   editing"), the open view (a message's item, or a help view: `:help`,
@@ -262,8 +273,9 @@ The main types in `mxt-core`:
   pane, terminal focus (initially focused), the status message and the
   history of status messages (`:messages`), the pending invites (for
   `:join`'s completion), the target of the latest `:join`, whose answer
-  the core waits for, and the jump list with the entry whose message it
-  loads (see "Jump list").
+  the core waits for, the jump list with the entry whose message it
+  loads (see "Jump list"), and the open thread, with the main timeline
+  kept aside while the thread is shown (see "Threads").
 
 ### Keymap resolver
 
@@ -313,15 +325,21 @@ covered by unit tests.
   unread counts and latest events for every room. The set of rooms comes from
   `Client::rooms()` (joined rooms that are not spaces), updated from each sync
   response and from room info updates.
-- Timelines: only the open room has a subscribed `Timeline`. Opening another
-  room unsubscribes the previous one. The core requests
-  `Effect::Matrix(PaginateBackwards)` when the timeline cursor comes within 10 items
-  of the oldest loaded item, with at most one request in flight per room.
+- Timelines: only the open room has a subscribed `Timeline`, built with
+  `TimelineFocus::Live { hide_threaded_events: true }`, so replies in
+  threads are not among its items (see "Threads"), and while a thread is
+  open, that thread has a second one, built with `TimelineFocus::Thread`.
+  Opening another room unsubscribes the previous room's timeline and
+  thread. The core requests
+  `Effect::Matrix(PaginateBackwards)` for the shown timeline (the main one
+  or the open thread's) when its cursor comes within 10 items of the oldest
+  loaded item, with at most one request in flight per timeline.
 - Room summaries come from the SDK room info: display name,
   `num_unread_messages`, `num_unread_notifications`, `num_unread_mentions`,
   `is_marked_unread`, the user-defined notification mode and the latest event
-  time. The core filters and sorts them itself, so the meaning of every filter
-  is defined in one place.
+  time, and from the state store the time of the user's own latest read
+  receipt (see "Room list"). The core filters and sorts them itself, so the
+  meaning of every filter and sort key is defined in one place.
 - Bridge state: classic sync delivers each room's full state (members are
   lazy-loaded), so `m.bridge` and `uk.half-shot.bridge` are read from the
   stored room state. `mxt-matrix` parses them itself and keeps, per room,
@@ -385,7 +403,9 @@ covered by unit tests.
   the links into mentions on the remote network. Replies use the timeline's
   reply call; edits of sent messages are built with `Room::make_edit_event`
   and sent through the timeline (so they work after the target has left the
-  loaded timeline), edits of local echoes use `Timeline::edit`.
+  loaded timeline), edits of local echoes use `Timeline::edit`. A message
+  from a thread's composer goes through that thread's timeline, which adds
+  the thread relation (see "Threads").
 - The send queue: messages, edits, reactions and uploads go through the
   SDK's send queue, fed by one sequential task, so they keep their order
   without holding up other effects; a message sent right after `:upload`
@@ -411,18 +431,26 @@ covered by unit tests.
   `FocusLost` event arrives, so terminals and multiplexers that never send
   focus events still get receipts. The adapter sends the configured receipt
   type (`m.read` or `m.read.private`) and moves the `m.fully_read` marker to
-  the same event.
+  the same event. These receipts are unthreaded; with replies in threads
+  hidden, the latest event of the main timeline is the latest one outside
+  threads. A thread that is shown sends receipts of its own (see
+  "Threads").
 - `room.mark_read` acts on the room under the cursor when the room list has
   focus, and on the open room otherwise. When the room's latest event as
-  known to the room list (`Room::latest_event()`) is a remote event, the
+  known to the room list (`Room::latest_event()`, which may be a reply in a
+  thread) is a remote event, the
   adapter sends the configured receipt and `m.fully_read` for it with
   `Room::send_multiple_receipts`, which also clears the room's manual
   unread mark (matrix-sdk 0.19.1). Otherwise it only clears the mark with
-  `Room::set_unread_flag(false)`.
-- Optimistic clearing: when the core requests a receipt or runs
-  `room.mark_read`, it sets that room's `UnreadCounts` to zero immediately.
-  The next SDK update overwrites it. This makes action sequences such as
-  `["room.mark_read", <open the next unread room>]` deterministic.
+  `Room::set_unread_flag(false)`. Its receipt is unthreaded, so it marks the
+  room's threads read too.
+- Optimistic clearing: when the core requests an unthreaded receipt (the
+  main timeline's, or a thread's that comes with one; see "Threads") or
+  runs `room.mark_read`, it sets that room's `UnreadCounts` to zero
+  immediately, and the room moves in the room list when the sort keys
+  depend on the counts. The next SDK update overwrites it, with the replies
+  in threads after the receipt counted again. This makes action sequences
+  such as `["room.mark_read", <open the next unread room>]` deterministic.
 - Room keys are shared with the SDK's default recipient strategy
   (`CollectStrategy::AllDevices`), which does not refuse to send when another
   user's identity changes.
@@ -445,7 +473,8 @@ covered by unit tests.
 ### Terminal adapter and the composer
 
 - The composer is an edtui editor in vim mode, owned by `mxt-tui`, one editor
-  state per room. edtui is used with
+  state per timeline (`TimelineId`: a room's main timeline, or a thread).
+  edtui is used with
   `default-features = false, features = ["system-editor"]`, which leaves out
   the system clipboard (arboard), mouse support and syntax highlighting.
 - edtui's clipboard is a custom `ClipboardTrait` implementation: copying
@@ -453,13 +482,18 @@ covered by unit tests.
   internal register, and pasting reads the internal register. Every editor
   state gets the same `Rc<RefCell<Register>>` handle, and timeline yanks use
   the same register.
-- Text editing is an input detail. The core only knows the room's `Draft` and
-  whether its composer is empty, which the tui adapter reports with
-  `Msg::ComposerEdited { room, empty }` when that changes.
+- Text editing is an input detail. The core only knows each composer's
+  `Draft` and whether it is empty, which the tui adapter reports with
+  `Msg::ComposerEdited { timeline, empty }` when that changes. The composer
+  effects (`FocusComposer`, `RequestSubmit`, `InsertNewline`, `LoadComposer`,
+  `ClearComposer`, `ReplaceMentionToken`, `ExternalEditor`) name the
+  composer's `TimelineId`, and the shown composer is that of the shown
+  timeline (`App::shown_timeline()`).
 - Sending: `composer.send` makes the tui adapter read the editor text and send
-  `Msg::Submit { room, body }`. If the body is blank, nothing happens.
+  `Msg::Submit { timeline, body }`. If the body is blank, nothing happens.
   Otherwise the core returns the send effect and
-  `Effect::Ui(ClearComposer(room))`, and the room's draft returns to `New`.
+  `Effect::Ui(ClearComposer(timeline))`, and that composer's draft returns
+  to `New`.
   Failed sends are shown on the local echo, and a send that cannot be queued
   puts its draft back (see "Error handling").
 - Editing an existing message: `message.edit` takes the user's own text
@@ -490,10 +524,12 @@ covered by unit tests.
 - Mention completion:
   - After each edit in insert mode, the tui adapter looks for an `@` token at
     the cursor (an `@` at the start of the text or after whitespace, followed
-    by non-whitespace) and reports `Msg::MentionQuery { room, query }` when it
-    changes, with `query: None` when there is no token.
-  - The first time a room's composer gets focus, the core returns
-    `Effect::Matrix(LoadMembers(room))`. The members arrive as `Msg::MembersLoaded`.
+    by non-whitespace) and reports `Msg::MentionQuery { timeline, query }`
+    when it changes, with `query: None` when there is no token.
+  - The first time one of a room's composers (its main one or a thread's)
+    gets focus, the core returns `Effect::Matrix(LoadMembers(room))`. The
+    members arrive as `Msg::MembersLoaded` and serve all of the room's
+    composers.
   - The core ranks the loaded members against the query with
     `nucleo-matcher`, on the display name and the user ID's localpart (the
     whole user ID when the query contains `:`, so same-named members on
@@ -654,9 +690,10 @@ why, and exits. The next start logs in as a new device with fresh stores.
 ### Layout
 
 - Left: the room list, which can be hidden. `focus.room_list` shows it again.
-- Right: the timeline of the open room, with the composer below it. The
+- Right: the timeline of the open room, or the open thread in its place
+  (see "Threads"), with the composer below it. The
   composer's top rule is labelled "Reply to <name>" or "Edit" while the
-  room's draft is a reply or an edit, and ends with `↓ N newer` while newer
+  composer's draft is a reply or an edit, and ends with `↓ N newer` while newer
   messages are below the timeline pane (see "Timeline").
 - Bottom line: status line showing the mode, the pending count and keys
   (like nvim's showcmd), the open room, the status message or the `CONFIRM`
@@ -716,10 +753,62 @@ set to mentions and keywords only show no label.
 
 ### Room list
 
-The default order is by latest activity, newest first. `sort = "name"` sorts
-case-insensitively by the full displayed name (`network / room`), which groups
-rooms by network, whichever `network` layout is set. Spaces themselves and
-pending invites are not listed (`:join` completes the invites).
+Spaces themselves and pending invites are not listed (`:join` completes the
+invites).
+
+The order is `ui.room_list.sort`: one sort key, or an array of keys applied
+in order (added after the first release), each deciding only between the
+rooms that the keys before it leave tied. Rooms that every key leaves tied
+are in `name` order, and rooms with the same name by room ID, so the order
+is total and the same on every start.
+
+| Key | First | From |
+|---|---|---|
+| `mentions` | rooms with unread mentions | `mentions > 0`: whether the room has any, not how many, so a new mention does not reorder the rooms that have some |
+| `unread` | rooms with unread messages | the rule of `filter = "unread"` (see "Action registry"): `messages`, `notifications` or `mentions` above zero, or `marked` |
+| `recent` | the latest activity, newest first | `latest_activity`, the SDK's latest event time; rooms without one last |
+| `read` | your latest read receipt, newest first | `last_read`, the time of your own latest read receipt in the room; rooms you never read last |
+| `name` | the displayed name | case-insensitive, by the full displayed name (`network / room`), which groups rooms by network, whichever `network` layout is set |
+
+The default is `"recent"`. A string is the array of that one key:
+`"recent"` is `["recent"]` and `"name"` is `["name"]`, so both keep the
+meaning they had. `sort = ["mentions", "unread", "read"]` lists the rooms
+with unread mentions first, then the other unread rooms, then the rest,
+each group by when you last read its rooms. An array must not be empty and
+must not list a key twice (see "Layers").
+
+- Where the keys' values come from, without a request per room:
+  `mentions` and `unread` read the room's `UnreadCounts`, the counts the
+  badges and `filter = "unread"` use, so optimistic clearing (see "Matrix
+  adapter") moves a room at once. `recent` reads the latest event time, as
+  before. `read` reads `RoomSummary::last_read`: `mxt-matrix` reads, when
+  it reads the room's facts, the user's own receipts from the state store
+  (`Room::load_user_receipt`) for the types `m.read` and `m.read.private`
+  and the threads `Unthreaded` (no `thread_id`) and `Main`, and takes the
+  latest `ts` among the four; receipts without `ts` and a store without
+  any give `None`. A receipt is the user's, whichever device sent it. The
+  time is the homeserver's, set when it took the receipt. Receipts with a
+  thread root as `thread_id` do not count: the store keeps them per root,
+  and finding a room's thread roots would take a request. The facts are
+  read at the start, for every room of each sync response (which lists the
+  rooms whose only news is a receipt) and on room info updates, so `read`
+  follows receipts from any device, mxt's own included once the next sync
+  response brings them back.
+- Where the order lives: `mxt-core::rooms::RoomSort` holds the keys, and
+  `RoomList` keeps its rooms in that order, placing a room again when an
+  update replaces it and when optimistic clearing changes its counts.
+- The room list's cursor stays on its room when the order changes under
+  it: a room that moves takes the cursor along when the cursor is on it,
+  and otherwise the cursor's index shifts with the rooms that move past
+  it. Before the cursor was first placed it stays on the first room,
+  whichever room that is. `]u`, `[u`, `room.open` and the room picker
+  follow the list's order, as before: `first`, `next` and `prev` are
+  positions in it, and the picker lists rooms in it for an empty query.
+- Opening a room in mxt sends a read receipt once its newest message is on
+  the pane and the terminal has focus (see "Read receipts"), so with `read`
+  the room moves up when the next sync response brings the receipt back,
+  and with `unread` or `mentions` it moves among the rooms without unread
+  messages at once (optimistic clearing). The user documentation says so.
 
 The list is `ui.room_list.width` columns wide, its border included (30 by
 default). Terminals narrower than 90 columns give it a third of their width
@@ -740,6 +829,9 @@ instead, and it never takes more than half of the width.
 
 - State events (membership changes, name or topic changes) are not shown in
   the first release.
+- Replies in threads are not shown; their root is, with a dim
+  `💬 <N> · <time>` row (see "Threads"). The rules below hold for a thread
+  shown in the pane as for the main timeline.
 - Date dividers and the user's read marker come from the SDK's virtual items.
 - Each item starts with a header: the local time, the sender, and
   `(edited)`, `sending…` or `failed` when they apply. A reply has a one-row
@@ -823,6 +915,8 @@ instead, and it never takes more than half of the width.
 | `timeline` | `gx` | `message.open` (link or attachment) | `gx` |
 | `timeline` | `gd` | `message.goto_reply` (the replied-to message) | go to definition |
 | `timeline` | `R` | `message.resend` (a failed message) | |
+| `timeline` | `t` | `thread.open` (the message's thread; see "Threads") | |
+| `thread` | `q` / `<Esc>` | `thread.close` (back to the main timeline) | close window |
 | `composer.insert` | `<CR>` | `composer.send` | |
 | `composer.insert` | `<C-j>` | `composer.newline` | |
 | `composer.insert`, `composer.normal` | `<C-x><C-e>` | `composer.external_editor` | shell edit-command-line |
@@ -842,6 +936,13 @@ instead, and it never takes more than half of the width.
 normal mode and the draft is kept. A user binding of `<Esc>` in
 `composer.normal`, such as `"<Esc>" = "focus.timeline"`, replaces
 `composer.leave` like any other default.
+
+`t`, `q` and `<Esc>` did nothing in the timeline before threads. `q` and
+`<Esc>` are in the table `thread`, which applies only while a thread is
+shown, so a binding of them in `normal` still works in the main timeline.
+`t` is in `timeline`, which comes before `normal`: a binding of `t` in
+`normal` no longer applies while the timeline has focus, unless it is also
+written in `timeline` (see "Threads").
 
 `<C-j>` inserts a newline because many terminals cannot tell Shift+Enter apart
 from Enter.
@@ -869,19 +970,25 @@ next unread room.
 back to where the cursor was before a jump and forward again, also across
 rooms, as nvim's jump list does.
 
-- An entry is a position: the open room and the remote event under its
-  timeline cursor. With no item under the cursor (an empty timeline, or
+- An entry is a position: the open room, the open thread's root while a
+  thread is shown (a `TimelineId`), and the remote event under the shown
+  timeline's cursor. With no item under the cursor (an empty timeline, or
   one still loading) or a local echo under it, whose ID the remote event
-  does not keep, the entry is the room alone. The list is the core's, for
+  does not keep, the entry is the room (and thread) alone. The list is the
+  core's, for
   the session only, never stored. It keeps at most 100 entries, oldest
   first, dropping the oldest. A position equal to the newest entry is not
   added again.
 - A jump records the position before it: opening another room by any path
   (`room.open_selected`, the room picker, `room.open` from `]u`, `[u` or
-  `:open`, and `:join` once its room is listed); `cursor.first` and
+  `:open`, and `:join` once its room is listed); opening a thread
+  (`thread.open`, the position in the main timeline) and closing it
+  (`thread.close`, the position in the thread; see "Threads");
+  `cursor.first` and
   `cursor.last` in the timeline (`gg`, `G`); a search that moves the
   timeline cursor (`/`, `n`, `N`); and `message.goto_reply` (`gd`) when it
-  moves the cursor. The core records room switches in `App::open_at`, the
+  moves the cursor. In a thread these record positions in the thread. The
+  core records room switches in `App::open_at`, the
   one place where the open room becomes another room, so every path
   records without a call of its own, and a path added later does too.
   Nothing else records: not `cursor.down`, `cursor.up` and the half pages
@@ -900,10 +1007,15 @@ rooms, as nvim's jump list does.
   the newest position again. Neither action takes a count.
 - Going to an entry opens its room, as `room.open` does but without
   recording a jump, or only focuses the timeline when the room is open.
-  The cursor goes onto the entry's event; for a room alone it follows the
+  For an entry with a thread it then opens that thread as `thread.open`
+  does, without recording, in place of another open thread, or keeps it
+  when it is the one shown; for an entry without one it closes an open
+  thread, without recording. The cursor goes onto the entry's event in
+  that timeline; for a room (or thread) alone it follows the
   newest message, as in a room just opened. An event that is not loaded,
   as in a room that opens with a new timeline, is loaded: the status line
-  says `Loading older messages…`, and the core requests back pagination
+  says `Loading older messages…`, and the core requests back pagination of
+  that timeline
   and looks for the event after each change of the timeline and each
   page, as long as it takes, then puts the cursor on it and clears that
   status. The next key or paste ends the wait before it does anything
@@ -912,8 +1024,9 @@ rooms, as nvim's jump list does.
   and losing the open room (`Msg::RoomRemoved`). `gd` loads nothing (see
   "Search and jumps").
 - An entry whose room is not in the room list (the user left it) is
-  skipped, and so is an entry whose event is not in its room's timeline
-  once the room's start is loaded: the event is gone (a deleted message
+  skipped, and so is an entry whose event is not in its timeline (the
+  room's main timeline, or the thread's)
+  once that timeline's start is loaded: the event is gone (a deleted message
   keeps its event, so it is not). The move goes on to the next entry in
   the same direction, and the status line says what it skipped:
   `Skipped a jump to a room you left`, `Skipped 2 jumps to messages that
@@ -962,6 +1075,224 @@ rooms, as nvim's jump list does.
 - A configuration that bound both `<C-i>` and `<Tab>` in one table, which
   mxt 0.1.2 and earlier read as two keys, loads the same, with a warning
   (see "Layers").
+
+### Threads
+
+A thread is a root message and the messages sent with an `m.thread`
+relation to it, its replies (added after the first release). mxt shows an
+open thread in place of the main timeline. Line numbers below are of the
+registry sources of matrix-sdk 0.19.1, matrix-sdk-ui 0.19.1 and ruma-events
+0.35.2.
+
+The main timeline:
+
+- The room's timeline is built with `TimelineFocus::Live {
+  hide_threaded_events: true }` (matrix-sdk-ui `timeline/mod.rs:129-135`),
+  so the SDK makes no item of an event with a thread root, local echoes
+  included (`timeline/controller/state_transaction.rs:538-542`). Replies in
+  threads are no entries: the newer-messages hint does not count them,
+  search does not find them, and back pagination pages past them.
+- A thread root ends with a row of its own after its body and reactions:
+  `💬 <N> · <time>`, dim. `N` is the SDK's reply count
+  (`ThreadSummary::num_replies`, which leaves out the root); a message
+  without a summary, as one whose replies are all gone, has no row. The
+  time is the latest reply's, in `ui.time_format` and the local time zone,
+  with its date (`%Y-%m-%d`) and a space before it when it is on another
+  local day than the root; while the SDK has not loaded the latest reply
+  the row is `💬 <N>`. The summary is the item's
+  (`MsgLikeContent::thread_summary`,
+  `timeline/event_item/content/msg_like.rs:51-62,73-76`; the latest reply
+  an `EmbeddedEvent` with its `timestamp`, `content/reply.rs:65-79`). The
+  SDK's event cache keeps a cache per thread that sync brings events for
+  and updates the root's summary when replies arrive (matrix-sdk
+  `event_cache/caches/mod.rs:339-375`; no replies, no summary,
+  `caches/thread/state.rs:371-375`), so the row follows new replies
+  without a request: the root's item changes with a `Set`.
+
+Opening:
+
+- `thread.open` (`t` in `timeline`) opens the thread of the item under the
+  cursor: the thread the item is a reply in (`thread_root`), else the
+  thread whose root it is, with or without replies. On a message without
+  replies the thread is new and empty, and the first message sent from its
+  composer starts it: its fallback points at the root, and ruma makes a
+  message that falls back to an event in no thread a reply in the thread
+  rooted at that event (`make_for_thread`,
+  `room/message/without_relation.rs:183-193`). The status line refuses a
+  local echo, `Wait until the message is sent` (a root needs its event
+  ID), and a deleted message without replies, `The message is deleted`.
+  With no item under the cursor nothing happens, and in a thread, whose
+  items all belong to it, the action only keeps the focus on the timeline.
+  Opening a thread records a jump (see "Jump list").
+- Opening closes what belongs to the pane it replaces, as opening another
+  room does: a message view (a help view stays), the mention menu and the
+  composer's focus; the timeline gets the focus.
+- The core keeps the main timeline aside while the thread is shown (its
+  entries, cursor, pagination and last requested receipt), and the main
+  timeline's diffs still apply to it, so it is current when the thread
+  closes. `App::timeline()`, `App::timeline_cursor()` and every action on
+  the timeline see the thread while it is shown; `App::shown_timeline()` is
+  its `TimelineId`.
+- The adapter keeps a second subscription for the thread:
+  `MatrixEffect::SubscribeThread { room, root }` builds a timeline with
+  `TimelineFocus::Thread { root_event_id }` (`timeline/mod.rs:146`;
+  `RoomExt::timeline_builder`, `timeline/traits.rs:80-83`, then
+  `TimelineBuilder::with_focus`, `timeline/builder.rs:74-77`), whose diffs
+  arrive as `Msg::Timeline` with the thread's `TimelineId`. It starts with
+  the replies the event cache has. Back pagination
+  (`MatrixEffect::PaginateBackwards` with the thread's `TimelineId`) loads
+  older replies with `/relations` and, at the start, the root
+  (`event_cache/caches/thread/pagination.rs:292-303`), so the root is the
+  thread's first item once its start is loaded. The room's members are not
+  loaded again.
+- The pane keeps the room's name on its header row. Below it, a title row
+  `Thread · <sender>: <first line>`: `Thread ·` dim, the root's sender
+  bold, the first line of the root's text as `yy` copies it
+  (`MessageContent::plain_text`), cut with `…` at the end; `Thread` alone
+  while the root is neither in the thread's entries nor in the main
+  timeline's. Then the thread's entries, root first, then the replies,
+  under the rules of "Timeline"; the root's `💬` row shows there too.
+- Every key of the timeline works on the thread's items as on the main
+  timeline's: the cursor moves and their counts, `/`, `n`, `N`, `<CR>`,
+  `r`, `e`, `dd`, `yy`, `+` and `:react`, `gx`, `gd` (to a message the
+  item replies to within the thread), `R`, `i` and `a`, and back
+  pagination near the oldest item. `room.mark_read`, `room.mute` and
+  `room.unmute` act on the room.
+
+Closing:
+
+- `thread.close` (`q` and `<Esc>` in `thread`) records the position in the
+  thread as a jump, shows the main timeline again with the cursor on the
+  root, and unsubscribes the thread (`MatrixEffect::UnsubscribeThread {
+  room, root }`). Without an open thread it does nothing. When the main
+  timeline does not hold the root (the thread was opened from the jump
+  list in a room just opened, or the SDK rebuilt the timeline meanwhile),
+  older messages load until it does, as for a jump list entry (`Loading
+  older messages…`, ended by the next key or paste, a failed page, another
+  room or the room's removal); when the main timeline's start loads
+  without it and the grace period passes, the cursor follows the newest
+  message.
+- Opening another room by any path, and losing the open room, leave the
+  thread too: the jump that opening a room records is the position in the
+  thread, and the core sends `UnsubscribeThread` before
+  `UnsubscribeTimeline`.
+- The keymap table `thread` applies while the timeline has focus and a
+  thread is shown (`InputContext::Thread`): its bindings come first, then
+  `timeline`'s, then `normal`'s. Its defaults are `q` and `<Esc>`
+  (`thread.close`). The main timeline binds neither, so a binding of `q`
+  or `<Esc>` in `normal` (`"q" = "app.quit"`) still applies there.
+
+The composer:
+
+- Each thread has its own composer, as each room has (drafts are per
+  `TimelineId`). Opening a thread shows the thread's composer, empty or
+  with what was left in it earlier in the session; closing it shows the
+  main timeline's composer with its draft, reply or edit as it was left.
+  Nothing moves between them, so text written for the room never goes
+  into a thread or back, and a draft started in a thread waits for the
+  thread to open again. The rule's label and the newer-messages hint are
+  the shown composer's and timeline's.
+- `composer.send` in a thread sends into it: `MatrixEffect::Send` with the
+  thread's `TimelineId` goes through the thread's timeline (a thread no
+  longer subscribed answers `SendFailed`, as a room no longer open does).
+  Its `Timeline::send` turns a message without a relation into a thread
+  message with the fallback the spec asks for: `rel_type: m.thread` on the
+  root, `m.in_reply_to` the latest event the thread's timeline has (the
+  root in a new thread), `is_falling_back: true` (`timeline/mod.rs:373-408`,
+  `infer_reply` at 502-549). The fallback adds no mention (ruma calls
+  `make_reply_to` only for a reply within the thread,
+  `room/message/without_relation.rs:169-196`), and mxt's `m.mentions`
+  stay. Clients without threads show the message as a reply to the
+  thread's previous message.
+- `message.reply` (`r`) in a thread replies within it:
+  `Timeline::send_reply` on a thread's timeline sends `rel_type: m.thread`
+  on the root with `m.in_reply_to` the replied message and
+  `is_falling_back: false` (`EnforceThread::Threaded(ReplyWithinThread::Yes)`,
+  `timeline/mod.rs:451-462, 505-515`), mentioning that message's sender as
+  replies outside threads do. In a thread the SDK gives a reply preview
+  only to such replies, not to fallbacks
+  (`timeline/controller/metadata.rs:517-528`).
+- An edit of a thread's message is an edit as anywhere (the `m.replace`
+  event needs no thread relation): `Room::make_edit_event`, sent through
+  the thread's timeline, or `Timeline::edit` of the thread's timeline for
+  a local echo.
+- `:upload` while a thread is shown sends the file into it:
+  `MatrixEffect::Upload` with the thread's `TimelineId`, and the adapter's
+  matrix-sdk `AttachmentConfig::reply` (`attachment.rs:200-202, 277-280`)
+  is `Reply { event_id, enforce_thread:
+  EnforceThread::Threaded(ReplyWithinThread::No), add_mentions:
+  AddMentions::No }` (`room/reply.rs:38-46, 66-78`), with `event_id` the
+  thread timeline's latest event (`Timeline::latest_event_id`,
+  `timeline/mod.rs:322-324`) or else the root: the relation a message
+  gets.
+- Effects on an item (`ToggleReaction`, `Redact`, `Resend`, `Download`,
+  `FetchImage`) find it in the thread's timeline when a thread is
+  subscribed and has it, else in the main timeline: replies are only in
+  the thread's, the root is in both.
+
+Read receipts and unread counts:
+
+- How mxt counts: the SDK computes each room's counts in its event cache
+  (matrix-sdk `event_cache/caches/read_receipts.rs`, `compute_unread_counts`
+  at 561). mxt builds its client without the SDK's thread support
+  (`ThreadingSupport::Disabled`, the default of `ClientBuilder`,
+  `client/builder/mod.rs:184`). The room's count then keeps every event,
+  replies in threads included (the filter at `read_receipts.rs:321-325`
+  drops them only with thread support), and counts the interesting events
+  after the latest of the user's unthreaded and `main` receipts
+  (`read_receipts.rs:327-329`) and own messages, in the room's order. So
+  unread replies in threads count in the room's badge, and mentions in
+  them in its `@` count and for `filter = "mentions"`. That stays.
+- What threaded receipts change in it: nothing. A receipt whose
+  `thread_id` is a root is not one the room's count reads. The SDK keeps a
+  count per thread besides (`ThreadEventCache::num_unread_messages` and
+  its siblings, `event_cache/caches/thread/mod.rs:163-191`), from that
+  thread's receipts and the user's own replies only
+  (`read_receipts.rs:393-398`): it ignores unthreaded receipts, so a thread
+  read with a client that sends only those, mxt 0.1.3 included, counts all
+  its replies; nothing adds these counts to the room's, and nothing lists a
+  room's threads without a request. Turning the SDK's thread support on
+  (`ClientBuilder::with_threading_support`, `client/builder/mod.rs:615-618`;
+  matrix-sdk reads it only for this filter, `event_cache/caches/mod.rs:110-111`,
+  and for thread subscriptions, `client/mod.rs:3742-3745`, so hidden
+  replies, summaries and thread timelines work without it) would take
+  replies in threads out of the room's counts, and mentions in threads with
+  them. So with matrix-sdk 0.19.1 a threaded receipt alone cannot make the
+  room's count agree with other clients. mxt keeps thread support off, and
+  its receipts make the counts agree as far as they can:
+- The main timeline sends what it sends now (see "Read receipts"): an
+  unthreaded receipt and `m.fully_read` on its newest remote event, the
+  newest message outside threads. Everything before it is read, replies in
+  threads included, for mxt and for every client, as before; replies after
+  it stay unread.
+- A shown thread sends, when its pane shows its newest item and the
+  terminal has focus, once per event, a receipt of the configured type with
+  the root as `thread_id` on the thread's newest remote event
+  (`MatrixEffect::SendThreadReceipt { room, root, event, unthreaded }`;
+  `Room::send_single_receipt(type, ReceiptThread::Thread(root), event)`,
+  matrix-sdk `room/mod.rs:2177-2211`), which thread-aware clients and the
+  homeserver count for the thread. When the main timeline is read to its
+  newest message (the last receipt the core requested for it is on its
+  newest remote event) and that message is older than the thread's newest
+  event by their timestamps, `unthreaded` is true: the adapter also sends an
+  unthreaded receipt of the configured type on the same event
+  (`ReceiptThread::Unthreaded`, which also clears the manual unread mark,
+  `room/mod.rs:2193-2206`), and the core clears the room's counts at once
+  (optimistic clearing). The room is then read up to that reply, in mxt and
+  everywhere. Neither receipt moves `m.fully_read`, which stays the main
+  timeline's.
+- What does not agree: while the main timeline has unread messages,
+  reading a thread sends only the threaded receipt; thread-aware clients
+  then show the thread read, while mxt counts its replies after the main
+  timeline's receipt until the room is read past them (the main timeline
+  read to a newer message, a thread read after the main timeline, or
+  `room.mark_read`). And a thread's unthreaded receipt also reads the
+  other threads' replies before it, as the main timeline's receipt does
+  for those before its newest message.
+- Roots show no unread mark: the SDK's per-thread counts ignore unthreaded
+  receipts (above), so they would mark threads read in other ways as
+  unread. The time on the `💬` row and the room's badge say where new
+  replies are.
 
 ### Commands
 
@@ -1264,7 +1595,7 @@ first line says what it is.
   bindings are merged over its defaults, before fallback: a table shows its
   own bindings, not those it falls back to (`:` is listed under `normal`
   only). The first line names the leader (`leader = "<Space>"`). Then, for
-  each table in the order `normal`, `room_list`, `timeline`,
+  each table in the order `normal`, `room_list`, `timeline`, `thread`,
   `composer.normal`, `composer.visual`, `composer.insert`,
   `composer.completion`, `message_view`, `picker`, `command_line`, an empty
   line, a header in the configuration's syntax (`[keymap.timeline]`), and one
@@ -1526,7 +1857,8 @@ user_id = "@alice:example.org"
 [ui]
 leader = "<Space>"
 timeoutlen = 1000                                 # milliseconds
-# sort: "recent" | "name"; width: 12 to 80; network: "inline" | "below"
+# sort: a key or an array of keys, from "mentions", "unread", "recent", "read", "name"
+# width: 12 to 80; network: "inline" | "below"
 room_list = { visible = true, sort = "recent", width = 30, network = "inline" }
 time_format = "%H:%M"                             # strftime, in the local time zone
 image_preview = "auto"                            # "auto" | "off" | "iterm2" | "sixel" | "kitty" | "halfblocks"
@@ -1557,6 +1889,8 @@ Settings:
 - `ui.read_receipts = "public"` sends `m.read` receipts, which other users
   see. `"private"` sends `m.read.private`, which only the user's own devices
   see.
+- `ui.room_list.sort` is a sort key or an array of them, applied in order
+  (see "Room list"); the default is `"recent"`.
 - `ui.room_list.width` is an integer from 12 to 80; see "Room list" for
   narrow terminals.
 - `ui.time_format` is applied in the local time zone (jiff, in `mxt-tui`).
@@ -1581,6 +1915,7 @@ Settings:
 |---|---|---|
 | `room_list` | the room list has focus | look in `normal` |
 | `timeline` | the timeline has focus | look in `normal` |
+| `thread` | the timeline has focus and a thread is shown (see "Threads") | look in `timeline`, then `normal` |
 | `composer.normal`, `composer.visual` | the composer has focus, edtui is in normal or visual mode, and no key waits for the next one (see "Input routing") | look in `normal`, then pass the key to edtui |
 | `composer.insert` | the composer has focus and edtui is in insert mode | pass the key to edtui |
 | `composer.completion` | the mention menu is open in insert mode | look in `composer.insert`, then pass the key to edtui |
@@ -1618,6 +1953,8 @@ Actions are named `<target>.<verb>`. The first release has:
   `search.start`, `search.next`, `search.prev`
 - jump list: `jump.back`, `jump.forward`, added after the first release
   (see "Jump list")
+- threads: `thread.open`, `thread.close`, added after the first release
+  (see "Threads")
 - help: `help.commands` (`:help`), `help.keymap` (`:map`), both added after
   the first release; no default keys (see "Help views")
 - status line: `status.messages` (`:messages`), added after the first
@@ -1694,8 +2031,11 @@ action runs (see "Joining rooms and direct messages").
   (`<leader>x` and `<Space>x`, `<C-a>` and `<C-A>`); a malformed
   `account.user_id`, an `account.homeserver` that is not an `http(s)` URL,
   a `ui.room_list.width` outside 12 to 80, an empty `ui.time_format`, a
-  `files.download_dir` that is neither absolute nor `~/…`, and an empty
-  `files.opener`.
+  `files.download_dir` that is neither absolute nor `~/…`, an empty
+  `files.opener`; and in a `ui.room_list.sort` array: no key at all
+  (`ui.room_list.sort: must not be empty`, at the array), a key listed
+  twice (`ui.room_list.sort: "unread" is listed twice`, at the second),
+  and an element that is not a string (a wrong type, at the element).
 - Names this version does not know are warnings, not errors: dotfiles
   share one configuration between machines that run different versions,
   and a setting written for a newer mxt must not stop an older one. These
@@ -1719,6 +2059,12 @@ action runs (see "Joining rooms and direct messages").
   so public receipts could be sent before the user has seen the warning.
   Its warning says what applies instead of ending in `(ignored)`:
   `ui.read_receipts: unknown value "x", using "private"`.
+- In a `ui.room_list.sort` array, an unknown key is a warning at that key,
+  `ui.room_list.sort: unknown value "size"; expected one of "mentions",
+  "unread", "recent", "read", "name" (ignored)`, the text of an unknown
+  string value, and the key is skipped: the others apply in their order.
+  An array whose keys are all unknown is ignored as a whole, each with its
+  warning, and the default `"recent"` applies.
 - While `ui.leader` is ignored, `<leader>` stands for `<Space>`, so two
   bindings of one table that a newer version tells apart can become one
   key sequence (`"<leader>x"` and `"<Space>x"` under `leader = "<F13>"`).
@@ -1785,6 +2131,14 @@ action runs (see "Joining rooms and direct messages").
   and its errors do not say whether a directive is unknown or malformed.
   Giving an existing name another meaning is a breaking change (see
   [Releasing](../../releasing.md)).
+- One later addition is a new type, not a new name: the array form of
+  `ui.room_list.sort`. mxt 0.1.3 reads `sort` as a string only, so an array
+  is a wrong type there, an error that stops it. A string with one key a
+  version does not know is a warning there as elsewhere (`sort = "read"`
+  in 0.1.3 falls back to `"recent"`), so a configuration shared with
+  machines that run 0.1.3 keeps a string until they are updated; the user
+  documentation says so. Elements other than strings stay an error, so
+  newer versions extend the array with key names only.
 
 ## Storage
 
@@ -1828,13 +2182,16 @@ platforms.
   sync is back. Edits and reactions that the server refuses for good are
   dropped from the send queue with an error in the status line (see "The
   send queue"); an edit of a sent message gets its draft back as below.
-- A message that cannot be queued (its room is not open, or the replied-to or
+- A message that cannot be queued (its room or thread is not open, or the
+  replied-to or
   edited event cannot be fetched) gets no local echo. `MatrixEffect::Send`
   carries a `SendId`, and the matrix adapter answers it with
   `Msg::SendQueued` or `Msg::SendFailed`. Until then the core keeps the
-  submitted draft (text, mentions and kind: new, reply or edit) under that ID.
+  submitted draft (text, mentions and kind: new, reply or edit) under that
+  ID, with the composer's `TimelineId`.
   On `SendFailed` it shows the error and loads the draft back into the
-  composer if its room is open and the composer is still empty with a new
+  composer if its timeline (the room's main timeline, or the thread) is
+  shown and the composer is still empty with a new
   draft. Otherwise the user has moved on, and only the status message is
   shown.
 - An edit of a sent message has no local echo of its own: it is a request in
@@ -1904,6 +2261,20 @@ direct message lookup logs at `info` which step found a room (see
     the case with nothing left, the wait ending at a key, a paste, a
     failed page and the room's removal, and `<Tab>` and `<C-o>` where
     `normal` does not apply
+  - the room list's sort keys: the order for each key and for combinations,
+    presence (not the count) for `mentions`, rooms without activity or a
+    receipt last, the remaining ties by name and then by room ID, the cursor
+    staying on its room when an update or optimistic clearing moves rooms,
+    and `]u` following the order
+  - threads: opening a thread on a root, on a message without replies and
+    from within a thread, the refusals, closing with the cursor on the root
+    (also when the root has to load), the main timeline's diffs applied
+    while a thread is shown, the jump entries of opening and closing and
+    going back and forward between the main timeline and a thread, a room
+    switch leaving the thread, the composers kept per timeline, the send
+    and upload effects naming the thread, and the receipts: a threaded one,
+    with an unthreaded one only when the main timeline is read to an older
+    message, and optimistic clearing only then
 - `mxt-matrix`: tests with constructed inputs for converting SDK values into
   domain types, HTML rendering, download file names, the dimensions of
   uploaded images and the session file. The send queue paths are tested
@@ -1933,6 +2304,14 @@ direct message lookup logs at `info` which step found a room (see
   message (`is_direct`, the invite, the preset and `m.room.encryption` in
   the request, then `m.direct`), once only for two quick requests. The
   rest is covered by phase 0 and by running mxt against a homeserver.
+  The same harness covers threads: replies in threads missing from the
+  main timeline, a root's summary, a thread's timeline with the root
+  after back pagination, a message and a reply sent into a thread (the
+  `m.thread` relation, `m.in_reply_to` and `is_falling_back` in the
+  request), an upload into a thread, and the threaded and unthreaded
+  receipts (`thread_id` in the request); and the room list's read time
+  from the store, with receipts of both types, unthreaded and `main`, and
+  threaded ones and other users' left out.
 - `mxt-tui`: unit tests, for example of key conversion, the editor keys
   `mxt-tui` handles itself, wrapping and the cursor by grapheme cluster, the
   composers' reports to the core, and the layout; some assert rendered rows
@@ -1941,9 +2320,12 @@ direct message lookup logs at `info` which step found a room (see
   running mxt.
 - `mxt`: configuration loading from strings: each error and each warning
   with its position and text (the `<C-i>` and `<Tab>` duplicate in either
-  order among them), a document with every key and every table loading
-  without warnings, and the complete example of the user documentation
-  loading without warnings.
+  order among them, and the `ui.room_list.sort` forms: each key as a
+  string, an array, an unknown key in it, an array of unknown keys, an
+  empty array, a repeated key, an element that is not a string), a
+  document with every key and every table loading without warnings, and
+  the complete example of the user documentation loading without
+  warnings.
 - Continuous integration (GitHub Actions, Linux and macOS on Apple Silicon),
   with the flake's toolchain:
   - On every push and pull request, inside `nix develop` with the Cargo cache
@@ -2231,6 +2613,24 @@ asking for the recovery key ("Startup").
   `ui.read_receipts`, whose default sends receipts that others see, mxt
   falls back to `"private"` instead (see "Layers"). The status line says
   at every start that settings were ignored, and `:messages` names them.
+- **Threads and unread counts.** matrix-sdk 0.19.1 counts a room's unread
+  messages either with replies in threads and without threaded receipts
+  (thread support off, as mxt builds it) or without replies in threads at
+  all (thread support on), and its per-thread counts ignore unthreaded
+  receipts. mxt keeps the first, so mentions in threads count, and adds an
+  unthreaded receipt to a thread's when the main timeline is read (see
+  "Threads"). While the main timeline has unread messages, reading a
+  thread leaves its replies counted in mxt although thread-aware clients
+  show the thread read; an unthreaded receipt from a thread reads the
+  other threads' older replies for every client. An SDK that adds the
+  threads' counts to the room's would let mxt send threaded receipts
+  alone.
+- **Thread features without the SDK's thread support.** matrix-sdk-ui's
+  own thread tests build the client with thread support on. mxt relies on
+  hidden replies, summaries and thread timelines working with it off,
+  which the code shows (the option is read only for the room's count
+  filter and thread subscriptions) and mxt's tests against
+  `MatrixMockServer` confirm.
 
 ## Third-party licenses
 
