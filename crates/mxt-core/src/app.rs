@@ -599,8 +599,12 @@ impl App {
     }
 
     /// Resolves the pending keys in the context they started in; the keys
-    /// handed back go through `feed` like typed keys.
+    /// handed back go through `feed` like typed keys. The timer of a jump's
+    /// grace period ends that instead.
     fn timeout(&mut self, id: TimerId, effects: &mut Vec<Effect>) {
+        if self.jump_grace_over(id, effects) {
+            return;
+        }
         let context = self.key_context;
         for next in self.resolver.timeout(self.keymap.effective(context), id) {
             self.resolved(context.sink(), next, effects);

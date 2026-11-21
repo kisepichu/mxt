@@ -62,6 +62,22 @@ fn body(n: u32) -> Option<String> {
 fn open_room(app: &App) -> &str {
     app.open_room().map_or("", RoomId::as_str)
 }
+/// The entries `!a` alone, message 4 of `!c` and `!b` alone, and the jump
+/// back to the second from `!b`: `!c` open, its message 4 not loaded yet.
+fn waiting_for_message_4() -> App {
+    let mut app = app();
+    keys(&mut app, ":open a:ex<CR>:open c:ex<CR>");
+    load(&mut app, C, msgs(1..=5));
+    keys(&mut app, "k:open b:ex<CR><C-o>");
+    assert_eq!(open_room(&app), C);
+    assert_eq!(status(&app), Some("Loading older messages…"));
+    app
+}
+/// `!c`'s start loads without message 4; the grace period's timer.
+fn start_loaded_without_message_4(app: &mut App) -> TimerId {
+    load(app, C, vec![msg(1), msg(2), msg(3), msg(5)]);
+    last_timer(&start_loaded(app, C))
+}
 
 #[test]
 fn back_and_forward_go_between_rooms_and_load_their_messages() {
@@ -281,7 +297,11 @@ fn a_message_not_there_once_its_rooms_start_loads_is_skipped() {
     assert_eq!(status(&app), Some("Loading older messages…"));
     // Message 12 is not there when `!b`'s start is loaded.
     load(&mut app, B, vec![msg(11), msg(13)]);
-    let fx = start_loaded(&mut app, B);
+    let grace = last_timer(&start_loaded(&mut app, B));
+    // Its page's diffs may still come during the grace period.
+    assert_eq!(open_room(&app), B);
+    assert_eq!(status(&app), Some("Loading older messages…"));
+    let fx = app.update(Msg::Timeout { id: grace });
     assert_eq!(open_room(&app), C);
     assert!(fx.contains(&paginate(C)), "{fx:?}");
     assert_eq!(
@@ -302,13 +322,45 @@ fn with_no_entry_left_after_a_gone_message_its_room_stays_open() {
     keys(&mut app, "k");
     keys(&mut app, ":open b:ex<CR><C-o>");
     load(&mut app, C, msgs(1..=3));
-    start_loaded(&mut app, C);
+    let grace = last_timer(&start_loaded(&mut app, C));
+    app.update(Msg::Timeout { id: grace });
     assert_eq!(
         status(&app),
         Some("Skipped a jump to a message that is gone; no older jump")
     );
     assert_eq!(open_room(&app), C);
     assert!(app.timeline_follows());
+}
+
+#[test]
+fn a_message_whose_page_comes_after_the_start_is_reported_still_gets_the_cursor() {
+    let mut app = opened_with(5);
+    keys(&mut app, "kkk:open b:ex<CR><C-o>");
+    load(&mut app, C, msgs(3..=5));
+    // The SDK may report the room's start before the diffs of its last page.
+    let grace = last_timer(&start_loaded(&mut app, C));
+    assert_eq!(open_room(&app), C);
+    assert_eq!(status(&app), Some("Loading older messages…"));
+    // A change without the message looks again and keeps the grace period.
+    let fx = app.update(Msg::Timeline {
+        room: id(C),
+        diffs: vec![TimelineDiff::PushBack(msg(6))],
+    });
+    assert_eq!(no_timers(fx.clone()), fx);
+    assert_eq!(status(&app), Some("Loading older messages…"));
+    app.update(Msg::Timeline {
+        room: id(C),
+        diffs: vec![
+            TimelineDiff::PushFront(msg(2)),
+            TimelineDiff::PushFront(msg(1)),
+        ],
+    });
+    assert_eq!((open_room(&app), cursor_body(&app)), (C, body(2)));
+    assert_eq!(status(&app), None);
+    // The grace period ended with the wait.
+    assert_eq!(app.update(Msg::Timeout { id: grace }), vec![]);
+    assert_eq!((open_room(&app), cursor_body(&app)), (C, body(2)));
+    assert_eq!(status(&app), None);
 }
 
 #[test]
@@ -327,6 +379,35 @@ fn a_key_or_a_failed_load_ends_the_wait_for_a_message() {
     });
     load(&mut app, C, msgs(1..=5));
     assert!(app.timeline_follows());
+}
+
+#[test]
+fn a_paste_or_losing_the_room_ends_the_wait_and_its_grace_period() {
+    // A paste while older messages load.
+    let mut app = waiting_for_message_4();
+    app.update(Msg::Paste {
+        text: "x".into(),
+        editor: None,
+    });
+    load(&mut app, C, msgs(1..=5));
+    assert!(app.timeline_follows());
+
+    // A paste during the grace period: no skip on to `!a` afterwards.
+    let mut app = waiting_for_message_4();
+    let grace = start_loaded_without_message_4(&mut app);
+    app.update(Msg::Paste {
+        text: "x".into(),
+        editor: None,
+    });
+    assert_eq!(app.update(Msg::Timeout { id: grace }), vec![]);
+    assert_eq!(open_room(&app), C);
+
+    // `!c` removed during the grace period.
+    let mut app = waiting_for_message_4();
+    let grace = start_loaded_without_message_4(&mut app);
+    app.update(Msg::RoomRemoved(id(C)));
+    assert_eq!(app.update(Msg::Timeout { id: grace }), vec![]);
+    assert_eq!(open_room(&app), "");
 }
 
 #[test]

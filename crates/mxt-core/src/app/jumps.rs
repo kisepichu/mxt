@@ -6,8 +6,9 @@ use std::collections::VecDeque;
 
 use super::rooms::RoomSwitch;
 use super::{App, StatusKind};
-use crate::effect::Effect;
+use crate::effect::{Effect, UiEffect};
 use crate::ids::{EventId, RoomId};
+use crate::resolver::TimerId;
 use crate::timeline::ItemRef;
 
 /// How many entries the jump list keeps; the oldest drops first.
@@ -15,6 +16,11 @@ const JUMP_LIMIT: usize = 100;
 
 /// The status while older messages load to reach an entry's event.
 const LOADING: &str = "Loading older messages…";
+
+/// How long the wait goes on once the room's start is loaded without the
+/// event: the SDK may deliver that page's diffs after its
+/// `Msg::PaginationDone`.
+const GRACE_MS: u64 = 1000;
 
 /// A position: a room and the remote event under its timeline cursor, or
 /// the room alone when there is none (an empty timeline, a local echo).
@@ -98,13 +104,17 @@ pub(super) enum JumpDirection {
 }
 
 /// An entry whose event is not loaded: older messages load until it is, or
-/// until the room's start is loaded without it. The entry is the one the
-/// list's index is on, in the open room. The next key or paste, a failed
-/// load and opening another room end the wait.
+/// until the room's start is loaded without it and a grace period passes.
+/// The entry is the one the list's index is on, in the open room. The next
+/// key or paste, a failed load and opening another room end the wait, and
+/// its grace period with it.
 pub(super) struct JumpWait {
     event: EventId,
     direction: JumpDirection,
     skipped: Skipped,
+    /// The grace period's timer, while the room's start is loaded without
+    /// the event.
+    grace: Option<TimerId>,
 }
 
 /// The entries skipped on the way, for the status line.
@@ -272,6 +282,7 @@ impl App {
             event,
             direction,
             skipped,
+            grace: None,
         });
         self.paginate(effects);
     }
@@ -291,10 +302,11 @@ impl App {
 
     /// After the open room's timeline changed or a page of older messages
     /// arrived: the waited-for event gets the cursor once it is loaded; once
-    /// the room's start is loaded without it, it is gone and the next entry
-    /// in the same direction is gone to; otherwise more older messages load.
+    /// the room's start is loaded without it, the grace period starts, after
+    /// which the event is gone (see [`App::jump_grace_over`]); otherwise more
+    /// older messages load.
     pub(super) fn check_jump_wait(&mut self, effects: &mut Vec<Effect>) {
-        let Some(wait) = &self.jump_wait else {
+        let Some(wait) = &mut self.jump_wait else {
             return;
         };
         if let Some(at) = self.timeline.event_position(&wait.event) {
@@ -303,15 +315,33 @@ impl App {
             self.place_timeline_cursor(at, effects);
             return self.arrived(skipped);
         }
-        if self.timeline.reached_start()
-            && let Some(wait) = self.jump_wait.take()
-        {
-            let mut skipped = wait.skipped;
-            skipped.gone += 1;
-            // With no entry left, the room stays open: the jump went there.
-            self.jump_from(self.jumps.index, wait.direction, skipped, effects);
-            return;
+        if !self.timeline.reached_start() {
+            // A reset timeline has its start to load again; the grace
+            // period starts anew once it is loaded.
+            wait.grace = None;
+            return self.paginate(effects);
         }
-        self.paginate(effects);
+        if wait.grace.is_none() {
+            let id = self.resolver.new_timer();
+            wait.grace = Some(id);
+            effects.push(Effect::Ui(UiEffect::StartTimer {
+                id,
+                after_ms: GRACE_MS,
+            }));
+        }
+    }
+
+    /// `Msg::Timeout`: when `id` is the wait's grace timer, the event is
+    /// gone, and the next entry in the same direction is gone to. Whether
+    /// it was.
+    pub(super) fn jump_grace_over(&mut self, id: TimerId, effects: &mut Vec<Effect>) -> bool {
+        let Some(wait) = self.jump_wait.take_if(|wait| wait.grace == Some(id)) else {
+            return false;
+        };
+        let mut skipped = wait.skipped;
+        skipped.gone += 1;
+        // With no entry left, the room stays open: the jump went there.
+        self.jump_from(self.jumps.index, wait.direction, skipped, effects);
+        true
     }
 }

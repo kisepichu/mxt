@@ -3,7 +3,11 @@
 mxt's keys follow nvim. `<leader>` is `<Space>` unless `ui.leader` says
 otherwise. Every binding below can be changed or removed, and any action can
 be bound; see [Configuration](configuration.md#keymap) for the tables, the
-key notation and the actions.
+key notation and the actions. With `ui.leader` set to `<Tab>` or `<C-o>`,
+or a binding such as `"<Tab>x"`, that key alone is now also bound, to
+`jump.forward` or `jump.back` (see [The jump list](#the-jump-list)): when
+no other key follows within `ui.timeoutlen`, it runs that action, where
+mxt 0.1.2 did nothing. The leader and the longer bindings work as before.
 
 ## The screen
 
@@ -256,10 +260,10 @@ Going back to a place opens its room, focuses the timeline and puts the
 cursor on the message, after loading older messages when it is not
 loaded; the status line says `Loading older messages…` meanwhile, and any
 key stops the wait. A place in a room you left, or whose message is gone
-(not there once the room's oldest message is loaded), is skipped, and the
-status line says so, for example `Skipped a jump to a room you left`.
-With nothing left in that direction nothing moves, and the status line
-says `No older jump` or `No newer jump`.
+(not there a second after the room's oldest message is loaded), is
+skipped, and the status line says so, for example `Skipped a jump to a
+room you left`. With nothing left in that direction nothing moves, and
+the status line says `No older jump` or `No newer jump`.
 
 Terminals send the same key for `<C-i>` and `<Tab>`, so in mxt, as in
 nvim, `<C-i>` is another name for `<Tab>` (mxt does not turn on the kitty
@@ -267,9 +271,10 @@ keyboard protocol, which tells them apart). Both keys are in `normal`, so
 they jump from the room list, the timeline and the composer's normal and
 visual modes, which they leave for the timeline. Elsewhere they keep their
 meaning: in the composer's insert mode both go to the editor, so `<Tab>`
-inserts a tab; in the mention menu `<Tab>` inserts the mention, in pickers
-it selects the next item and on the command line it completes, while
-`<C-o>` does nothing there; the message view passes both to its editor.
+inserts a tab; in the mention menu `<Tab>` inserts the mention and `<C-o>`
+goes to the editor as in insert mode; in pickers `<Tab>` selects the next
+item and on the command line it completes, while `<C-o>` does nothing
+there; the message view passes both to its editor.
 
 ## Commands
 

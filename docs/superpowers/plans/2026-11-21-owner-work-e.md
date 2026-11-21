@@ -749,9 +749,10 @@ configuration's check of duplicate key spellings), which slot b does not
 build: CI compiles and tests it.
 **Files:** a new `crates/mxt-core/src/app/jumps.rs` and
 `crates/mxt-core/src/app/tests/jumps.rs`; `crates/mxt-core/src/keys.rs`,
-`action.rs`, `keymap.rs`, `app.rs`, `app/rooms.rs`, `app/timeline.rs`,
-`app/search.rs`, `app/tests.rs`; `crates/mxt-tui/src/composer.rs`
-(tests); `crates/mxt/src/config.rs`, `config/tests.rs`; the design
+`action.rs`, `keymap.rs`, `resolver.rs`, `app.rs`, `app/rooms.rs`,
+`app/timeline.rs`, `app/search.rs`, `app/tests.rs`;
+`crates/mxt-tui/src/composer.rs` (tests); `crates/mxt/src/config.rs`,
+`config/tests.rs`; the design
 ("Jump list", "Domain model", "Timeline", "Default keymap", "Action
 registry", "Layers", "Testing"); `docs/keys.md`, `docs/configuration.md`,
 `CHANGELOG.md`.
@@ -768,7 +769,13 @@ new defaults in `normal` take keys that did nothing in the room list and
 the timeline and that edtui's normal and visual modes do not bind (edtui
 binds `<Tab>` and `<C-o>` in insert mode only, which never looks at
 `normal`); a user binding of either key in `normal` or the focused table
-still wins. The changed meaning of `<C-i>` gets a `### Changed` line.
+still wins. With `ui.leader` set to `<Tab>` or `<C-o>`, or a binding
+such as `"<Tab>x"` in `normal`, `room_list` or `timeline`, the key alone
+now also has a binding, so it runs `jump.forward` or `jump.back` after
+`ui.timeoutlen` instead of doing nothing; still not breaking, since the
+configuration loads and the leader and the longer bindings work as
+before (`docs/keys.md` says so beside the leader). The changed meaning
+of `<C-i>` gets a `### Changed` line.
 
 Core:
 
@@ -787,13 +794,20 @@ Core:
   back when no entry is left, skipping by `Reach` (a room not in the room
   list; an event missing from an open room whose start is loaded), and the
   wait (`JumpWait`) for an event that is not loaded: `paginate`, then
-  `check_jump_wait` after `Msg::Timeline` and `Msg::PaginationDone`. The
+  `check_jump_wait` after `Msg::Timeline` and `Msg::PaginationDone`. Once
+  the room's start is loaded without the event, a grace period of 1 s
+  (`UiEffect::StartTimer` with an ID from `Resolver::new_timer`, ended at
+  `Msg::Timeout`) lets the last page's diffs arrive, which matrix-sdk may
+  deliver after `PaginationDone`; each `Msg::Timeline` looks again, and
+  the event is gone only when the timer expires while the wait holds. A
+  timeline reset drops the grace period until the start loads again. The
   status texts of the design.
 - [ ] `App::open_at` takes a `RoomSwitch`: `Recorded` from every caller
   but the jump list, which passes `FromJumpList`. `cursor.first` and
   `cursor.last` in the timeline, a timeline search that finds a match and
-  `gd` that finds its message record before moving. `reset_timeline`, a
-  key, a paste and `Msg::PaginationFailed` end the wait.
+  `gd` that finds its message record before moving. `reset_timeline`
+  (another room, or the open room removed), a key, a paste and
+  `Msg::PaginationFailed` end the wait and its grace period.
 
 `mxt`:
 
@@ -817,12 +831,17 @@ Tests:
   `No older jump`); a left room is skipped both ways, and with only left
   rooms behind, nothing moves; a gone message in the open room whose start
   is loaded is skipped; a message missing once another room's start loads
-  is skipped on to the next entry, which loads; with nothing after it the
-  room stays open; a key or a failed page ends the wait; `<Tab>` and
-  `<C-o>` in the composer's insert mode, the mention menu, a picker, the
-  command line and the message view keep their meaning, and in the
-  composer's normal and visual modes they jump. `keys.rs`: the alias, with
-  alt and in a sequence, `<C-S-i>` still an error, and the apart reading.
+  is skipped on to the next entry, which loads, when the grace timer
+  expires; `PaginationDone { reached_start: true }` before the diff that
+  holds the message still puts the cursor on it, and a change without it
+  starts no second timer; with nothing after a gone message the room
+  stays open; a key, a paste, a failed page and the waited room's removal
+  end the wait, and a grace timer after a paste or the removal does
+  nothing; `<Tab>` and `<C-o>` in the composer's insert mode, the mention
+  menu, a picker, the command line and the message view keep their
+  meaning, and in the composer's normal and visual modes they jump.
+  `keys.rs`: the alias, with alt and in a sequence, `<C-S-i>` still an
+  error, and the apart reading.
 - [ ] `mxt-tui` (`composer.rs`): with edtui, in insert mode `<Tab>`
   inserts a tab and `<C-o>` stays in the composer, and in normal mode
   `<C-o>` and `<Tab>` move between the rooms `]u` went between.

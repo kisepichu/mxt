@@ -902,8 +902,9 @@ rooms, as nvim's jump list does.
   page, as long as it takes, then puts the cursor on it and clears that
   status. The next key or paste ends the wait before it does anything
   else, so the cursor never jumps under a user who has moved on; so do a
-  failed page, whose error the status line shows, and opening another
-  room. `gd` loads nothing (see "Search and jumps").
+  failed page, whose error the status line shows, opening another room,
+  and losing the open room (`Msg::RoomRemoved`). `gd` loads nothing (see
+  "Search and jumps").
 - An entry whose room is not in the room list (the user left it) is
   skipped, and so is an entry whose event is not in its room's timeline
   once the room's start is loaded: the event is gone (a deleted message
@@ -914,13 +915,29 @@ rooms, as nvim's jump list does.
   gone`, followed by `; loading older messages…` while the entry it went
   to loads. Skipped entries stay in the list, so a room joined again can
   be gone to again.
+- A wait judges the event gone only after a grace period. Nothing orders
+  `Msg::PaginationDone { reached_start: true }` after the diffs of the
+  page that reached the start: matrix-sdk 0.19 hands the page to the
+  timeline's own task and returns, so the adapter reports the start at
+  once while the diffs still pass that task and the adapter's. When the
+  start is loaded without the event, the wait goes on, the status line
+  still says `Loading older messages…`, and the core starts a timer of
+  1 s (`UiEffect::StartTimer` with an ID the resolver hands out, so it
+  never equals a key sequence's, answered by `Msg::Timeout`). Each change
+  of the timeline looks for the event again, without a new timer; the
+  event is gone only when the timer expires while the wait still holds.
+  Whatever ends the wait ends the grace period with it, and its timer
+  then does nothing. A timeline reset (`Clear`, `Reset`) has its start to
+  load again, so the grace period ends, pagination resumes, and a new
+  one starts once the start is loaded again. An entry in the open room
+  whose start was loaded before the move is judged at once.
 - With no entry left in that direction, nothing moves: the index stays,
   the position `jump.back` would have added is not added, and the status
   line says `No older jump` or `No newer jump`, after what was skipped
   (`Skipped a jump to a room you left; no older jump`). An event found
-  gone only once its room has opened and its start has loaded is skipped
-  then; when no entry is left after it, its room stays open, with the
-  cursor on the newest message.
+  gone only once its room has opened, its start has loaded and the grace
+  period has passed is skipped then; when no entry is left after it, its
+  room stays open, with the cursor on the newest message.
 - The keys are in `normal`, so they work in the room list, the timeline,
   and the composer's normal and visual modes, which they leave for the
   timeline, as nvim's `<C-o>` jumps from any window. edtui's normal and
@@ -930,10 +947,12 @@ rooms, as nvim's jump list does.
   name for `<Tab>`, and `<C-A-i>` for `<A-Tab>`, as nvim does; `:map`
   shows `<Tab>`. The tables that do not fall back to `normal` keep these
   keys: in the composer's insert mode both go to edtui, as before, which
-  inserts a tab for `<Tab>`; the mention menu's `<Tab>` accepts, a
-  picker's selects the next item and the command line's completes, while
-  `<C-o>` does nothing on those lines; the message view binds neither and
-  passes both to its editor, whose normal mode has no command on them.
+  inserts a tab for `<Tab>`; in the mention menu, whose table falls back
+  to insert mode's, `<Tab>` accepts and `<C-o>` goes to edtui as in
+  insert mode; a picker's `<Tab>` selects the next item and the command
+  line's completes, while `<C-o>` does nothing on those lines; the message
+  view binds neither and passes both to its editor, whose normal mode has
+  no command on them.
 - A configuration that bound both `<C-i>` and `<Tab>` in one table, which
   mxt 0.1.2 and earlier read as two keys, loads the same, with a warning
   (see "Layers").
@@ -1874,8 +1893,11 @@ direct message lookup logs at `info` which step found a room (see
     by every path, back and forward with the position `jump.back` adds,
     dropping the newer entries on a jump, the 100-entry limit, the newest
     entry not added twice, loading an entry's message, skipping a left
-    room or a gone message, the case with nothing left, the wait ending
-    at a key, and `<Tab>` and `<C-o>` where `normal` does not apply
+    room or a gone message, the grace period (the start reported before
+    the page that holds the message, and the timer expiring without it),
+    the case with nothing left, the wait ending at a key, a paste, a
+    failed page and the room's removal, and `<Tab>` and `<C-o>` where
+    `normal` does not apply
 - `mxt-matrix`: tests with constructed inputs for converting SDK values into
   domain types, HTML rendering, download file names, the dimensions of
   uploaded images and the session file. The send queue paths are tested
