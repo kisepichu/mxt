@@ -50,11 +50,15 @@ impl SortKey {
     /// `Less` when `a` comes first. `None` sorts before `Some` and `false`
     /// before `true`, so comparing `b` with `a` puts the newest time and the
     /// rooms with something unread first, and rooms without a time last.
-    fn compare(self, a: &RoomSummary, b: &RoomSummary) -> Ordering {
-        let unread = |room: &RoomSummary| RoomFilter::Unread.matches(&room.unread);
+    /// The room `open` has nothing unread for `Mentions` and `Unread`
+    /// (design, "The open room sorts as read").
+    fn compare(self, a: &RoomSummary, b: &RoomSummary, open: Option<&RoomId>) -> Ordering {
+        let has = |room: &RoomSummary, filter: RoomFilter| {
+            open != Some(&room.id) && filter.matches(&room.unread)
+        };
         match self {
-            SortKey::Mentions => (b.unread.mentions > 0).cmp(&(a.unread.mentions > 0)),
-            SortKey::Unread => unread(b).cmp(&unread(a)),
+            SortKey::Mentions => has(b, RoomFilter::Mentions).cmp(&has(a, RoomFilter::Mentions)),
+            SortKey::Unread => has(b, RoomFilter::Unread).cmp(&has(a, RoomFilter::Unread)),
             SortKey::Recent => b.latest_activity.cmp(&a.latest_activity),
             SortKey::Read => b.last_read.cmp(&a.last_read),
             SortKey::Name => lowercase(&a.name).cmp(lowercase(&b.name)),
@@ -94,12 +98,12 @@ impl RoomSort {
     }
 
     /// A total order: room IDs are unique and break every tie.
-    fn compare(&self, a: &RoomSummary, b: &RoomSummary) -> Ordering {
+    fn compare(&self, a: &RoomSummary, b: &RoomSummary, open: Option<&RoomId>) -> Ordering {
         self.keys
             .iter()
-            .map(|key| key.compare(a, b))
+            .map(|key| key.compare(a, b, open))
             .find(|order| order.is_ne())
-            .unwrap_or_else(|| SortKey::Name.compare(a, b))
+            .unwrap_or_else(|| SortKey::Name.compare(a, b, open))
             .then_with(|| a.id.cmp(&b.id))
     }
 }
@@ -201,6 +205,8 @@ pub enum RoomTarget {
 #[derive(Clone, Debug, Default)]
 pub struct RoomList {
     sort: RoomSort,
+    /// The open room, which sorts as read (see `SortKey::compare`).
+    open: Option<RoomId>,
     /// Ordered by `sort`, with unique ids.
     rooms: Vec<RoomSummary>,
 }
@@ -209,6 +215,7 @@ impl RoomList {
     pub fn new(sort: RoomSort) -> Self {
         Self {
             sort,
+            open: None,
             rooms: Vec::new(),
         }
     }
@@ -216,23 +223,47 @@ impl RoomList {
     /// Inserts or replaces the room with the same id and restores the order.
     /// Returns the room's old index (`None` for a new room) and its new index.
     pub fn upsert(&mut self, summary: RoomSummary) -> (Option<usize>, usize) {
-        let old = self.remove(&summary.id).map(|(index, _)| index);
+        let old = self.take(&summary.id).map(|(index, _)| index);
         (old, self.insert(summary))
     }
 
     /// Places a room that is not in the list; returns its index.
     fn insert(&mut self, summary: RoomSummary) -> usize {
+        let open = self.open.as_ref();
         let index = self
             .rooms
-            .partition_point(|room| self.sort.compare(room, &summary) == Ordering::Less);
+            .partition_point(|room| self.sort.compare(room, &summary, open) == Ordering::Less);
         self.rooms.insert(index, summary);
         index
     }
 
-    /// Returns the removed room and the index it had.
-    pub fn remove(&mut self, id: &RoomId) -> Option<(usize, RoomSummary)> {
+    /// Takes a room out to place it again; returns it and the index it had.
+    fn take(&mut self, id: &RoomId) -> Option<(usize, RoomSummary)> {
         let index = self.position(id)?;
         Some((index, self.rooms.remove(index)))
+    }
+
+    /// Returns the removed room and the index it had. A removed open room is
+    /// no longer open.
+    pub fn remove(&mut self, id: &RoomId) -> Option<(usize, RoomSummary)> {
+        self.open.take_if(|open| open == id);
+        self.take(id)
+    }
+
+    /// Makes `id` the open room, which sorts as read, and places it and the
+    /// previously open room again. Returns `id`'s new index.
+    pub fn open(&mut self, id: &RoomId) -> Option<usize> {
+        // Both rooms out first: the others keep their order with either
+        // room open.
+        let room = self.take(id);
+        if let Some((_, previous)) = self
+            .open
+            .replace(id.clone())
+            .and_then(|previous| self.take(&previous))
+        {
+            self.insert(previous);
+        }
+        room.map(|(_, room)| self.insert(room))
     }
 
     pub fn rooms(&self) -> &[RoomSummary] {
@@ -259,7 +290,7 @@ impl RoomList {
     /// false) and places the room again, since the `mentions` and `unread`
     /// keys depend on them. Returns the room's old and new index.
     pub fn clear_unread(&mut self, id: &RoomId) -> Option<(usize, usize)> {
-        let (old, mut room) = self.remove(id)?;
+        let (old, mut room) = self.take(id)?;
         room.unread = UnreadCounts::default();
         Some((old, self.insert(room)))
     }
@@ -338,7 +369,6 @@ mod tests {
             mode: NotificationMode::Default,
             latest_activity: at.map(Timestamp::from_millis),
             last_read: None,
-            counted_after: None,
         }
     }
 

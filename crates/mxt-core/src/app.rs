@@ -244,8 +244,7 @@ impl App {
             Msg::Key { key, editor } => self.key(key, editor, &mut effects),
             Msg::Paste { text, editor } => self.paste(text, editor, &mut effects),
             Msg::Timeout { id } => self.timeout(id, &mut effects),
-            Msg::RoomUpserted(mut summary) => {
-                self.hold_back_unread(&mut summary);
+            Msg::RoomUpserted(summary) => {
                 self.upsert_room(summary);
                 self.open_joined(&mut effects);
             }

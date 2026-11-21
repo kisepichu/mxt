@@ -46,7 +46,6 @@ fn room(rid: &str, at: u64, messages: u64) -> RoomSummary {
         mode: NotificationMode::Default,
         latest_activity: Some(Timestamp::from_millis(at)),
         last_read: None,
-        counted_after: None,
     }
 }
 fn app_with(user: Vec<(TableId, KeySeq, Binding)>) -> App {

@@ -18,9 +18,10 @@ marked **Breaking:**.
   any device; rooms you never read last) and `name`, for example
   `sort = "mentions, unread, read"`. Remaining ties go by name; `"recent"`
   and `"name"` mean what they did. With `read`, a room you open moves up
-  when it had something new for you. The cursor stays on its room when
-  rooms move. mxt 0.1.3 ignores such a value with a warning and sorts by
-  `recent`, so a configuration shared with it can carry it.
+  when it had something new for you; with `mentions` or `unread`, the room
+  you have open sorts as read until you open another. The cursor stays on
+  its room when rooms move. mxt 0.1.3 ignores such a value with a warning
+  and sorts by `recent`, so a configuration shared with it can carry it.
 
 ### Fixed
 
@@ -30,10 +31,6 @@ marked **Breaking:**.
   the newest. Messages that arrived below the pane meanwhile stay there,
   counted by `↓ N newer`, until the cursor reaches them or the pane grows
   (when a draft of several rows is sent, say).
-- The room you have open no longer briefly shows a message you just read
-  as unread, and with `unread` or `mentions` in `ui.room_list.sort` no
-  longer jumps into the unread rooms, when the message's count arrives
-  after its read receipt. Anything newer than the receipt still counts.
 
 ## [0.1.3] - 2026-11-21
 

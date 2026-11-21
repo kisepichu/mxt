@@ -229,7 +229,10 @@ last read its rooms. With `"read"`, a room you open moves up when its newest
 message is newer than your last read receipt in it, once the homeserver
 sends the receipt back; opening a room with nothing new leaves it in place,
 since homeservers keep a read receipt only when it moves forward. With
-`"unread"` or `"mentions"`, a room you read moves at once.
+`"unread"` or `"mentions"`, a room you read moves at once, and the room you
+have open sorts as read: it does not move into or within the unread rooms
+while it is open, though its badge counts new messages, and takes its
+place by its counts again once you open another room.
 
 ## `[files]`
 
