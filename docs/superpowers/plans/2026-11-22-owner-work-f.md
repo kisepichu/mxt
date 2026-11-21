@@ -189,8 +189,8 @@ Core:
   `JoinedRoomBuilder::add_receipt` (matrix-sdk-test
   `sync_builder/joined_room.rs:99-102`) of
   `EventFactory::new().read_receipts().add_with_timestamp(..)`
-  (`event_factory.rs:1298, 1874-1890`) holding the user's `m.read`
-  unthreaded at 1000, the user's `m.read.private` with
+  (`event_factory.rs:1298, 1874-1890`) holding, each on its own event, the
+  user's `m.read` unthreaded at 1000, the user's `m.read.private` with
   `ReceiptThread::Main` at 2000, the user's `m.read` with
   `ReceiptThread::Thread($root)` at 3000 and another user's `m.read` at
   4000: `room_facts` gives `last_read` 2000. A room without receipts gives
@@ -242,15 +242,15 @@ Docs:
   `[u` and the room picker follow the list's order.
 - [ ] CHANGELOG `### Added`: "`ui.room_list.sort` takes an array of keys,
   applied in order, each deciding between the rooms the keys before it
-  leave tied: `\"mentions\"` (rooms with unread mentions first),
-  `\"unread\"` (rooms with unread messages first), `\"recent\"` (latest
-  activity first), `\"read\"` (the rooms you read most recently first, by
-  your own latest read receipt from any device; rooms you never read
-  last) and `\"name\"`, for example `sort = [\"mentions\", \"unread\",
-  \"read\"]`. Remaining ties go by name. A single key can stay a string,
-  so `\"recent\"` and `\"name\"` mean what they did. The cursor stays on
-  its room when rooms move. mxt 0.1.3 stops with an error on an array
-  here, so keep a string in a configuration you share with it."
+  leave tied: `"mentions"` (rooms with unread mentions first), `"unread"`
+  (rooms with unread messages first), `"recent"` (latest activity first),
+  `"read"` (the rooms you read most recently first, by your own latest
+  read receipt from any device; rooms you never read last) and `"name"`,
+  for example `sort = ["mentions", "unread", "read"]`. Remaining ties go
+  by name. A single key can stay a string, so `"recent"` and `"name"` mean
+  what they did. The cursor stays on its room when rooms move. mxt 0.1.3
+  stops with an error on an array here, so keep a string in a
+  configuration you share with it."
 
 ## Task 2: Composers per timeline
 
@@ -282,7 +282,7 @@ line. The design already describes composers per `TimelineId`.
   `members: HashMap<RoomId, RoomMembers>` on `App`, requested on the first
   focus of any of the room's composers and used by all of them;
   `MentionMenu::timeline`; `PendingSend::timeline`; `send_failed` puts the
-  draft back when `shown_timeline() == Some(&pending.timeline)` and that
+  draft back when `shown_timeline()` is `pending.timeline` and that
   composer is empty with a new draft; `App::draft(&TimelineId)`;
   `App::shown_timeline() -> Option<TimelineId>`, for now the open room's
   main timeline; `composer_effect` takes `fn(TimelineId) -> UiEffect`;
