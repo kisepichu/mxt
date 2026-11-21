@@ -338,7 +338,7 @@ fn the_open_room_moves_among_the_read_rooms_with_the_cursor_and_u_follows() {
 
     // !a sorts as read once open too, and its receipt clears it.
     app.update(Msg::Timeline {
-        room: id(A),
+        timeline: main_of(A),
         diffs: vec![TimelineDiff::Reset(vec![msg(1)])],
     });
     let viewport = Msg::Viewport {

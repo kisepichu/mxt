@@ -3,7 +3,11 @@
 //! them, without the sync loop and the room list, and the tests read what
 //! reaches the core.
 
-use std::{collections::VecDeque, fs, time::Duration};
+use std::{
+    collections::{HashSet, VecDeque},
+    fs,
+    time::Duration,
+};
 
 use matrix_sdk::{
     ruma::{
@@ -21,6 +25,7 @@ use matrix_sdk::{
 use matrix_sdk_test::{JoinedRoomBuilder, event_factory::EventFactory};
 use mxt_core::{
     effect::OutgoingKind,
+    ids::TimelineId,
     mention::RenderedBody,
     timeline::{
         ItemRef, MessageContent, SendState, TimelineDiff, TimelineEntry, TimelineItem, apply_diff,
@@ -32,6 +37,7 @@ use super::*;
 use crate::test_dir::TestDir;
 
 mod join;
+mod threads;
 
 const ROOM: &str = "!room:example.org";
 const ME: &str = "@alice:example.org";
@@ -144,6 +150,8 @@ struct Core {
     /// Received and not applied yet: `until` applies one at a time, so it
     /// sees every state of the entries.
     diffs: VecDeque<TimelineDiff>,
+    /// The timelines the diffs received so far were for.
+    timelines: HashSet<TimelineId>,
     reports: VecDeque<Msg>,
 }
 
@@ -153,6 +161,7 @@ impl Core {
             from_adapter,
             entries: Vec::new(),
             diffs: VecDeque::new(),
+            timelines: HashSet::new(),
             reports: VecDeque::new(),
         }
     }
@@ -167,8 +176,9 @@ impl Core {
         }
     }
 
-    /// The next answer of a send, of a recovery or of a `:join`, or report
-    /// of a failure (`SendQueued`, `SendFailed`, `Recovered`, `Joined`,
+    /// The next answer of a send, of a pagination, of a recovery or of a
+    /// `:join`, or report of a failure (`SendQueued`, `SendFailed`,
+    /// `PaginationDone`, `PaginationFailed`, `Recovered`, `Joined`,
     /// `NoDirectMessage`, `EffectFailed`); other messages are skipped.
     async fn report(&mut self) -> Msg {
         loop {
@@ -181,10 +191,15 @@ impl Core {
 
     async fn receive(&mut self, what: &str) {
         match timeout(WAIT, self.from_adapter.recv()).await {
-            Ok(Some(Msg::Timeline { diffs, .. })) => self.diffs.extend(diffs),
+            Ok(Some(Msg::Timeline { timeline, diffs })) => {
+                self.timelines.insert(timeline);
+                self.diffs.extend(diffs);
+            }
             Ok(Some(
                 report @ (Msg::SendQueued { .. }
                 | Msg::SendFailed { .. }
+                | Msg::PaginationDone { .. }
+                | Msg::PaginationFailed { .. }
                 | Msg::Recovered
                 | Msg::Joined { .. }
                 | Msg::NoDirectMessage { .. }

@@ -3,7 +3,7 @@
 
 use super::{App, Confirm, Focus, Motion, StatusKind, View};
 use crate::effect::{Effect, MatrixEffect, UiEffect, ViewContent};
-use crate::ids::{EventId, RoomId};
+use crate::ids::{EventId, TimelineId, Timestamp};
 use crate::msg::Pane;
 use crate::rich::is_web_url;
 use crate::settings::ImagePreview;
@@ -19,7 +19,7 @@ const PAGINATE_WITHIN: usize = 10;
 /// Why an action that needs the item's remote event refuses a local echo.
 pub(super) const NOT_SENT: &str = "Wait until the message is sent";
 
-/// The open room's timeline state; opening a room starts a new one.
+/// The open room's main timeline state; opening a room starts a new one.
 #[derive(Default)]
 pub(super) struct Timeline {
     entries: Vec<TimelineEntry>,
@@ -28,6 +28,11 @@ pub(super) struct Timeline {
     pagination: Pagination,
     /// The event of the last receipt requested.
     receipt: Option<EventId>,
+    /// The latest time mxt marked the room read up to since it opened the
+    /// room: the timestamp of the item of its latest receipt, or the room's
+    /// latest activity at `room.mark_read`. Thread roots with a newer reply
+    /// are marked unread (design, "Threads").
+    read_up_to: Option<Timestamp>,
 }
 
 /// An item and its index in the entries.
@@ -71,6 +76,15 @@ impl Timeline {
     /// Whether the room's start is loaded.
     pub(super) fn reached_start(&self) -> bool {
         self.pagination == Pagination::ReachedStart
+    }
+
+    pub(super) fn read_up_to(&self) -> Option<Timestamp> {
+        self.read_up_to
+    }
+
+    /// The room is read up to `time`, unless it was read up to a later time.
+    pub(super) fn read_up_to_at_least(&mut self, time: Timestamp) {
+        self.read_up_to = self.read_up_to.max(Some(time));
     }
 
     pub(super) fn cursor_item(&self) -> Option<&TimelineItem> {
@@ -135,27 +149,28 @@ impl Timeline {
         })
     }
 
-    /// The newest remote event: the event a receipt goes on.
-    fn newest_remote_event(&self) -> Option<&EventId> {
-        self.entries
-            .iter()
-            .rev()
-            .find_map(|entry| match &as_item(entry)?.id {
-                ItemRef::Remote(event) => Some(event),
+    /// The newest remote item: the event a receipt goes on, with its
+    /// timestamp.
+    fn newest_remote_event(&self) -> Option<(&EventId, Timestamp)> {
+        self.entries.iter().rev().find_map(|entry| {
+            let item = as_item(entry)?;
+            match &item.id {
+                ItemRef::Remote(event) => Some((event, item.timestamp)),
                 ItemRef::Local(_) => None,
-            })
+            }
+        })
     }
 }
 
 impl App {
-    /// `Msg::Timeline`: only the open room's diffs count.
+    /// `Msg::Timeline`: only the open room's main timeline's diffs count.
     pub(super) fn timeline_diffs(
         &mut self,
-        room: RoomId,
+        timeline: &TimelineId,
         diffs: Vec<TimelineDiff>,
         effects: &mut Vec<Effect>,
     ) {
-        if self.open_room.as_ref() != Some(&room) {
+        if !self.shows(timeline) {
             return;
         }
         self.timeline.apply(diffs);
@@ -168,11 +183,11 @@ impl App {
     /// near the oldest item, so a cursor that stays there keeps loading.
     pub(super) fn pagination_done(
         &mut self,
-        room: RoomId,
+        timeline: &TimelineId,
         reached_start: bool,
         effects: &mut Vec<Effect>,
     ) {
-        if self.open_room.as_ref() != Some(&room) {
+        if !self.shows(timeline) {
             return;
         }
         self.timeline.pagination = if reached_start {
@@ -186,8 +201,8 @@ impl App {
 
     /// `Msg::PaginationFailed`. The next cursor move or timeline change may
     /// request again, so a persistent failure does not repeat in a loop.
-    pub(super) fn pagination_failed(&mut self, room: RoomId, error: String) {
-        if self.open_room.as_ref() != Some(&room) {
+    pub(super) fn pagination_failed(&mut self, timeline: &TimelineId, error: String) {
+        if !self.shows(timeline) {
             return;
         }
         if self.timeline.pagination == Pagination::InFlight {
@@ -256,24 +271,23 @@ impl App {
         }
     }
 
-    /// Requests back pagination of the open room, unless its start is
+    /// Requests back pagination of the shown timeline, unless its start is
     /// loaded or a request is in flight.
     pub(super) fn paginate(&mut self, effects: &mut Vec<Effect>) {
-        let Some(room) = &self.open_room else {
+        let Some(timeline) = self.shown_timeline() else {
             return;
         };
         if self.timeline.pagination == Pagination::Idle {
             self.timeline.pagination = Pagination::InFlight;
-            effects.push(Effect::Matrix(MatrixEffect::PaginateBackwards(
-                room.clone(),
-            )));
+            effects.push(Effect::Matrix(MatrixEffect::PaginateBackwards(timeline)));
         }
     }
 
     /// Requests a receipt for the newest remote event once (design, "Read
     /// receipts") while the terminal is focused and the timeline's last
-    /// viewport includes the newest item, and clears the room's counts
-    /// (design, "Optimistic clearing").
+    /// viewport includes the newest item, clears the room's counts (design,
+    /// "Optimistic clearing"), and marks the room read up to the event's
+    /// time for the thread roots' marks.
     pub(super) fn check_receipt(&mut self, effects: &mut Vec<Effect>) {
         let (Some(room), Some(viewport)) = (&self.open_room, self.timeline_viewport) else {
             return;
@@ -287,15 +301,16 @@ impl App {
         if !(viewport.first..=viewport.last).contains(&newest) {
             return;
         }
-        let Some(event) = self
+        let Some((event, time)) = self
             .timeline
             .newest_remote_event()
-            .filter(|&event| self.timeline.receipt.as_ref() != Some(event))
+            .filter(|&(event, _)| self.timeline.receipt.as_ref() != Some(event))
         else {
             return;
         };
         let (room, event) = (room.clone(), event.clone());
         self.timeline.receipt = Some(event.clone());
+        self.timeline.read_up_to_at_least(time);
         self.clear_room_unread(&room);
         effects.push(Effect::Matrix(MatrixEffect::SendReceipt { room, event }));
     }

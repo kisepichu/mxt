@@ -28,18 +28,18 @@ fn reply(n: u32, to: u32) -> TimelineEntry {
 }
 fn load(app: &mut App, room: &str, entries: Vec<TimelineEntry>) -> Vec<Effect> {
     app.update(Msg::Timeline {
-        room: id(room),
+        timeline: main_of(room),
         diffs: vec![TimelineDiff::Reset(entries)],
     })
 }
 fn start_loaded(app: &mut App, room: &str) -> Vec<Effect> {
     app.update(Msg::PaginationDone {
-        room: id(room),
+        timeline: main_of(room),
         reached_start: true,
     })
 }
 fn paginate(room: &str) -> Effect {
-    Effect::Matrix(MatrixEffect::PaginateBackwards(id(room)))
+    Effect::Matrix(MatrixEffect::PaginateBackwards(main_of(room)))
 }
 /// `!c` open with `message 1` to `message <n>`, the cursor following the
 /// newest.
@@ -274,7 +274,7 @@ fn a_message_gone_from_its_loaded_room_is_skipped() {
     // Entries from 10, 4 and 6.
     keys(&mut app, "gg3jgg5jG");
     app.update(Msg::Timeline {
-        room: id(C),
+        timeline: main_of(C),
         diffs: vec![TimelineDiff::Remove(5)],
     });
     keys(&mut app, "<C-o>");
@@ -343,13 +343,13 @@ fn a_message_whose_page_comes_after_the_start_is_reported_still_gets_the_cursor(
     assert_eq!(status(&app), Some("Loading older messages…"));
     // A change without the message looks again and keeps the grace period.
     let fx = app.update(Msg::Timeline {
-        room: id(C),
+        timeline: main_of(C),
         diffs: vec![TimelineDiff::PushBack(msg(6))],
     });
     assert_eq!(no_timers(fx.clone()), fx);
     assert_eq!(status(&app), Some("Loading older messages…"));
     app.update(Msg::Timeline {
-        room: id(C),
+        timeline: main_of(C),
         diffs: vec![
             TimelineDiff::PushFront(msg(2)),
             TimelineDiff::PushFront(msg(1)),
@@ -374,7 +374,7 @@ fn a_key_or_a_failed_load_ends_the_wait_for_a_message() {
 
     keys(&mut app, "k:open b:ex<CR><C-o>");
     app.update(Msg::PaginationFailed {
-        room: id(C),
+        timeline: main_of(C),
         error: "offline".into(),
     });
     load(&mut app, C, msgs(1..=5));

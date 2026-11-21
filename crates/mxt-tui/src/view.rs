@@ -802,7 +802,7 @@ pub(crate) mod tests {
     use crate::clipboard::SharedRegister;
     use crate::editor::tests::keys;
     use mxt_core::effect::{Effect, UiEffect};
-    use mxt_core::ids::{EventId, RoomId, Timestamp, UserId};
+    use mxt_core::ids::{EventId, RoomId, TimelineId, Timestamp, UserId};
     use mxt_core::keymap::Keymap;
     use mxt_core::keys::KeySeq;
     use mxt_core::msg::Msg;
@@ -879,13 +879,14 @@ pub(crate) mod tests {
             reactions: Vec::new(),
             edited: false,
             send_state: None,
+            thread_summary: None,
         })
     }
 
     /// `room`'s timeline as one-line messages with the events `$<n>`.
     pub(crate) fn reset(room: &str, events: std::ops::Range<u32>) -> Msg {
         Msg::Timeline {
-            room: RoomId::new(room),
+            timeline: TimelineId::main(RoomId::new(room)),
             diffs: vec![TimelineDiff::Reset(events.map(message).collect())],
         }
     }

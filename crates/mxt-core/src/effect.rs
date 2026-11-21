@@ -88,9 +88,10 @@ pub enum MatrixEffect {
     /// `room.mark_read`: a receipt for the room's latest event, and clear its
     /// manual unread mark.
     MarkRoomRead(RoomId),
-    /// Load older events of the open room's timeline; answered with
-    /// `Msg::PaginationDone` or `Msg::PaginationFailed`.
-    PaginateBackwards(RoomId),
+    /// Load older events of the timeline, a room's main timeline or one of
+    /// its threads; answered with `Msg::PaginationDone` or
+    /// `Msg::PaginationFailed` for it.
+    PaginateBackwards(TimelineId),
     /// A receipt of the configured kind and the fully read marker, both on `event`.
     SendReceipt {
         room: RoomId,

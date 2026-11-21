@@ -18,7 +18,7 @@ use std::collections::{HashMap, VecDeque};
 use crate::action::{Action, Binding};
 use crate::command::{COMMANDS, help_text};
 use crate::effect::{Effect, MatrixEffect, RecoveryKey, UiEffect};
-use crate::ids::{RoomId, SendId, TimelineId, UserId};
+use crate::ids::{RoomId, SendId, TimelineId, Timestamp, UserId};
 use crate::keymap::{InputContext, KeySink, Keymap, keymap_text};
 use crate::keys::Key;
 use crate::line::LineEditor;
@@ -250,12 +250,14 @@ impl App {
             }
             Msg::RoomRemoved(id) => self.remove_room(id, &mut effects),
             Msg::SyncState(state) => self.sync_state = state,
-            Msg::Timeline { room, diffs } => self.timeline_diffs(room, diffs, &mut effects),
+            Msg::Timeline { timeline, diffs } => {
+                self.timeline_diffs(&timeline, diffs, &mut effects)
+            }
             Msg::PaginationDone {
-                room,
+                timeline,
                 reached_start,
-            } => self.pagination_done(room, reached_start, &mut effects),
-            Msg::PaginationFailed { room, error } => self.pagination_failed(room, error),
+            } => self.pagination_done(&timeline, reached_start, &mut effects),
+            Msg::PaginationFailed { timeline, error } => self.pagination_failed(&timeline, error),
             Msg::Viewport { pane, first, last } => {
                 let viewport = Some(Viewport { first, last });
                 match pane {
@@ -328,6 +330,18 @@ impl App {
     /// Whether the timeline follows the newest item.
     pub fn timeline_follows(&self) -> bool {
         self.timeline.follows()
+    }
+
+    /// The time after which a thread root's latest reply marks it unread
+    /// (design, "Threads"): what mxt last marked read in the open room
+    /// since it opened it (`read_up_to`), while the room has unread
+    /// messages; `None` otherwise, and before anything was marked read.
+    pub fn thread_marks_after(&self) -> Option<Timestamp> {
+        let room = self.rooms.get(self.open_room.as_ref()?)?;
+        if room.unread.messages == 0 {
+            return None;
+        }
+        self.timeline.read_up_to()
     }
 
     /// The first and last timeline entries of the open room's last reported

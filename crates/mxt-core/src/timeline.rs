@@ -2,6 +2,7 @@
 //! and the diffs the matrix adapter forwards from the SDK.
 
 use std::fmt;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use crate::ids::{EventId, Timestamp, TxnId, UserId};
@@ -64,6 +65,24 @@ pub struct ReactionGroup {
     pub count: u32,
     /// Whether the user is among the senders.
     pub mine: bool,
+}
+
+/// The summary of the thread an item is the root of (design, "Threads"):
+/// how many replies it has, which leaves out the root, and the latest
+/// reply's time while the SDK has that reply loaded. A thread whose replies
+/// are all gone has no summary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThreadSummary {
+    pub replies: NonZeroU32,
+    pub latest: Option<Timestamp>,
+}
+
+impl ThreadSummary {
+    /// Whether the latest reply is newer than `read_up_to`; never without
+    /// its time.
+    pub fn unread_after(&self, read_up_to: Timestamp) -> bool {
+        self.latest.is_some_and(|latest| latest > read_up_to)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,6 +149,9 @@ pub struct TimelineItem {
     pub edited: bool,
     /// `Some` for local echoes.
     pub send_state: Option<SendState>,
+    /// `Some` for the root of a thread. No item of the main timeline is a
+    /// reply in a thread: the SDK leaves them out of it.
+    pub thread_summary: Option<ThreadSummary>,
 }
 
 /// One entry of the timeline, in the SDK's order (oldest first).
@@ -248,6 +270,7 @@ mod tests {
             reactions: Vec::new(),
             edited: false,
             send_state: None,
+            thread_summary: None,
         }
     }
     /// Distinct entries, told apart by `n`.
@@ -368,6 +391,19 @@ mod tests {
             assert_eq!(own.as_ref().map(OwnEvent::item), Some(&id));
             assert_eq!(OwnEvent::new(&item(id, "@bob:example.org"), &me), None);
         }
+    }
+
+    #[test]
+    fn a_thread_is_unread_after_a_time_only_with_a_newer_latest_reply() {
+        let summary = |latest: Option<u64>| ThreadSummary {
+            replies: NonZeroU32::new(3).unwrap(),
+            latest: latest.map(Timestamp::from_millis),
+        };
+        let read_up_to = Timestamp::from_millis(2_000);
+        assert!(summary(Some(2_001)).unread_after(read_up_to));
+        assert!(!summary(Some(2_000)).unread_after(read_up_to));
+        assert!(!summary(Some(1_999)).unread_after(read_up_to));
+        assert!(!summary(None).unread_after(read_up_to));
     }
 
     #[test]
