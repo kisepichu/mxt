@@ -343,6 +343,24 @@ fn counts_from_before_the_open_rooms_receipt_leave_it_in_place() {
 }
 
 #[test]
+fn counts_after_an_event_the_open_timeline_does_not_show_pass() {
+    let mut app = b_read_to_message_2();
+    // The echo, then the user's reaction, which has no item, and a poll's
+    // end after it, which the SDK counts.
+    app.update(Msg::RoomUpserted(counting_after(room(B, 20, 0), 2)));
+    app.update(Msg::RoomUpserted(counting_after(room(B, 20, 0), 99)));
+    app.update(Msg::RoomUpserted(counting_after(room(B, 30, 1), 99)));
+    assert_eq!(order(&app), [A, B, C]);
+    assert_eq!(app.rooms().get(&id(B)).unwrap().unread.messages, 1);
+    // The count stays once the room is closed.
+    assert_eq!(
+        no_timers(keys(&mut app, "]u")),
+        vec![unsubscribe(B), subscribe(C)]
+    );
+    assert_eq!(app.rooms().get(&id(B)).unwrap().unread.messages, 1);
+}
+
+#[test]
 fn a_message_after_the_open_rooms_receipt_counts() {
     // Its count before its diff, which the viewport does not show yet: the
     // count comes back with the diff.

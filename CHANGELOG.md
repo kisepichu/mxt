@@ -30,11 +30,10 @@ marked **Breaking:**.
   the newest. Messages that arrived below the pane meanwhile stay there,
   counted by `↓ N newer`, until the cursor reaches them or the pane grows
   (when a draft of several rows is sent, say).
-- The room you have open no longer shows a message you just read as unread
-  until the next sync when the message's count reaches mxt after its read
-  receipt went out: the room keeps no badge and, with `unread` or
-  `mentions` in `ui.room_list.sort`, stays among the read rooms. Anything
-  newer than the receipt still counts.
+- The room you have open no longer briefly shows a message you just read
+  as unread, and with `unread` or `mentions` in `ui.room_list.sort` no
+  longer jumps into the unread rooms, when the message's count arrives
+  after its read receipt. Anything newer than the receipt still counts.
 
 ## [0.1.3] - 2026-11-21
 

@@ -152,10 +152,15 @@ impl Timeline {
 
     /// Whether the SDK's counts may still count events up to the receipt:
     /// the last receipt requested is on the newest remote event, and the
-    /// SDK does not count after that event (`counted_after`) yet.
+    /// SDK counts after no event (`counted_after`) or after another remote
+    /// event of the timeline, which is older than the receipt. An event the
+    /// timeline has no item for, such as the user's own reaction, edit or
+    /// state event, may be newer than the receipt, so counts after it pass.
     fn receipt_ahead_of(&self, counted_after: Option<&EventId>) -> bool {
         self.receipt.as_ref().is_some_and(|receipt| {
-            counted_after != Some(receipt) && self.newest_remote_event() == Some(receipt)
+            self.newest_remote_event() == Some(receipt)
+                && counted_after
+                    .is_none_or(|event| event != receipt && self.event_position(event).is_some())
         })
     }
 }
@@ -184,7 +189,8 @@ impl App {
     /// room keeps zero counts and the core holds the counts back. A count
     /// for an event after the receipt comes back with the event's diff
     /// (`release_unread`) or, when the timeline does not show the event,
-    /// with the first update that the SDK counts after the receipt.
+    /// with the first update that the SDK counts after the receipt or after
+    /// an event the timeline has no item for.
     pub(super) fn hold_back_unread(&mut self, summary: &mut RoomSummary) {
         if self.open_room.as_ref() == Some(&summary.id) {
             self.timeline.held_unread = self
@@ -197,6 +203,9 @@ impl App {
     /// Gives the open room the counts held back once the timeline has a
     /// remote event after the receipt that no receipt went out for.
     fn release_unread(&mut self) {
+        if self.timeline.held_unread.is_none() {
+            return;
+        }
         let Some(room) = self.open_room.as_ref().and_then(|id| self.rooms.get(id)) else {
             return;
         };

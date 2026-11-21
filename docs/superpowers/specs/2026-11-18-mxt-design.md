@@ -469,21 +469,28 @@ covered by unit tests.
   show the badge, and sit among the unread rooms under `unread` or
   `mentions`, until the next sync. So while the last receipt the core
   requested for the open room is on the newest remote event of its main
-  timeline, and an update's `counted_after` is not that event, the core
-  sets the update's counts to zero and holds them back. It gives them to
-  the room when a timeline diff brings a remote event after the receipt
-  and no receipt goes out for it. A message after the receipt therefore
-  counts once its diff arrives, and an event the main timeline does not
-  show (a reply in a thread, a stable poll, a poll's end, an unknown
-  `msgtype`) once the SDK counts after the receipt, after the next sync.
-  Two cases keep such an event hidden until a newer remote event arrives
-  or, once the room is closed, until the room's next update: a receipt
-  request that failed, and a newer receipt from another device on an
-  event the main timeline does not show. When a thread sends an
-  unthreaded receipt (see "Threads"), `counted_after` is compared with the
-  event of the latest unthreaded receipt the core requested in the room.
-  Counts given back can still count events up to the receipt until the
-  next sync, as without holding them back.
+  timeline, and an update's `counted_after` is none or another remote
+  event of that timeline, which is older, the core sets the update's
+  counts to zero and holds them back. It gives them to the room when a
+  timeline diff brings a remote event after the receipt and no receipt
+  goes out for it. The SDK also counts after the user's own events of any
+  type (`event_cache/caches/read_receipts.rs:483-487`) and after receipts
+  from other devices, so a `counted_after` the main timeline has no item
+  for (the user's reaction, edit, redaction or state event, or a hidden
+  event another device's receipt is on) may be newer than the receipt,
+  and its counts pass. A message after the receipt therefore counts once
+  its diff arrives, and an event the main timeline does not show (a reply
+  in a thread, a stable poll, a poll's end, an unknown `msgtype`) once the
+  SDK counts after the receipt or after such an event, at the latest with
+  the sync that brings the receipt back. Only a receipt request that
+  failed keeps such an event hidden, until a newer message in the main
+  timeline arrives or, once the room is closed, until the room's next
+  update, as optimistic clearing leaves the room at zero after a failed
+  request. Counts that pass or are given back can still count events a
+  receipt covers until the next sync, as without holding them back: an
+  update for a new message while the SDK still counts after a reaction
+  the user sent just before it, or the replies up to a thread's
+  unthreaded receipt (see "Threads").
 - Room keys are shared with the SDK's default recipient strategy
   (`CollectStrategy::AllDevices`), which does not refuse to send when another
   user's identity changes.
@@ -2399,7 +2406,7 @@ direct message lookup logs at `info` which step found a room (see
     clearing before a following action, the `room.mark_read` target, and
     the open room's counts from before its receipt held back, given back
     with the diff of a newer message, and passed on once the SDK counts
-    after the receipt
+    after the receipt or after an event the main timeline has no item for
   - badge precedence and the network name order, including direct messages
   - `OwnEvent` construction
   - `render_mentions`: the plain body is unchanged, mentions whose text was

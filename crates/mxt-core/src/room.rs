@@ -93,10 +93,12 @@ pub struct RoomSummary {
     /// the user never read it.
     pub last_read: Option<Timestamp>,
     /// The event the SDK counts `unread` after: the latest of the user's
-    /// receipts and own messages that it found among the room's events, from
-    /// the same reading as the counts; `None` when it found none. While it
-    /// is not the event of mxt's receipt in the open room, the counts may
-    /// still count events up to that receipt (design, "Matrix adapter").
+    /// receipts and own events of any type that it found among the room's
+    /// events, from the same reading as the counts; `None` when it found
+    /// none. While mxt's receipt in the open room is on its timeline's
+    /// newest remote event and this is none or an older remote event of
+    /// that timeline, the counts may still count events up to that receipt
+    /// (design, "Matrix adapter").
     pub counted_after: Option<EventId>,
 }
 
