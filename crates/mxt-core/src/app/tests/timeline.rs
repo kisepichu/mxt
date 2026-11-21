@@ -542,10 +542,13 @@ fn messages_for_another_room_are_ignored() {
         timeline: main_of("!a:example.org"),
         error: "boom".into(),
     });
-    app.update(Msg::PaginationDone {
+    // Applied, it would request the next page at once: the cursor is near
+    // the oldest item.
+    let fx = app.update(Msg::PaginationDone {
         timeline: main_of("!a:example.org"),
-        reached_start: true,
+        reached_start: false,
     });
+    assert_eq!(fx, vec![]);
     assert_eq!(app.status(), None);
     // Still in flight for `!c`, and its start is not reached.
     assert_eq!(keys(&mut app, "k"), vec![]);

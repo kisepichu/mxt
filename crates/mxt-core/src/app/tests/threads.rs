@@ -8,7 +8,6 @@ use super::*;
 use crate::timeline::{TimelineDiff, TimelineEntry};
 
 const A: &str = "!a:example.org";
-const B: &str = "!b:example.org";
 const C: &str = "!c:example.org";
 
 /// The thread of `room` whose root is `$<root>`.
@@ -61,10 +60,13 @@ fn back_pagination_names_the_main_timeline_and_ignores_a_threads_answers() {
         fx,
         vec![Effect::Matrix(MatrixEffect::PaginateBackwards(main_of(C)))]
     );
-    app.update(Msg::PaginationDone {
+    // Applied, the thread's answer would request the next page at once: the
+    // cursor is near the oldest item.
+    let fx = app.update(Msg::PaginationDone {
         timeline: thread_of(C, 1),
-        reached_start: true,
+        reached_start: false,
     });
+    assert_eq!(fx, vec![]);
     app.update(Msg::PaginationFailed {
         timeline: thread_of(C, 1),
         error: "boom".into(),
@@ -105,9 +107,11 @@ fn thread_marks_follow_what_mxt_marked_read_while_the_room_has_unread_messages()
     counted(&mut app, 5_000, 1);
     assert_eq!(app.thread_marks_after(), time(5_000));
 
-    // On another room it leaves them.
-    keys(&mut app, "<C-w>hj<Space>r");
-    assert_eq!(app.rooms().rooms()[app.room_cursor().unwrap()].id, id(B));
+    // On another room it leaves them, even when that room's latest activity
+    // is later.
+    app.update(Msg::RoomUpserted(room(A, 9_000, 1)));
+    keys(&mut app, "<C-w>hgg<Space>r");
+    assert_eq!(app.rooms().rooms()[app.room_cursor().unwrap()].id, id(A));
     assert_eq!(app.thread_marks_after(), time(5_000));
 
     // A room read elsewhere marks no thread.

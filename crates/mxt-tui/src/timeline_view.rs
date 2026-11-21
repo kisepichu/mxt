@@ -445,16 +445,25 @@ impl<'a> Render<'a> {
         lead.min(self.pane_rows() - len)
     }
 
-    /// The rows of the entry at `index`. An item taller than the pane ends
-    /// with `[+N lines]`.
+    /// The rows of the entry at `index`. An item taller than the pane is cut
+    /// with `[+N lines]` as its last row; a thread root keeps its summary
+    /// row below the marker, on a pane with a row for both.
     fn rows(&self, index: usize) -> Vec<Line<'a>> {
         match &self.entries[index] {
             TimelineEntry::Item(item) => {
                 let mut rows = self.item(item);
                 if rows.len() > self.height {
-                    let hidden = rows.len() - (self.height - 1);
-                    rows.truncate(self.height - 1);
+                    // `item` ends with the summary row.
+                    let summary = if item.thread_summary.is_some() && self.height > 1 {
+                        rows.pop()
+                    } else {
+                        None
+                    };
+                    let kept = self.height - 1 - usize::from(summary.is_some());
+                    let hidden = rows.len() - kept;
+                    rows.truncate(kept);
                     rows.push(Line::styled(format!("[+{hidden} lines]"), DIM));
+                    rows.extend(summary);
                 }
                 rows
             }
@@ -1527,10 +1536,10 @@ mod tests {
         Timestamp::from_millis(u64::try_from(ms).unwrap())
     }
 
-    /// A one-line thread root sent on 2026-11-22 at 09:15 UTC, with three
-    /// replies, the latest at `latest`.
-    fn root(latest: Option<&str>) -> TimelineEntry {
-        let mut entry = remote(0, 1);
+    /// A thread root of `lines` rows of text sent on 2026-11-22 at 09:15 UTC,
+    /// with three replies, the latest at `latest`.
+    fn root(lines: usize, latest: Option<&str>) -> TimelineEntry {
+        let mut entry = remote(0, lines);
         if let TimelineEntry::Item(item) = &mut entry {
             item.timestamp = at("2026-11-22T09:15:00Z");
             item.thread_summary = Some(ThreadSummary {
@@ -1564,13 +1573,13 @@ mod tests {
 
     #[test]
     fn a_thread_root_ends_with_its_reply_count_and_latest_reply_time_dim() {
-        let row = last_row(root(Some("2026-11-22T14:32:00Z")), None);
+        let row = last_row(root(1, Some("2026-11-22T14:32:00Z")), None);
         assert_eq!(text(&row), "💬 3 · 14:32");
         assert!(row.iter().all(|(_, style)| *style == DIM), "{row:?}");
         // While the latest reply is not loaded.
-        assert_eq!(text(&last_row(root(None), None)), "💬 3");
+        assert_eq!(text(&last_row(root(1, None), None)), "💬 3");
         // A reply on another day than the root shows its date.
-        let next_day = last_row(root(Some("2026-11-23T14:32:00Z")), None);
+        let next_day = last_row(root(1, Some("2026-11-23T14:32:00Z")), None);
         assert_eq!(text(&next_day), "💬 3 · 2026-11-23 14:32");
         // A message without replies has no such row.
         assert_eq!(text(&last_row(remote(0, 1), None)), "text");
@@ -1579,7 +1588,7 @@ mod tests {
     #[test]
     fn a_thread_root_with_a_reply_after_the_marks_time_is_marked_unread() {
         let latest = Some("2026-11-22T14:32:00Z");
-        let row = last_row(root(latest), Some("2026-11-22T14:31:59Z"));
+        let row = last_row(root(1, latest), Some("2026-11-22T14:31:59Z"));
         assert_eq!(text(&row), "💬 3 · 14:32 · unread");
         let (mark, rest) = row.split_last().unwrap();
         assert_eq!(mark, &("unread".to_owned(), BOLD));
@@ -1589,12 +1598,37 @@ mod tests {
             Some("2026-11-22T15:00:00Z"),
             None,
         ] {
-            let row = last_row(root(latest), marks_after);
+            let row = last_row(root(1, latest), marks_after);
             assert_eq!(text(&row), "💬 3 · 14:32", "{marks_after:?}");
         }
         // Without the latest reply's time, no mark.
-        let row = last_row(root(None), Some("2026-11-22T00:00:00Z"));
+        let row = last_row(root(1, None), Some("2026-11-22T00:00:00Z"));
         assert_eq!(text(&row), "💬 3");
+    }
+
+    #[test]
+    fn a_thread_root_taller_than_the_pane_keeps_its_reply_row_below_the_cut() {
+        let entries = [root(30, Some("2026-11-22T14:32:00Z"))];
+        let zone = TimeZone::UTC;
+        let rows_on = |height| {
+            let render = Render {
+                width: 40,
+                thread_marks_after: Some(at("2026-11-22T14:00:00Z")),
+                ..render(&entries, height, &zone)
+            };
+            let rows = render.rows(0);
+            rows.iter().map(ToString::to_string).collect::<Vec<_>>()
+        };
+        let rows = rows_on(HEIGHT);
+        assert_eq!(rows.len(), HEIGHT);
+        // The header and 30 rows of text, of which 23 do not fit above the
+        // marker and the reply row.
+        assert_eq!(rows[0], "09:15 alice");
+        assert_eq!(rows[1..HEIGHT - 2], ["text"; 7]);
+        assert_eq!(rows[HEIGHT - 2], "[+23 lines]");
+        assert_eq!(rows[HEIGHT - 1], "💬 3 · 14:32 · unread");
+        // A pane of one row has room for the marker only.
+        assert_eq!(rows_on(1), ["[+32 lines]"]);
     }
 
     const ROOM: &str = "!a:example.org";
