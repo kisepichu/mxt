@@ -39,15 +39,6 @@ impl Default for Composer {
     }
 }
 
-/// A room's members, for the mention completion of all its composers.
-#[derive(Default)]
-pub(super) struct RoomMembers {
-    /// Empty until loaded.
-    members: Vec<Member>,
-    /// Whether `LoadMembers` was requested for the room.
-    requested: bool,
-}
-
 /// The mention menu of the focused composer.
 pub(super) struct MentionMenu {
     timeline: TimelineId,
@@ -107,8 +98,8 @@ impl App {
             mode,
         }));
         self.composers.entry(timeline.clone()).or_default();
-        let members = self.members.entry(timeline.room.clone()).or_default();
-        if !std::mem::replace(&mut members.requested, true) {
+        if !self.members.contains_key(&timeline.room) {
+            self.members.insert(timeline.room.clone(), Vec::new());
             effects.push(Effect::Matrix(MatrixEffect::LoadMembers(timeline.room)));
         }
     }
@@ -176,7 +167,7 @@ impl App {
         let Some(pending) = self.pending_sends.remove(&id) else {
             return;
         };
-        if self.shown_timeline().as_ref() != Some(&pending.timeline) {
+        if !self.shows(&pending.timeline) {
             return;
         }
         let composer = self.composers.entry(pending.timeline.clone()).or_default();
@@ -300,7 +291,7 @@ impl App {
     /// `Msg::MentionQuery` for the focused composer: opens or updates the
     /// menu, or closes it without a token.
     pub(super) fn mention_query(&mut self, timeline: TimelineId, query: Option<String>) {
-        if self.focus != Focus::Composer || self.shown_timeline().as_ref() != Some(&timeline) {
+        if self.focus != Focus::Composer || !self.shows(&timeline) {
             return;
         }
         self.mention_menu = query.map(|query| MentionMenu {
@@ -314,9 +305,7 @@ impl App {
     /// `Msg::MembersLoaded`: replaces the room's members and ranks an open
     /// menu of one of its composers again.
     pub(super) fn members_loaded(&mut self, room: RoomId, members: Vec<Member>) {
-        let loaded = self.members.entry(room.clone()).or_default();
-        loaded.members = members;
-        loaded.requested = true;
+        self.members.insert(room.clone(), members);
         if let Some(menu) = &self.mention_menu
             && menu.timeline.room == room
         {
@@ -333,10 +322,7 @@ impl App {
     /// as a sender: their own messages say nothing about whom they want to
     /// mention.
     fn candidates(&self, room: &RoomId, query: &str) -> Vec<Member> {
-        let members = self
-            .members
-            .get(room)
-            .map_or(&[][..], |members| &members.members);
+        let members = self.members.get(room).map_or(&[][..], Vec::as_slice);
         let mut senders: Vec<UserId> = Vec::new();
         for entry in self.timeline.entries().iter().rev() {
             if let TimelineEntry::Item(item) = entry
@@ -384,7 +370,7 @@ impl App {
         let members = self
             .members
             .get(&timeline.room)
-            .map_or(&[][..], |members| &members.members);
+            .map_or(&[][..], Vec::as_slice);
         let mention = MentionRef {
             text: mention_text(&member, members),
             user: member.user,

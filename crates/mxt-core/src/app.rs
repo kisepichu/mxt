@@ -22,6 +22,7 @@ use crate::ids::{RoomId, SendId, TimelineId, UserId};
 use crate::keymap::{InputContext, KeySink, Keymap, keymap_text};
 use crate::keys::Key;
 use crate::line::LineEditor;
+use crate::mention::Member;
 use crate::msg::{EditorMode, Msg, Pane, SyncState};
 use crate::resolver::{Resolved, Resolver, TimerId};
 use crate::room::Invite;
@@ -34,7 +35,7 @@ pub use picker::{Picker, PickerItem, PickerKey, PickerKind};
 pub use recovery::SecretPrompt;
 
 use command_line::OpenLine;
-use composer::{Composer, MentionMenu, PendingSend, RoomMembers};
+use composer::{Composer, MentionMenu, PendingSend};
 use join::JoinWait;
 use jumps::{JumpDirection, JumpList, JumpWait};
 use picker::OpenPicker;
@@ -168,9 +169,10 @@ pub struct App {
     last_search: Option<String>,
     /// Per timeline, created when first used.
     composers: HashMap<TimelineId, Composer>,
-    /// Per room, for the mention completion of all its composers; created
-    /// when the first of them gets focus.
-    members: HashMap<RoomId, RoomMembers>,
+    /// Per room, for the mention completion of all its composers. A room is
+    /// present once `LoadMembers` was requested for it, when the first of its
+    /// composers gets focus; its members are empty until loaded.
+    members: HashMap<RoomId, Vec<Member>>,
     /// The submitted drafts whose sends are not answered yet.
     pending_sends: HashMap<SendId, PendingSend>,
     /// The number of the next send's `SendId`.
@@ -305,6 +307,12 @@ impl App {
     /// one: the open room's main timeline.
     pub fn shown_timeline(&self) -> Option<TimelineId> {
         self.open_room.clone().map(TimelineId::main)
+    }
+
+    /// Whether `timeline` is the shown one, as `shown_timeline()` without
+    /// building it.
+    pub fn shows(&self, timeline: &TimelineId) -> bool {
+        timeline.thread.is_none() && self.open_room.as_ref() == Some(&timeline.room)
     }
 
     /// The open room's entries, oldest first (empty when no room is open).

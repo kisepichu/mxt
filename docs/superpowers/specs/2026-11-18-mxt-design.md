@@ -502,7 +502,7 @@ covered by unit tests.
   become text without losing what they are), requires an empty composer and
   otherwise reports "Clear the composer first" in the status line. On success
   the core loads the message's plain body (without a reply fallback) with
-  `Effect::Ui(LoadComposer { room, text })`, and rebuilds the room's
+  `Effect::Ui(LoadComposer { timeline, text })`, and rebuilds the composer's
   `MentionRef`s from the mention spans in the message's `RichText` whose text
   appears in that body. Edits keep their pills and `m.mentions`.
 - Other refusals, reported in the status line: `message.reply` while an edit
@@ -536,9 +536,9 @@ covered by unit tests.
     whole user ID when the query contains `:`, so same-named members on
     different servers can be told apart). Members who sent one of the
     loaded messages come first, newest sender first.
-  - Accepting a candidate records a `MentionRef` in the room's composer and
-    returns `Effect::Ui(ReplaceMentionToken { room, text })`, which replaces
-    the token with the text and a space.
+  - Accepting a candidate records a `MentionRef` in the composer and returns
+    `Effect::Ui(ReplaceMentionToken { timeline, text })`, which replaces the
+    token with the text and a space.
 - Input routing while the composer has focus:
   - edtui in normal or visual mode: look the key up in `composer.normal` or
     `composer.visual`, then in `normal`. If it is not bound, pass it to edtui.
