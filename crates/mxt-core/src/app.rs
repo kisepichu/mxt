@@ -11,7 +11,7 @@ mod search;
 mod tests;
 mod timeline;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::action::{Action, Binding};
 use crate::command::{COMMANDS, help_text};
@@ -38,6 +38,9 @@ use timeline::Timeline;
 /// 64 KiB limit on a Matrix event (design, "Input routing").
 const PASTE_LIMIT: usize = 256 * 1024;
 
+/// How many status messages `:messages` keeps (design, "Help views").
+const STATUS_HISTORY: usize = 200;
+
 /// A paste up to its first line break, for the inputs that hold one line.
 fn first_line(text: &str) -> &str {
     text.split_once('\n').map_or(text, |(line, _)| line)
@@ -56,7 +59,7 @@ pub enum StatusKind {
     Error,
 }
 
-/// The message in the status line; the next key clears it.
+/// A message of the status line; the next key clears it from the line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StatusMessage {
     pub kind: StatusKind,
@@ -85,7 +88,8 @@ enum Motion {
 enum View {
     /// A message's text or image: the item under the cursor when it opened.
     Message(ItemRef),
-    /// `:help` or `:map`: text the core generated when it opened.
+    /// `:help`, `:map` or `:messages`: text the core generated when it
+    /// opened.
     Help,
 }
 
@@ -134,7 +138,13 @@ pub struct App {
     sidebar_visible: bool,
     sync_state: SyncState,
     terminal_focused: bool,
-    status: Option<StatusMessage>,
+    /// The status line's messages, oldest first, at most
+    /// [`STATUS_HISTORY`], for `:messages`. The `CONFIRM` question and the
+    /// `SECRET` prompt are not among them.
+    status_history: VecDeque<StatusMessage>,
+    /// Whether the newest of `status_history` is in the status line; the
+    /// next key clears it.
+    status_shown: bool,
     room_list_viewport: Option<Viewport>,
     /// The open room's, from a render of that room; `None` until then.
     timeline_viewport: Option<Viewport>,
@@ -177,7 +187,8 @@ impl App {
             sidebar_visible: settings.room_list_visible,
             sync_state: SyncState::default(),
             terminal_focused: true,
-            status: None,
+            status_history: VecDeque::new(),
+            status_shown: false,
             room_list_viewport: None,
             timeline_viewport: None,
             command_line: None,
@@ -234,6 +245,7 @@ impl App {
             Msg::ImageFetched { item, bytes } => self.image_fetched(item, bytes, &mut effects),
             Msg::ImageUnavailable { item, reason } => self.image_unavailable(&item, &reason),
             Msg::Recovered => self.recovered(),
+            Msg::ConfigWarnings { warnings } => self.config_warnings(warnings),
         }
         effects
     }
@@ -295,7 +307,7 @@ impl App {
     }
 
     pub fn status(&self) -> Option<&StatusMessage> {
-        self.status.as_ref()
+        self.status_history.back().filter(|_| self.status_shown)
     }
 
     /// The question while in `CONFIRM` mode.
@@ -387,7 +399,7 @@ impl App {
     fn key(&mut self, key: Key, editor: Option<EditorMode>, effects: &mut Vec<Effect>) {
         // Outside `feed`, so a status set by a binding survives the keys fed
         // again after it.
-        self.status = None;
+        self.status_shown = false;
         self.editor = editor;
         // The mention menu belongs to insert mode, and the tui reports the
         // editor mode with every key.
@@ -409,7 +421,7 @@ impl App {
     /// cancels a question, and it never answers one that a binding ending
     /// before it asks.
     fn paste(&mut self, text: String, editor: Option<EditorMode>, effects: &mut Vec<Effect>) {
-        self.status = None;
+        self.status_shown = false;
         self.editor = editor;
         if editor != Some(EditorMode::Insert) {
             self.cancel_completion();
@@ -630,6 +642,7 @@ impl App {
             Action::ViewClose => self.close_view(effects),
             Action::HelpCommands => self.view_help(help_text(COMMANDS), effects),
             Action::HelpKeymap => self.view_help(keymap_text(&self.keymap), effects),
+            Action::StatusMessages => self.view_help(self.messages_text(), effects),
             Action::MessageYank => self.yank_message(effects),
             Action::MessageGotoReply => self.goto_reply(effects),
             Action::MessageOpen => self.open_message(effects),
@@ -690,11 +703,58 @@ impl App {
         }
     }
 
+    /// Shows the message in the status line and keeps it for `:messages`.
     fn set_status(&mut self, kind: StatusKind, text: impl Into<String>) {
-        self.status = Some(StatusMessage {
+        self.remember_status(StatusMessage {
             kind,
             text: text.into(),
         });
+        self.status_shown = true;
+    }
+
+    /// Keeps `message` in the history, dropping the oldest beyond
+    /// [`STATUS_HISTORY`]; the status line does not show it.
+    fn remember_status(&mut self, message: StatusMessage) {
+        if self.status_history.len() == STATUS_HISTORY {
+            self.status_history.pop_front();
+        }
+        self.status_history.push_back(message);
+    }
+
+    /// `Msg::ConfigWarnings`: the warnings go into the history first, then
+    /// the status line counts them, as an error so that it is not missed.
+    fn config_warnings(&mut self, warnings: Vec<String>) {
+        let count = warnings.len();
+        if count == 0 {
+            return;
+        }
+        for text in warnings {
+            self.remember_status(StatusMessage {
+                kind: StatusKind::Error,
+                text,
+            });
+        }
+        let settings = if count == 1 { "setting" } else { "settings" };
+        self.set_status(
+            StatusKind::Error,
+            format!("Ignored {count} {settings} in the configuration; see :messages"),
+        );
+    }
+
+    /// The text of `:messages` (design, "Help views"): its first line, then,
+    /// when there are messages, an empty line and one line per message,
+    /// oldest first.
+    fn messages_text(&self) -> String {
+        let mut text =
+            format!("Status line messages, oldest first; the last {STATUS_HISTORY} are kept.");
+        if !self.status_history.is_empty() {
+            text.push('\n');
+        }
+        for message in &self.status_history {
+            text.push('\n');
+            text.push_str(&message.text);
+        }
+        text
     }
 
     fn viewport(&self, pane: Pane) -> Option<Viewport> {

@@ -136,4 +136,11 @@ pub enum Msg {
     },
     /// `MatrixEffect::Recover` imported the secrets.
     Recovered,
+    /// The configuration's warnings, each as the log has it, sent once
+    /// right after `App::new`: each goes into the status line's history
+    /// without being shown, then the status line says how many settings
+    /// were ignored (design, "Layers").
+    ConfigWarnings {
+        warnings: Vec<String>,
+    },
 }

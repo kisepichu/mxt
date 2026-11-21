@@ -47,7 +47,7 @@ come between messages.
 | `INSERT`, `NORMAL`, `VISUAL`, `SEARCH` | the composer has focus; the mode of its editor | the keymap, then the editor (see [The editors](#the-editors)) |
 | `COMMAND` | the `:` command line or a `/` search line is open | the `command_line` table, then the text |
 | `PICKER` | a picker is open | the `picker` table, then the query |
-| `VIEW NORMAL`, `VIEW INSERT`, `VIEW VISUAL`, `VIEW SEARCH` | the message view, or `:help` or `:map` in it, is open; the mode of its editor | the `message_view` table in normal and visual mode, then the editor |
+| `VIEW NORMAL`, `VIEW INSERT`, `VIEW VISUAL`, `VIEW SEARCH` | the message view, or `:help`, `:map` or `:messages` in it, is open; the mode of its editor | the `message_view` table in normal and visual mode, then the editor |
 | `CONFIRM` | an action asks first, as `dd` does | `y` confirms, any other key cancels |
 | `SECRET` | `:recover` asks for the recovery key; the status line shows `Recovery key:` and a `*` for each character | typed text, a paste's first line, `<BS>`, `<C-u>` and `<C-w>`; `<CR>` submits, `<Esc>` cancels; no keymap |
 
@@ -165,6 +165,7 @@ use the commands below:
 | `account.recover`, which asks for the recovery key | `:recover` |
 | `help.commands`, the command list | `:help` |
 | `help.keymap`, the bindings of each table | `:map` |
+| `status.messages`, the status line's recent messages | `:messages` |
 | `app.quit` | `:q` |
 
 `room.mark_read` marks the room under the cursor (in the room list) or the
@@ -220,13 +221,14 @@ command names, room names after `:open`, and emoji shortcodes after
 | `:recover` | Asks for the recovery key in `SECRET` mode and, as on the first start, cross-signs this device with it and lets it fetch room keys from the key backup (see [First start](../README.md#first-start)). An empty key changes nothing. The status line then says `Recovery complete` or why it failed: a wrong key, or an account without secret storage, which needs recovery set up in another client first. |
 | `:help` | Lists the commands, each with its usage and a one-line description, in the full-screen view. |
 | `:map` | Lists the bindings of each keymap table after your configuration, as `keys -> action (arguments)`, in the full-screen view. A table shows its own bindings, not those of the table it falls back to, and a removed default shows as `nop`. |
+| `:messages` | Lists the status line's messages of this run, oldest first, in the full-screen view: the last 200, errors and other messages alike, and at startup each warning about the configuration (see [Configuration](configuration.md#errors-and-warnings)) before the message that counts them. `G` goes to the newest. |
 | `:q` | Quits. |
 
-`:mute`, `:unmute`, `:recover`, `:help`, `:map` and `:q` take no argument,
-`:open` and `:upload` without one show their usage, and `:react`'s argument
-is optional. `:react` acts on the open room's timeline cursor also while the
-room list has focus, whereas `:mute` and `:unmute` there act on the room
-under the room list's cursor.
+`:mute`, `:unmute`, `:recover`, `:help`, `:map`, `:messages` and `:q` take
+no argument, `:open` and `:upload` without one show their usage, and
+`:react`'s argument is optional. `:react` acts on the open room's timeline
+cursor also while the room list has focus, whereas `:mute` and `:unmute`
+there act on the room under the room list's cursor.
 
 ## The editors
 
@@ -252,8 +254,8 @@ The composer:
 The message view (`<CR>` on a message) holds the message's text in an
 editor, so motions, `/` search, visual selection and yanks work on messages
 taller than the screen. `i` and other edits work too, but are discarded when
-the view closes. `q` and `<Esc>` close it in normal and visual mode. `:help`
-and `:map` show their text in the same view.
+the view closes. `q` and `<Esc>` close it in normal and visual mode. `:help`,
+`:map` and `:messages` show their text in the same view.
 
 Yanks (`yy` in the timeline, `y` in the editors) go to one register that
 every editor shares, and to the terminal's clipboard

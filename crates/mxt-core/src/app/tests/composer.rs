@@ -740,6 +740,16 @@ fn message_delete_asks_for_confirmation() {
 }
 
 #[test]
+fn the_confirm_question_is_not_a_status_message() {
+    let mut app = opened();
+    reset(&mut app, vec![own(remote(1), "mine")]);
+    keys(&mut app, "dd");
+    assert_eq!(app.confirmation(), Some("Delete this message? (y/n)"));
+    keys(&mut app, "n");
+    assert_eq!(messages(&mut app), [MESSAGES_FIRST_LINE]);
+}
+
+#[test]
 fn keys_left_after_a_binding_which_asks_for_confirmation_are_dropped() {
     // `g` is also a prefix of `gg` and `gyq`, so a key that matches nothing
     // or the timeout ends it. `message.delete` runs, and the keys after `g`

@@ -929,6 +929,77 @@ fn help_and_map_open_the_view_and_q_or_escape_close_it() {
     assert!(app.view_open());
 }
 
+const MESSAGES_FIRST_LINE: &str = "Status line messages, oldest first; the last 200 are kept.";
+
+/// The lines of the view `:messages` opens.
+fn messages(app: &mut App) -> Vec<String> {
+    match no_timers(keys(app, ":messages<CR>")).as_slice() {
+        [Effect::Ui(UiEffect::OpenView(crate::effect::ViewContent::Text(text)))] => {
+            text.lines().map(str::to_owned).collect()
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn messages_lists_the_last_200_status_messages_oldest_first() {
+    let mut app = app();
+    assert_eq!(messages(&mut app), [MESSAGES_FIRST_LINE]);
+    keys_in(&mut app, "q", Some(EditorMode::Normal));
+    for n in 0..=200 {
+        app.update(Msg::EffectFailed {
+            error: format!("failure {n}"),
+        });
+    }
+    let lines = messages(&mut app);
+    assert_eq!(lines[..2], [MESSAGES_FIRST_LINE, ""]);
+    let kept: Vec<String> = (1..=200).map(|n| format!("failure {n}")).collect();
+    assert_eq!(lines[2..], kept);
+}
+
+#[test]
+fn configuration_warnings_come_before_the_status_that_counts_them() {
+    let warnings = [
+        "config.toml:4:1: ui.font: unknown key (ignored)",
+        "config.toml:6:1: notifications: unknown table (ignored)",
+    ];
+    // The status line and the lines of `:messages` after its first two.
+    let start = |warnings: &[&str]| {
+        let mut app = app();
+        app.update(Msg::ConfigWarnings {
+            warnings: warnings.iter().map(|&warning| warning.to_owned()).collect(),
+        });
+        let status = app.status().cloned();
+        (status, messages(&mut app).split_off(2))
+    };
+    let error = |text: &str| StatusMessage {
+        kind: StatusKind::Error,
+        text: text.to_owned(),
+    };
+
+    let counted = "Ignored 2 settings in the configuration; see :messages";
+    assert_eq!(
+        start(&warnings),
+        (
+            Some(error(counted)),
+            vec![warnings[0].into(), warnings[1].into(), counted.into()]
+        )
+    );
+    let counted = "Ignored 1 setting in the configuration; see :messages";
+    assert_eq!(
+        start(&warnings[..1]),
+        (
+            Some(error(counted)),
+            vec![warnings[0].into(), counted.into()]
+        )
+    );
+
+    let mut app = app();
+    app.update(Msg::ConfigWarnings { warnings: vec![] });
+    assert_eq!(app.status(), None);
+    assert_eq!(messages(&mut app), [MESSAGES_FIRST_LINE]);
+}
+
 #[test]
 fn search_moves_the_cursor_and_repeats() {
     let mut app = app();

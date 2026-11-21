@@ -293,7 +293,10 @@ fn parse_group(
             }
             keys.push(key);
         }
-        None if mods == Modifiers::default() && body[start..end].eq_ignore_ascii_case("leader") => {
+        None if body[start..end].eq_ignore_ascii_case("leader") => {
+            if mods != Modifiers::default() {
+                return Err(KeyParseError::ModifiedLeader);
+            }
             if leader.is_empty() {
                 return Err(KeyParseError::NoLeader);
             }
@@ -329,7 +332,7 @@ pub enum KeyParseError {
     Unclosed {
         at: usize,
     },
-    /// The text inside `<...>`, such as `Foo` or `C-leader`.
+    /// The text inside `<...>`, such as `Foo` or `C-F13`.
     UnknownKey {
         name: String,
     },
@@ -345,6 +348,21 @@ pub enum KeyParseError {
     },
     /// `<leader>` where no leader is available (inside the leader itself).
     NoLeader,
+    /// `<leader>` with modifiers, such as `<C-leader>`.
+    ModifiedLeader,
+}
+
+impl KeyParseError {
+    /// Whether the error names a key or a modifier this version does not
+    /// know, which a newer version may know: the configuration ignores such
+    /// a binding with a warning (design, "Layers"). Malformed notation is
+    /// never one.
+    pub fn is_unknown_name(&self) -> bool {
+        matches!(
+            self,
+            KeyParseError::UnknownKey { .. } | KeyParseError::UnknownModifier { .. }
+        )
+    }
 }
 
 impl fmt::Display for KeyParseError {
@@ -358,6 +376,7 @@ impl fmt::Display for KeyParseError {
             KeyParseError::UnknownKey { name } => write!(f, "unknown key <{name}>"),
             KeyParseError::UnknownModifier { name } => write!(f, "unknown modifier \"{name}-\""),
             KeyParseError::NoLeader => f.write_str("<leader> cannot be used in the leader itself"),
+            KeyParseError::ModifiedLeader => f.write_str("<leader> takes no modifiers"),
             KeyParseError::ShiftIgnored { name, key } => {
                 write!(f, "<{name}> is the same key as {key}")?;
                 match key.code() {
@@ -545,10 +564,17 @@ mod tests {
             parse("<X-a>"),
             Err(KeyParseError::UnknownModifier { .. })
         ));
-        assert!(matches!(
-            parse("<C-leader>"),
-            Err(KeyParseError::UnknownKey { .. })
-        ));
+        assert_eq!(parse("<C-leader>"), Err(KeyParseError::ModifiedLeader));
+        assert_eq!(
+            KeySeq::parse("<C-leader>", &KeySeq::default()),
+            Err(KeyParseError::ModifiedLeader)
+        );
+        for text in ["<F13>", "<D-s>", "<C-F13>"] {
+            assert!(parse(text).unwrap_err().is_unknown_name(), "{text}");
+        }
+        for text in ["", "<C-x", "<S-1>", "<C-leader>"] {
+            assert!(!parse(text).unwrap_err().is_unknown_name(), "{text:?}");
+        }
     }
 
     #[test]

@@ -1,6 +1,8 @@
-//! The configuration file as serde reads it. Every table denies unknown
-//! fields. Values that the core checks later keep their spans, so their
-//! errors can name the line.
+//! The configuration file as serde reads it, once the loader has removed the
+//! keys and tables it does not know. Every table denies unknown fields
+//! anyway, so a key the loader knows and these structs do not is an error.
+//! Values that the loader checks later keep their spans, so their errors and
+//! warnings can name the line.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -38,92 +40,58 @@ pub struct Ui {
     pub timeoutlen: Option<u64>,
     pub room_list: RoomList,
     pub time_format: Option<Spanned<String>>,
-    pub image_preview: Option<ImagePreview>,
-    pub read_receipts: Option<ReadReceipts>,
+    /// One of [`IMAGE_PREVIEWS`].
+    pub image_preview: Option<Spanned<String>>,
+    /// One of [`READ_RECEIPTS`].
+    pub read_receipts: Option<Spanned<String>>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct RoomList {
     pub visible: Option<bool>,
-    pub sort: Option<RoomSort>,
+    /// One of [`ROOM_SORTS`].
+    pub sort: Option<Spanned<String>>,
     /// Any integer, so every value outside the range gets the same message.
     pub width: Option<Spanned<i64>>,
-    pub network: Option<NetworkPlacement>,
+    /// One of [`NETWORK_PLACEMENTS`].
+    pub network: Option<Spanned<String>>,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RoomSort {
-    Recent,
-    Name,
-}
+/// The values of `ui.room_list.sort`. Settings with fixed values are strings,
+/// so the loader can ignore a value a newer version knows.
+pub const ROOM_SORTS: &[(&str, rooms::RoomSort)] = &[
+    ("recent", rooms::RoomSort::Recent),
+    ("name", rooms::RoomSort::Name),
+];
 
-impl From<RoomSort> for rooms::RoomSort {
-    fn from(sort: RoomSort) -> rooms::RoomSort {
-        match sort {
-            RoomSort::Recent => rooms::RoomSort::Recent,
-            RoomSort::Name => rooms::RoomSort::Name,
-        }
-    }
-}
+/// The values of `ui.room_list.network`.
+pub const NETWORK_PLACEMENTS: &[(&str, mxt_tui::NetworkPlacement)] = &[
+    ("inline", mxt_tui::NetworkPlacement::Inline),
+    ("below", mxt_tui::NetworkPlacement::Below),
+];
 
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum NetworkPlacement {
-    Inline,
-    Below,
-}
+/// The values of `ui.image_preview`.
+pub const IMAGE_PREVIEWS: &[(&str, settings::ImagePreview)] = {
+    use settings::{ImagePreview, ImageProtocol};
+    &[
+        ("auto", ImagePreview::Auto),
+        ("off", ImagePreview::Off),
+        ("iterm2", ImagePreview::Forced(ImageProtocol::Iterm2)),
+        ("sixel", ImagePreview::Forced(ImageProtocol::Sixel)),
+        ("kitty", ImagePreview::Forced(ImageProtocol::Kitty)),
+        (
+            "halfblocks",
+            ImagePreview::Forced(ImageProtocol::Halfblocks),
+        ),
+    ]
+};
 
-impl From<NetworkPlacement> for mxt_tui::NetworkPlacement {
-    fn from(network: NetworkPlacement) -> mxt_tui::NetworkPlacement {
-        match network {
-            NetworkPlacement::Inline => mxt_tui::NetworkPlacement::Inline,
-            NetworkPlacement::Below => mxt_tui::NetworkPlacement::Below,
-        }
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ImagePreview {
-    Auto,
-    Off,
-    Iterm2,
-    Sixel,
-    Kitty,
-    Halfblocks,
-}
-
-impl From<ImagePreview> for settings::ImagePreview {
-    fn from(preview: ImagePreview) -> settings::ImagePreview {
-        use settings::ImageProtocol;
-        match preview {
-            ImagePreview::Auto => settings::ImagePreview::Auto,
-            ImagePreview::Off => settings::ImagePreview::Off,
-            ImagePreview::Iterm2 => settings::ImagePreview::Forced(ImageProtocol::Iterm2),
-            ImagePreview::Sixel => settings::ImagePreview::Forced(ImageProtocol::Sixel),
-            ImagePreview::Kitty => settings::ImagePreview::Forced(ImageProtocol::Kitty),
-            ImagePreview::Halfblocks => settings::ImagePreview::Forced(ImageProtocol::Halfblocks),
-        }
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ReadReceipts {
-    Public,
-    Private,
-}
-
-impl From<ReadReceipts> for settings::ReceiptKind {
-    fn from(receipts: ReadReceipts) -> settings::ReceiptKind {
-        match receipts {
-            ReadReceipts::Public => settings::ReceiptKind::Public,
-            ReadReceipts::Private => settings::ReceiptKind::Private,
-        }
-    }
-}
+/// The values of `ui.read_receipts`.
+pub const READ_RECEIPTS: &[(&str, settings::ReceiptKind)] = &[
+    ("public", settings::ReceiptKind::Public),
+    ("private", settings::ReceiptKind::Private),
+];
 
 #[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
@@ -268,18 +236,20 @@ impl<'de> Visitor<'de> for ActionVisitor {
     }
 }
 
-/// An action argument: a string, an integer or a boolean.
+/// An action argument: a string, an integer, a boolean, or
+/// [`ArgValue::Unsupported`] for any other TOML value, so that
+/// `Action::from_spec` decides about every argument whatever its value.
 struct Arg(ArgValue);
 
 impl<'de> Deserialize<'de> for Arg {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Arg, D::Error> {
         struct ArgVisitor;
 
-        impl Visitor<'_> for ArgVisitor {
+        impl<'de> Visitor<'de> for ArgVisitor {
             type Value = ArgValue;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("a string, an integer or a boolean")
+                f.write_str("a TOML value")
             }
 
             fn visit_str<E: de::Error>(self, value: &str) -> Result<ArgValue, E> {
@@ -296,6 +266,24 @@ impl<'de> Deserialize<'de> for Arg {
 
             fn visit_bool<E: de::Error>(self, value: bool) -> Result<ArgValue, E> {
                 Ok(ArgValue::Boolean(value))
+            }
+
+            fn visit_f64<E: de::Error>(self, _: f64) -> Result<ArgValue, E> {
+                Ok(ArgValue::Unsupported)
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<ArgValue, A::Error> {
+                while seq.next_element::<de::IgnoredAny>()?.is_some() {}
+                Ok(ArgValue::Unsupported)
+            }
+
+            /// A table, or a date-time, which toml hands over as a map.
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<ArgValue, A::Error> {
+                while map
+                    .next_entry::<de::IgnoredAny, de::IgnoredAny>()?
+                    .is_some()
+                {}
+                Ok(ArgValue::Unsupported)
             }
         }
 

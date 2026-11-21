@@ -112,6 +112,12 @@ pub static COMMANDS: &[Command] = &[
         action: |_| Ok(Action::HelpKeymap),
     },
     Command {
+        name: "messages",
+        argument: Argument::None,
+        description: "List the status line's recent messages",
+        action: |_| Ok(Action::StatusMessages),
+    },
+    Command {
         name: "q",
         argument: Argument::None,
         description: "Quit",
@@ -256,6 +262,10 @@ mod tests {
             parse_command("react :+1").map_err(|error| error.to_string()),
             Err("unknown emoji \":+1\"".to_owned())
         );
+        assert_eq!(
+            parse_command("messages x").map_err(|error| error.to_string()),
+            Err(":messages takes no argument".to_owned())
+        );
     }
 
     #[test]
@@ -335,7 +345,16 @@ mod tests {
         assert_eq!(
             names,
             [
-                ":open", ":mute", ":unmute", ":upload", ":react", ":recover", ":help", ":map", ":q"
+                ":open",
+                ":mute",
+                ":unmute",
+                ":upload",
+                ":react",
+                ":recover",
+                ":help",
+                ":map",
+                ":messages",
+                ":q"
             ]
         );
         // The descriptions start two columns after the longest usage.

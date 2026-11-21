@@ -141,6 +141,7 @@ fn run(config: Config, paths: &Paths, home: PathBuf) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    config::log_warnings(&config.warnings);
 
     let runtime = match runtime() {
         Ok(runtime) => runtime,

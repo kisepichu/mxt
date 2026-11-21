@@ -12,6 +12,9 @@ pub enum ArgValue {
     String(String),
     Integer(i64),
     Boolean(bool),
+    /// Any other TOML value (a float, an array, a table, a date-time), which
+    /// no action takes, so a known argument with it has the wrong type.
+    Unsupported,
 }
 
 /// The editor mode `composer.focus` leaves the composer in.
@@ -88,6 +91,8 @@ pub enum Action {
     HelpCommands,
     /// `:map`: the key bindings of each table.
     HelpKeymap,
+    /// `:messages`: the status line's recent messages.
+    StatusMessages,
     SidebarToggle,
     FocusRoomList,
     FocusTimeline,
@@ -111,10 +116,15 @@ impl Action {
     /// - `composer.focus`: `mode` (`insert` or `keep`; default `insert`)
     /// - `file.upload`: `path` (non-empty), required
     /// - `message.react`: `emoji` (an emoji or a shortcode, see
-    ///   [`Emoji::parse`])
+    ///   [`Emoji::parse`]; non-empty)
     ///
     /// Argument names are unique in a configuration table; if one repeats
     /// anyway, its last value counts.
+    ///
+    /// The checks run in the order of the design's "Layers", and the first
+    /// error is returned: the name, the names of the arguments, conflicts
+    /// between arguments, then each argument's type and value and a missing
+    /// required argument, in the order the action reads them.
     pub fn from_spec(name: &str, args: &[(String, ArgValue)]) -> Result<Action, ActionError> {
         let action = match name {
             "room.open" => {
@@ -174,6 +184,7 @@ impl Action {
             "view.close" => Action::ViewClose,
             "help.commands" => Action::HelpCommands,
             "help.keymap" => Action::HelpKeymap,
+            "status.messages" => Action::StatusMessages,
             "sidebar.toggle" => Action::SidebarToggle,
             "focus.room_list" => Action::FocusRoomList,
             "focus.timeline" => Action::FocusTimeline,
@@ -238,6 +249,7 @@ impl Action {
             Action::ViewClose => "view.close",
             Action::HelpCommands => "help.commands",
             Action::HelpKeymap => "help.keymap",
+            Action::StatusMessages => "status.messages",
             Action::SidebarToggle => "sidebar.toggle",
             Action::FocusRoomList => "focus.room_list",
             Action::FocusTimeline => "focus.timeline",
@@ -324,10 +336,11 @@ fn file_upload(args: Args<'_>) -> Result<Action, ActionError> {
     })
 }
 
-/// An unknown or empty `emoji` is rejected, so a binding never reacts with
-/// something no client shows as an emoji.
+/// An empty `emoji` is [`ActionError::Empty`] and an unknown one
+/// [`ActionError::UnknownEmoji`], so a binding never reacts with something no
+/// client shows as an emoji.
 fn message_react(args: Args<'_>) -> Result<Action, ActionError> {
-    let Some(value) = args.string("emoji")? else {
+    let Some(value) = args.non_empty_string("emoji")? else {
         return Ok(Action::MessageReact(None));
     };
     match Emoji::parse(value) {
@@ -383,11 +396,9 @@ impl<'a> Args<'a> {
     /// A string argument that must not be empty when it is given.
     fn non_empty_string(&self, arg: &'static str) -> Result<Option<&'a str>, ActionError> {
         match self.string(arg)? {
-            Some("") => Err(ActionError::InvalidValue {
+            Some("") => Err(ActionError::Empty {
                 action: self.action,
                 arg,
-                value: String::new(),
-                allowed: Vec::new(),
             }),
             value => Ok(value),
         }
@@ -405,7 +416,7 @@ impl<'a> Args<'a> {
         };
         match values.iter().copied().find(|known| name(*known) == value) {
             Some(known) => Ok(Some(known)),
-            None => Err(ActionError::InvalidValue {
+            None => Err(ActionError::UnknownValue {
                 action: self.action,
                 arg,
                 value: value.to_owned(),
@@ -434,13 +445,17 @@ pub enum ActionError {
         arg: &'static str,
         expected: &'static str,
     },
-    /// `allowed` is empty when any non-empty value is allowed; `value` is
-    /// then the empty string.
-    InvalidValue {
+    /// A value outside the fixed set of values `arg` takes.
+    UnknownValue {
         action: &'static str,
         arg: &'static str,
         value: String,
         allowed: Vec<&'static str>,
+    },
+    /// An empty string where a value is required.
+    Empty {
+        action: &'static str,
+        arg: &'static str,
     },
     Conflict {
         action: &'static str,
@@ -450,12 +465,27 @@ pub enum ActionError {
         action: &'static str,
         arg: &'static str,
     },
-    /// An `emoji` that is neither an emoji nor a shortcode, the empty one
-    /// included.
+    /// An `emoji` that is neither an emoji nor a shortcode.
     UnknownEmoji {
         action: &'static str,
         value: String,
     },
+}
+
+impl ActionError {
+    /// Whether the error names something this version does not know: an
+    /// action, an argument, a value of an argument with fixed values or an
+    /// emoji, which a newer version may know. The configuration ignores such
+    /// a binding with a warning (design, "Layers").
+    pub fn is_unknown_name(&self) -> bool {
+        matches!(
+            self,
+            ActionError::UnknownAction { .. }
+                | ActionError::UnknownArgument { .. }
+                | ActionError::UnknownValue { .. }
+                | ActionError::UnknownEmoji { .. }
+        )
+    }
 }
 
 impl fmt::Display for ActionError {
@@ -470,21 +500,21 @@ impl fmt::Display for ActionError {
                 arg,
                 expected,
             } => write!(f, "{action}: \"{arg}\" must be a {expected}"),
-            ActionError::InvalidValue {
+            ActionError::UnknownValue {
                 action,
                 arg,
                 value,
                 allowed,
             } => {
-                if allowed.is_empty() {
-                    return write!(f, "{action}: \"{arg}\" must not be empty");
-                }
-                write!(f, "{action}: invalid \"{arg}\" value \"{value}\"")?;
+                write!(f, "{action}: unknown \"{arg}\" value \"{value}\"")?;
                 for (index, name) in allowed.iter().enumerate() {
                     let separator = if index == 0 { "; expected one of" } else { "," };
                     write!(f, "{separator} \"{name}\"")?;
                 }
                 Ok(())
+            }
+            ActionError::Empty { action, arg } => {
+                write!(f, "{action}: \"{arg}\" must not be empty")
             }
             ActionError::Conflict {
                 action,
@@ -593,6 +623,7 @@ mod tests {
             "view.close",
             "help.commands",
             "help.keymap",
+            "status.messages",
             "sidebar.toggle",
             "focus.room_list",
             "focus.timeline",
@@ -723,8 +754,18 @@ mod tests {
         let unknown_filter = Action::from_spec("room.open", &[s("filter", "unreads")]).unwrap_err();
         assert_eq!(
             unknown_filter.to_string(),
-            "room.open: invalid \"filter\" value \"unreads\"; \
+            "room.open: unknown \"filter\" value \"unreads\"; \
              expected one of \"all\", \"unread\", \"notify\", \"mentions\""
+        );
+        let unknown_mode = Action::from_spec("composer.focus", &[s("mode", "append")]);
+        assert_eq!(
+            unknown_mode,
+            Err(ActionError::UnknownValue {
+                action: "composer.focus",
+                arg: "mode",
+                value: "append".into(),
+                allowed: vec!["insert", "keep"]
+            })
         );
         assert_eq!(
             Action::from_spec("file.upload", &[]),
@@ -740,21 +781,127 @@ mod tests {
         let empty_query = Action::from_spec("room.open", &[s("query", "")]).unwrap_err();
         assert_eq!(
             empty_query,
-            ActionError::InvalidValue {
+            ActionError::Empty {
                 action: "room.open",
-                arg: "query",
-                value: String::new(),
-                allowed: Vec::new()
+                arg: "query"
             }
         );
-        assert!(
-            empty_query.to_string().contains("must not be empty"),
-            "{empty_query}"
+        assert_eq!(
+            empty_query.to_string(),
+            "room.open: \"query\" must not be empty"
         );
-        assert!(matches!(
+        assert_eq!(
             Action::from_spec("file.upload", &[s("path", "")]),
-            Err(ActionError::InvalidValue { arg: "path", .. })
-        ));
+            Err(ActionError::Empty {
+                action: "file.upload",
+                arg: "path"
+            })
+        );
+        assert_eq!(
+            Action::from_spec("message.react", &[s("emoji", "")]),
+            Err(ActionError::Empty {
+                action: "message.react",
+                arg: "emoji"
+            })
+        );
+    }
+
+    #[test]
+    fn values_of_other_toml_types_are_checked_like_any_other_value() {
+        let unsupported = |name: &str| (name.to_owned(), ArgValue::Unsupported);
+        assert_eq!(
+            Action::from_spec("message.future", &[unsupported("ids")]),
+            Err(ActionError::UnknownAction {
+                name: "message.future".into()
+            })
+        );
+        assert_eq!(
+            Action::from_spec("room.open", &[unsupported("ratio")]),
+            Err(ActionError::UnknownArgument {
+                action: "room.open",
+                arg: "ratio".into()
+            })
+        );
+        assert_eq!(
+            Action::from_spec("room.open", &[unsupported("filter")]),
+            Err(ActionError::WrongType {
+                action: "room.open",
+                arg: "filter",
+                expected: "string"
+            })
+        );
+    }
+
+    #[test]
+    fn the_first_check_in_the_design_order_decides() {
+        // Argument names come before conflicts.
+        assert_eq!(
+            Action::from_spec(
+                "room.open",
+                &[s("sort", "name"), s("pick", "next"), s("query", "x")]
+            ),
+            Err(ActionError::UnknownArgument {
+                action: "room.open",
+                arg: "sort".into()
+            })
+        );
+        // Conflicts come before values.
+        assert_eq!(
+            Action::from_spec(
+                "room.open",
+                &[s("pick", "next"), s("query", "x"), s("filter", "dm")]
+            ),
+            Err(ActionError::Conflict {
+                action: "room.open",
+                args: ["pick", "query"]
+            })
+        );
+    }
+
+    #[test]
+    fn only_names_a_newer_version_may_know_are_unknown_names() {
+        let unknown = [
+            ActionError::UnknownAction { name: "x".into() },
+            ActionError::UnknownArgument {
+                action: "room.open",
+                arg: "sort".into(),
+            },
+            ActionError::UnknownValue {
+                action: "room.open",
+                arg: "filter",
+                value: "dm".into(),
+                allowed: vec!["all"],
+            },
+            ActionError::UnknownEmoji {
+                action: "message.react",
+                value: "nonsense".into(),
+            },
+        ];
+        for error in unknown {
+            assert!(error.is_unknown_name(), "{error:?}");
+        }
+        let known = [
+            ActionError::WrongType {
+                action: "room.open",
+                arg: "filter",
+                expected: "string",
+            },
+            ActionError::Empty {
+                action: "room.open",
+                arg: "query",
+            },
+            ActionError::Conflict {
+                action: "room.open",
+                args: ["pick", "query"],
+            },
+            ActionError::MissingArgument {
+                action: "file.upload",
+                arg: "path",
+            },
+        ];
+        for error in known {
+            assert!(!error.is_unknown_name(), "{error:?}");
+        }
     }
 
     #[test]
@@ -773,8 +920,8 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_or_empty_emoji_is_rejected() {
-        for emoji in ["nonsense", "", ":+1"] {
+    fn an_unknown_emoji_is_rejected() {
+        for emoji in ["nonsense", ":+1"] {
             let error = Action::from_spec("message.react", &[s("emoji", emoji)]).unwrap_err();
             assert_eq!(
                 error,

@@ -1,6 +1,8 @@
 //! The configuration file (design, "Configuration"): where it is, and how it
-//! becomes checked core types. Every mistake is reported with its line and
-//! column before the terminal UI starts; none is silently ignored.
+//! becomes checked core types. A mistake is an error with its line and column
+//! before the terminal UI starts; a name this version does not know is a
+//! warning that ignores its setting or binding (design, "Layers"). Nothing is
+//! silently ignored.
 
 mod dto;
 #[cfg(test)]
@@ -9,7 +11,7 @@ mod tests;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -17,10 +19,12 @@ use mxt_core::action::{Action, ActionError, Binding};
 use mxt_core::ids::UserId;
 use mxt_core::keymap::{Keymap, TableId};
 use mxt_core::keys::{Key, KeyParseError, KeySeq};
-use mxt_core::settings::Settings;
+use mxt_core::settings::{ReceiptKind, Settings};
 use mxt_tui::{RoomListLayout, RoomListWidth, TimeFormat};
+use serde::Deserialize as _;
 use toml::Spanned;
 use toml::de::{DeTable, DeValue};
+use tracing::warn;
 
 use crate::paths;
 
@@ -39,6 +43,8 @@ pub struct Config {
     /// Absolute.
     pub download_dir: PathBuf,
     pub opener: Vec<String>,
+    /// The settings and bindings that were ignored, in the order of the file.
+    pub warnings: Vec<ConfigWarning>,
 }
 
 /// Printed with the path when the file does not exist.
@@ -75,12 +81,22 @@ pub fn load(path: &Path, home: &Path) -> Result<Config, ConfigError> {
 /// The same for a string, for tests; `path` is only used in messages.
 pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Config, ConfigError> {
     let source = Source { text, path };
+    let mut document = DeTable::parse(text).map_err(|error| source.toml_error(&error))?;
+    let mut warnings = Vec::new();
+    prune(
+        &source,
+        document.get_mut(),
+        Node::Root,
+        &mut String::new(),
+        &mut warnings,
+    );
     let dto::File {
         account,
         ui,
         files,
         keymap,
-    } = toml::from_str(text).map_err(|error| source.toml_error(&error))?;
+    } = dto::File::deserialize(toml::de::Deserializer::from(document))
+        .map_err(|error| source.toml_error(&error))?;
 
     let user_id = account.user_id;
     if !is_user_id(user_id.get_ref()) {
@@ -104,24 +120,66 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Config, ConfigError
         ));
     }
 
-    let leader = match &ui.leader {
-        Some(text) => KeySeq::parse(text.get_ref(), &KeySeq::default())
-            .map_err(|error| source.invalid(text, key_error("ui.leader", text, &error)))?,
-        None => KeySeq::from_keys(vec![Key::char(' ')]),
+    let (leader, leader_fell_back) = match &ui.leader {
+        None => (default_leader(), false),
+        Some(text) => match KeySeq::parse(text.get_ref(), &KeySeq::default()) {
+            Ok(leader) => (leader, false),
+            Err(error) if error.is_unknown_name() => {
+                warnings.push(source.ignored(text, key_error("ui.leader", text, &error)));
+                (default_leader(), true)
+            }
+            Err(error) => return Err(source.invalid(text, key_error("ui.leader", text, &error))),
+        },
     };
     let defaults = Settings::default();
+    let read_receipts = match ui.read_receipts {
+        None => defaults.read_receipts,
+        // Private, not the default: receipts go out when a room opens, and
+        // opening one takes a key, which clears the status line, so public
+        // receipts could go out before the warning is seen (design, "Layers").
+        Some(value) => named(dto::READ_RECEIPTS, value.get_ref()).unwrap_or_else(|| {
+            let message = format!(
+                "ui.read_receipts: unknown value {:?}, using \"private\"",
+                value.get_ref()
+            );
+            warnings.push(source.warning_at(value.span().start, message));
+            ReceiptKind::Private
+        }),
+    };
     let settings = Settings {
         timeoutlen_ms: ui.timeoutlen.unwrap_or(defaults.timeoutlen_ms),
-        room_sort: ui.room_list.sort.map_or(defaults.room_sort, Into::into),
+        room_sort: choice(
+            &source,
+            "ui.room_list.sort",
+            ui.room_list.sort,
+            dto::ROOM_SORTS,
+            &mut warnings,
+        )
+        .unwrap_or(defaults.room_sort),
         room_list_visible: ui.room_list.visible.unwrap_or(defaults.room_list_visible),
-        image_preview: ui.image_preview.map_or(defaults.image_preview, Into::into),
-        read_receipts: ui.read_receipts.map_or(defaults.read_receipts, Into::into),
+        image_preview: choice(
+            &source,
+            "ui.image_preview",
+            ui.image_preview,
+            dto::IMAGE_PREVIEWS,
+            &mut warnings,
+        )
+        .unwrap_or(defaults.image_preview),
+        read_receipts,
     };
     let time_format = match ui.time_format {
+        Some(format) if format.get_ref().is_empty() => {
+            return Err(source.invalid(&format, "ui.time_format: must not be empty".into()));
+        }
+        // jiff may accept more directives in a compatible release, and its
+        // errors do not tell an unknown directive from a malformed one, so a
+        // format it rejects is a warning (design, "Layers").
         Some(format) => {
             let at = format.span().start;
-            TimeFormat::parse(format.into_inner())
-                .map_err(|error| source.invalid_at(at, format!("ui.time_format: {error}")))?
+            TimeFormat::parse(format.into_inner()).unwrap_or_else(|error| {
+                warnings.push(source.ignored_at(at, format!("ui.time_format: {error}")));
+                TimeFormat::default()
+            })
         }
         None => TimeFormat::default(),
     };
@@ -137,7 +195,14 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Config, ConfigError
     };
     let room_list_layout = RoomListLayout {
         width: room_list_width,
-        network: ui.room_list.network.map(Into::into).unwrap_or_default(),
+        network: choice(
+            &source,
+            "ui.room_list.network",
+            ui.room_list.network,
+            dto::NETWORK_PLACEMENTS,
+            &mut warnings,
+        )
+        .unwrap_or_default(),
     };
 
     let download_dir = match files.download_dir {
@@ -165,7 +230,8 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Config, ConfigError
         None => vec![DEFAULT_OPENER.to_owned()],
     };
 
-    let bindings = bindings(&source, keymap, &leader)?;
+    let bindings = bindings(&source, keymap, &leader, leader_fell_back, &mut warnings)?;
+    warnings.sort_by_key(|warning| (warning.line, warning.column));
     Ok(Config {
         user_id: UserId::new(user_id.into_inner()),
         homeserver: account.homeserver.map(Spanned::into_inner),
@@ -175,7 +241,50 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Config, ConfigError
         room_list_layout,
         download_dir,
         opener,
+        warnings,
     })
+}
+
+/// Logs each warning at `warn` with the target `mxt::config`, once logging
+/// has started (design, "Layers").
+pub fn log_warnings(warnings: &[ConfigWarning]) {
+    for warning in warnings {
+        warn!("{warning}");
+    }
+}
+
+/// `<Space>`, the default of `ui.leader`.
+fn default_leader() -> KeySeq {
+    KeySeq::from_keys(vec![Key::char(' ')])
+}
+
+/// A setting with fixed values, `names` naming each: `None` when it is not
+/// set or, with a warning, when its value is unknown, so its default applies.
+fn choice<T: Copy>(
+    source: &Source<'_>,
+    setting: &str,
+    value: Option<Spanned<String>>,
+    names: &[(&str, T)],
+    warnings: &mut Vec<ConfigWarning>,
+) -> Option<T> {
+    let value = value?;
+    let known = named(names, value.get_ref());
+    if known.is_none() {
+        let mut message = format!("{setting}: unknown value {:?}", value.get_ref());
+        for (index, (name, _)) in names.iter().enumerate() {
+            let separator = if index == 0 { "; expected one of" } else { "," };
+            _ = write!(message, "{separator} {name:?}");
+        }
+        warnings.push(source.ignored(&value, message));
+    }
+    known
+}
+
+fn named<T: Copy>(names: &[(&str, T)], value: &str) -> Option<T> {
+    names
+        .iter()
+        .find(|(name, _)| *name == value)
+        .map(|&(_, known)| known)
 }
 
 #[derive(Debug)]
@@ -220,13 +329,47 @@ impl std::error::Error for ConfigError {
     }
 }
 
-/// The user's bindings of every table. Two spellings of one key sequence in
-/// a table (`<leader>x` and `<Space>x`, `<C-a>` and `<C-A>`) are an error at
-/// the second, because `Keymap::new` would keep only one of them.
+/// A setting or binding that was ignored because it names something this
+/// version does not know (design, "Layers").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigWarning {
+    pub path: PathBuf,
+    /// 1-based, as for `ConfigError::Invalid`; `column` counts characters.
+    pub line: usize,
+    pub column: usize,
+    /// The setting and the reason, ending in `(ignored)`, or for
+    /// `ui.read_receipts` what applies instead.
+    pub message: String,
+}
+
+impl fmt::Display for ConfigWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let ConfigWarning {
+            path,
+            line,
+            column,
+            message,
+        } = self;
+        write!(f, "{}:{line}:{column}: {message}", path.display())
+    }
+}
+
+/// The user's bindings of every table, checked in the order of the design's
+/// "Layers": the keys, the same keys spelled twice in the table, then the
+/// actions. A binding with a key name or an action's name this version does
+/// not know is left out with a warning, so the default binding of its keys
+/// stays. Two spellings of one key sequence in a table (`<leader>x` and
+/// `<Space>x`, `<C-a>` and `<C-A>`) are an error at the second, because
+/// `Keymap::new` would keep only one of them; but when `ui.leader` fell back
+/// to `<Space>` and only one of the two writes `<leader>`, a version that
+/// knows the leader tells them apart, so the second is ignored with a
+/// warning.
 fn bindings(
     source: &Source<'_>,
     keymap: dto::Keymap,
     leader: &KeySeq,
+    leader_fell_back: bool,
+    warnings: &mut Vec<ConfigWarning>,
 ) -> Result<Vec<(TableId, KeySeq, Binding)>, ConfigError> {
     let mut bindings = Vec::new();
     for (id, table) in keymap.into_tables() {
@@ -235,57 +378,90 @@ fn bindings(
         entries.sort_by_key(|(key, _)| key.span().start);
         let mut seen: BTreeMap<KeySeq, Spanned<String>> = BTreeMap::new();
         for (key, value) in entries {
-            let keys = KeySeq::parse(key.get_ref(), leader)
-                .map_err(|error| source.invalid(&key, key_error(&setting, &key, &error)))?;
+            let keys = match KeySeq::parse(key.get_ref(), leader) {
+                Ok(keys) => keys,
+                Err(error) if error.is_unknown_name() => {
+                    warnings.push(source.ignored(&key, key_error(&setting, &key, &error)));
+                    continue;
+                }
+                Err(error) => return Err(source.invalid(&key, key_error(&setting, &key, &error))),
+            };
             if let Some(first) = seen.get(&keys) {
-                return Err(source.invalid(
-                    &key,
-                    format!(
-                        "{setting}: {:?} is the same key sequence as {:?} on line {}",
-                        key.get_ref(),
-                        first.get_ref(),
-                        source.position(first.span().start).0,
-                    ),
-                ));
+                let message = format!(
+                    "{setting}: {:?} is the same key sequence as {:?} on line {}",
+                    key.get_ref(),
+                    first.get_ref(),
+                    source.position(first.span().start).0,
+                );
+                if leader_fell_back && has_leader(key.get_ref()) != has_leader(first.get_ref()) {
+                    let message = format!("{message}, since ui.leader fell back to \"<Space>\"");
+                    warnings.push(source.ignored(&key, message));
+                    continue;
+                }
+                return Err(source.invalid(&key, message));
             }
             let binding = binding(
                 source,
                 &format!("{setting}.{}", key_segment(key.get_ref())),
                 value,
+                warnings,
             )?;
-            bindings.push((id, keys.clone(), binding));
+            if let Some(binding) = binding {
+                bindings.push((id, keys.clone(), binding));
+            }
+            // An ignored binding still takes its keys: a version that knows
+            // its action rejects a second spelling of them too.
             seen.insert(keys, key);
         }
     }
     Ok(bindings)
 }
 
-/// Checks the actions of one binding; `setting` names it in messages.
+/// Whether key notation writes `<leader>`, in any case.
+fn has_leader(keys: &str) -> bool {
+    const LEADER: &[u8] = b"<leader>";
+    keys.as_bytes()
+        .windows(LEADER.len())
+        .any(|window| window.eq_ignore_ascii_case(LEADER))
+}
+
+/// Checks the actions of one binding in order; `setting` names it in
+/// messages. The first error decides: one about a name this version does
+/// not know ignores the whole binding with a warning (`None`), any other
+/// is an error.
 fn binding(
     source: &Source<'_>,
     setting: &str,
     value: Spanned<dto::Binding>,
-) -> Result<Binding, ConfigError> {
+    warnings: &mut Vec<ConfigWarning>,
+) -> Result<Option<Binding>, ConfigError> {
     let span = value.span();
     let specs = match value.into_inner() {
         dto::Binding::One(spec) => vec![Spanned::new(span.clone(), spec)],
         dto::Binding::Many(specs) => specs,
     };
-    let actions = specs
-        .into_iter()
-        .map(|spec| {
-            let spec_ref = spec.get_ref();
-            Action::from_spec(&spec_ref.name, &spec_ref.args).map_err(|error| {
+    let mut actions = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let spec_ref = spec.get_ref();
+        match Action::from_spec(&spec_ref.name, &spec_ref.args) {
+            Ok(action) => actions.push(action),
+            Err(error) => {
                 let at = argument_start(spec_ref, &error).unwrap_or(spec.span().start);
-                source.invalid_at(at, format!("{setting}: {error}"))
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Binding::new(actions).ok_or_else(|| {
+                let message = format!("{setting}: {error}");
+                if error.is_unknown_name() {
+                    warnings.push(source.ignored_at(at, message));
+                    return Ok(None);
+                }
+                return Err(source.invalid_at(at, message));
+            }
+        }
+    }
+    let binding = Binding::new(actions).ok_or_else(|| {
         let message =
             format!("{setting}: an empty array binds nothing; write \"nop\" to remove a binding");
         source.invalid_at(span.start, message)
-    })
+    })?;
+    Ok(Some(binding))
 }
 
 /// Where the name of the argument that `error` is about starts, so a binding
@@ -298,7 +474,9 @@ fn argument_start(spec: &dto::ActionSpec, error: &ActionError) -> Option<usize> 
     };
     match error {
         ActionError::UnknownArgument { arg, .. } => start(arg),
-        ActionError::WrongType { arg, .. } | ActionError::InvalidValue { arg, .. } => start(arg),
+        ActionError::WrongType { arg, .. }
+        | ActionError::UnknownValue { arg, .. }
+        | ActionError::Empty { arg, .. } => start(arg),
         ActionError::UnknownEmoji { .. } => start("emoji"),
         ActionError::Conflict {
             args: [first, second],
@@ -351,7 +529,7 @@ fn key_segment(key: &str) -> Cow<'_, str> {
     }
 }
 
-/// The text being loaded, for turning byte offsets into error positions.
+/// The text being loaded, for turning byte offsets into positions.
 struct Source<'a> {
     text: &'a str,
     path: &'a Path,
@@ -365,6 +543,26 @@ impl Source<'_> {
     fn invalid_at(&self, at: usize, message: String) -> ConfigError {
         let (line, column) = self.position(at);
         ConfigError::Invalid {
+            path: self.path.to_owned(),
+            line,
+            column,
+            message,
+        }
+    }
+
+    /// A warning that the setting or binding is ignored, so its default
+    /// applies.
+    fn ignored<T>(&self, at: &Spanned<T>, message: String) -> ConfigWarning {
+        self.ignored_at(at.span().start, message)
+    }
+
+    fn ignored_at(&self, at: usize, message: String) -> ConfigWarning {
+        self.warning_at(at, format!("{message} (ignored)"))
+    }
+
+    fn warning_at(&self, at: usize, message: String) -> ConfigWarning {
+        let (line, column) = self.position(at);
+        ConfigWarning {
             path: self.path.to_owned(),
             line,
             column,
@@ -393,6 +591,102 @@ impl Source<'_> {
             None => error.message().to_owned(),
         };
         self.invalid_at(at, message)
+    }
+}
+
+/// A key of the document that this version knows (design, "Layers").
+#[derive(Clone, Copy)]
+enum Node {
+    Root,
+    Account,
+    Ui,
+    RoomList,
+    Files,
+    /// `keymap` (`""`), or a table inside it that holds keymap tables, by
+    /// its dotted name below `keymap` (`"composer"`).
+    Keymap(&'static str),
+    /// A keymap table: its keys are bindings, which [`bindings`] checks.
+    Bindings,
+    /// A setting, whose value the DTOs check.
+    Setting,
+}
+
+impl Node {
+    /// What `key` is in this table; `None` for a key this version does not
+    /// know. The keymap's tables come from [`TableId::config_name`], so the
+    /// loader knows every table the core has.
+    fn child(self, key: &str) -> Option<Node> {
+        match (self, key) {
+            (Node::Root, "account") => Some(Node::Account),
+            (Node::Root, "ui") => Some(Node::Ui),
+            (Node::Root, "files") => Some(Node::Files),
+            (Node::Root, "keymap") => Some(Node::Keymap("")),
+            (Node::Ui, "room_list") => Some(Node::RoomList),
+            (Node::Account, "user_id" | "homeserver")
+            | (
+                Node::Ui,
+                "leader" | "timeoutlen" | "time_format" | "image_preview" | "read_receipts",
+            )
+            | (Node::RoomList, "visible" | "sort" | "width" | "network")
+            | (Node::Files, "download_dir" | "opener") => Some(Node::Setting),
+            (Node::Keymap(prefix), key) => TableId::ALL.iter().find_map(|id| {
+                let name = id.config_name();
+                let rest = match prefix {
+                    "" => name,
+                    prefix => name.strip_prefix(prefix)?.strip_prefix('.')?,
+                };
+                match rest.split_once('.') {
+                    None => (rest == key).then_some(Node::Bindings),
+                    Some((table, _)) => (table == key)
+                        .then(|| Node::Keymap(&name[..name.len() - rest.len() + table.len()])),
+                }
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Removes the keys and tables of `table`, which is `node`, that this
+/// version does not know, each with a warning at its key, and goes on into
+/// the tables it knows. `setting` is the table's dotted name, empty for the
+/// document; it is extended for each key and restored.
+fn prune(
+    source: &Source<'_>,
+    table: &mut DeTable<'_>,
+    node: Node,
+    setting: &mut String,
+    warnings: &mut Vec<ConfigWarning>,
+) {
+    let mut unknown = Vec::new();
+    for (key, value) in table.iter_mut() {
+        let name: &str = key.get_ref();
+        let len = setting.len();
+        if len > 0 {
+            setting.push('.');
+        }
+        setting.push_str(&key_segment(name));
+        match node.child(name) {
+            None => {
+                let reason = if value.get_ref().is_table() {
+                    "unknown table"
+                } else {
+                    "unknown key"
+                };
+                warnings.push(source.ignored(key, format!("{setting}: {reason}")));
+                unknown.push(key.clone());
+            }
+            Some(Node::Setting | Node::Bindings) => {}
+            // A value that is not a table is left to the DTOs' type error.
+            Some(child) => {
+                if let DeValue::Table(inner) = value.get_mut() {
+                    prune(source, inner, child, setting, warnings);
+                }
+            }
+        }
+        setting.truncate(len);
+    }
+    for key in unknown {
+        table.remove::<str>(key.get_ref());
     }
 }
 

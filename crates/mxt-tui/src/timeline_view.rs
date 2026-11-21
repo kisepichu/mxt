@@ -41,9 +41,10 @@ const TAB_WIDTH: usize = 4;
 pub struct TimeFormat(String);
 
 impl TimeFormat {
-    /// Checks `ui.time_format`: an empty format or an invalid directive is
-    /// an error, so the configuration loader reports it before the UI starts
-    /// (design, "Layers": a typo is never silently ignored).
+    /// Checks `ui.time_format`: an empty format and one that jiff cannot
+    /// format are rejected. The configuration loader reports an empty one as
+    /// an error and ignores the other with a warning, since a newer jiff may
+    /// accept it (design, "Layers").
     pub fn parse(format: String) -> Result<TimeFormat, String> {
         if format.is_empty() {
             return Err("must not be empty".to_owned());
