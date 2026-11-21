@@ -952,7 +952,7 @@ fn the_emoji_picker_lists_reacted_and_common_emoji_first_and_toggles_one() {
 
     // Typed keys go to the query, not to the timeline bindings.
     keys(&mut app, "jk");
-    assert_eq!(app.picker().unwrap().query, "jk");
+    assert_eq!(app.picker().unwrap().query.text(), "jk");
     assert_eq!(app.timeline_cursor(), Some(0));
     keys(&mut app, "<C-u>heart");
     let picker = app.picker().unwrap();

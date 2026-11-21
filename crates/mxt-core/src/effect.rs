@@ -1,5 +1,6 @@
 //! Effects: what `App::update` asks the adapters to do, as plain data.
 
+use std::borrow::{Borrow, BorrowMut};
 use std::fmt;
 
 use crate::action::FocusMode;
@@ -40,7 +41,8 @@ pub enum OutgoingKind {
 
 /// The recovery key (or passphrase) typed in `SECRET` mode, on its way to
 /// the matrix adapter. `Debug` shows nothing of it, so effects can be
-/// printed, in test failures for example, without it.
+/// printed, in test failures for example, without it. The line editor edits
+/// it in its own buffer while it is typed (design, "Line editing").
 #[derive(Clone, PartialEq, Eq)]
 pub struct RecoveryKey(String);
 
@@ -53,9 +55,16 @@ impl RecoveryKey {
     pub fn is_blank(&self) -> bool {
         self.0.trim().is_empty()
     }
+}
 
-    /// The text while it is typed.
-    pub(crate) fn text_mut(&mut self) -> &mut String {
+impl Borrow<String> for RecoveryKey {
+    fn borrow(&self) -> &String {
+        &self.0
+    }
+}
+
+impl BorrowMut<String> for RecoveryKey {
+    fn borrow_mut(&mut self) -> &mut String {
         &mut self.0
     }
 }

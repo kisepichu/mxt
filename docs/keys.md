@@ -45,11 +45,11 @@ come between messages.
 |---|---|---|
 | `NORMAL` | the room list or the timeline has focus | the keymap |
 | `INSERT`, `NORMAL`, `VISUAL`, `SEARCH` | the composer has focus; the mode of its editor | the keymap, then the editor (see [The editors](#the-editors)) |
-| `COMMAND` | the `:` command line or a `/` search line is open | the `command_line` table, then the text |
-| `PICKER` | a picker is open | the `picker` table, then the query |
+| `COMMAND` | the `:` command line or a `/` search line is open | the `command_line` table, then [line editing](#line-editing) |
+| `PICKER` | a picker is open | the `picker` table, then [line editing](#line-editing) of the query |
 | `VIEW NORMAL`, `VIEW INSERT`, `VIEW VISUAL`, `VIEW SEARCH` | the message view, or `:help` or `:map` in it, is open; the mode of its editor | the `message_view` table in normal and visual mode, then the editor |
 | `CONFIRM` | an action asks first, as `dd` does | `y` confirms, any other key cancels |
-| `SECRET` | `:recover` asks for the recovery key; the status line shows `Recovery key:` and a `*` for each character | typed text, a paste's first line, `<BS>`, `<C-u>` and `<C-w>`; `<CR>` submits, `<Esc>` cancels; no keymap |
+| `SECRET` | `:recover` asks for the recovery key; the status line shows `Recovery key:` and a `*` for each character, with the cursor among them | [line editing](#line-editing) and a paste's first line; `<CR>` submits, `<Esc>` cancels; no keymap |
 
 In `NORMAL`, the room list and the timeline have no character cursor: the
 cursor moves one room or one message at a time. That leaves `<Space>` free
@@ -59,9 +59,30 @@ Counts work in the room list and the timeline: `5j` moves five messages
 down. A count applies to `j`, `k`, `<C-d>` and `<C-u>`; `0` only continues
 a count that has started.
 
-The command line, search lines and picker queries take typed text,
-`<BS>` (on an empty command or search line, it closes the line), `<C-u>`
-(clear) and `<C-w>` (delete the last word). Other keys do nothing there.
+### Line editing
+
+The command line, the `/` search lines, picker queries and the recovery key
+prompt have a cursor and these keys, without history. In `COMMAND` and
+`PICKER` mode the `command_line` and `picker` tables come first: a key bound
+there (`"<C-e>" = "picker.cancel"`) never reaches the line.
+
+| Key | Effect |
+|---|---|
+| a character | inserted at the cursor |
+| `<Left>` / `<Right>` | one character left / right; an emoji with a skin tone is one character |
+| `<Home>`, `<C-b>` / `<End>`, `<C-e>` | to the start / end |
+| `<S-Left>` / `<S-Right>` | to the start of the word before the cursor / the end of the word after it, over the blanks in between |
+| `<BS>` / `<Del>` | deletes the character before / after the cursor; `<BS>` on an empty command or search line closes it |
+| `<C-w>` | deletes the word before the cursor, with any blanks between them |
+| `<C-u>` | deletes everything before the cursor |
+
+Other keys do nothing there, and a paste goes in at the cursor, up to its
+first line break. Words are split as the editors' `w` and `b` split them: a
+word is a run of letters, digits and `_`, of punctuation and symbols (emoji
+included), of kanji, of hiragana, of katakana or of hangul, and blanks (the
+ideographic space too) separate words. `<C-w>` at the end of
+`open foo.bar` deletes `bar`, then `.`, then `foo`, then `open `, and at the
+end of `日本語のテキスト` it deletes `テキスト`, then `の`, then `日本語`.
 
 ## Default keymap
 

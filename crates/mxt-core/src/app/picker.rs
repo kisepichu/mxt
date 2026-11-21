@@ -4,7 +4,6 @@
 
 use std::collections::HashSet;
 
-use super::command_line::Edit;
 use super::rooms::NO_MATCHING_ROOM;
 use super::{App, StatusKind};
 use crate::effect::{Effect, MatrixEffect};
@@ -12,6 +11,7 @@ use crate::emoji::{self, Emoji};
 use crate::fuzzy;
 use crate::ids::RoomId;
 use crate::keys::Key;
+use crate::line::{LineChange, LineEditor};
 use crate::room::{Badge, RoomSummary};
 use crate::rooms::{RoomFilter, RoomList};
 use crate::timeline::{ItemRef, MessageContent};
@@ -20,7 +20,8 @@ use crate::timeline::{ItemRef, MessageContent};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Picker {
     pub kind: PickerKind,
-    pub query: String,
+    /// The query and its cursor.
+    pub query: LineEditor,
     /// Ranked for `query`.
     pub items: Vec<PickerItem>,
     /// An index into `items`, 0 when they are empty.
@@ -73,6 +74,14 @@ pub(super) struct OpenPicker {
     source: Source,
 }
 
+impl OpenPicker {
+    /// Ranks the items again for the query and selects the first.
+    fn rank(&mut self, rooms: &RoomList) {
+        self.picker.items = self.source.items(self.picker.query.text(), rooms);
+        self.picker.selected = 0;
+    }
+}
+
 /// What a picker's items come from, besides its query.
 enum Source {
     /// The keys the user reacted with on the item.
@@ -101,7 +110,7 @@ impl App {
     fn open_picker(&mut self, kind: PickerKind, source: Source) {
         let picker = Picker {
             kind,
-            query: String::new(),
+            query: LineEditor::default(),
             items: source.items("", &self.rooms),
             selected: 0,
         };
@@ -152,27 +161,23 @@ impl App {
         self.open_picker(PickerKind::Links, Source::Links(urls));
     }
 
-    /// A key released to the picker: edits the query and ranks the items
-    /// again; other keys are ignored.
+    /// A key released to the picker: the line editor's. An edit of the query
+    /// ranks the items again; moving the cursor does not.
     pub(super) fn type_into_picker(&mut self, key: Key) {
-        let (Some(open), Some(edit)) = (&mut self.picker, Edit::of(key)) else {
-            return;
-        };
-        if edit.apply(&mut open.picker.query) {
-            open.picker.items = open.source.items(&open.picker.query, &self.rooms);
-            open.picker.selected = 0;
+        if let Some(open) = &mut self.picker
+            && open.picker.query.key(key) == LineChange::Text
+        {
+            open.rank(&self.rooms);
         }
     }
 
-    /// Pasted text without line breaks, added to the query, which ranks
-    /// the items again.
+    /// Pasted text without line breaks, inserted into the query at the
+    /// cursor, which ranks the items again.
     pub(super) fn paste_into_picker(&mut self, text: &str) {
         if let Some(open) = &mut self.picker
-            && !text.is_empty()
+            && open.picker.query.insert(text)
         {
-            open.picker.query.push_str(text);
-            open.picker.items = open.source.items(&open.picker.query, &self.rooms);
-            open.picker.selected = 0;
+            open.rank(&self.rooms);
         }
     }
 

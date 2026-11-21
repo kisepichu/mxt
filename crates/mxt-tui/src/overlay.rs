@@ -107,7 +107,13 @@ impl Overlays {
         if query.height == 0 {
             return;
         }
-        draw_prompt_line(frame, query, "> ", &picker.query);
+        draw_prompt_line(
+            frame,
+            query,
+            "> ",
+            picker.query.text(),
+            picker.query.cursor(),
+        );
         if picker.items.is_empty() {
             frame.render_widget(Line::styled(picker.empty_text(), DIM), list);
             return;
