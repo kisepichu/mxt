@@ -438,7 +438,7 @@ fn tab_and_ctrl_o_stay_with_the_tables_that_do_not_fall_back_to_normal() {
         }],
     });
     app.update(Msg::MentionQuery {
-        room: id(B),
+        timeline: main_of(B),
         query: Some("al".into()),
     });
     assert_eq!(
@@ -450,7 +450,7 @@ fn tab_and_ctrl_o_stay_with_the_tables_that_do_not_fall_back_to_normal() {
     assert_eq!(
         no_timers(keys_in(&mut app, "<Tab>", Some(EditorMode::Insert))),
         vec![Effect::Ui(UiEffect::ReplaceMentionToken {
-            room: id(B),
+            timeline: main_of(B),
             text: "@Alice".into(),
         })]
     );

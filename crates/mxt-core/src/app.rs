@@ -18,7 +18,7 @@ use std::collections::{HashMap, VecDeque};
 use crate::action::{Action, Binding};
 use crate::command::{COMMANDS, help_text};
 use crate::effect::{Effect, MatrixEffect, RecoveryKey, UiEffect};
-use crate::ids::{RoomId, SendId, UserId};
+use crate::ids::{RoomId, SendId, TimelineId, UserId};
 use crate::keymap::{InputContext, KeySink, Keymap, keymap_text};
 use crate::keys::Key;
 use crate::line::LineEditor;
@@ -34,7 +34,7 @@ pub use picker::{Picker, PickerItem, PickerKey, PickerKind};
 pub use recovery::SecretPrompt;
 
 use command_line::OpenLine;
-use composer::{Composer, MentionMenu, PendingSend};
+use composer::{Composer, MentionMenu, PendingSend, RoomMembers};
 use join::JoinWait;
 use jumps::{JumpDirection, JumpList, JumpWait};
 use picker::OpenPicker;
@@ -166,8 +166,11 @@ pub struct App {
     command_line: Option<OpenLine>,
     /// The pattern `search.next` and `search.prev` repeat.
     last_search: Option<String>,
-    /// Per room, created when first used.
-    composers: HashMap<RoomId, Composer>,
+    /// Per timeline, created when first used.
+    composers: HashMap<TimelineId, Composer>,
+    /// Per room, for the mention completion of all its composers; created
+    /// when the first of them gets focus.
+    members: HashMap<RoomId, RoomMembers>,
     /// The submitted drafts whose sends are not answered yet.
     pending_sends: HashMap<SendId, PendingSend>,
     /// The number of the next send's `SendId`.
@@ -217,6 +220,7 @@ impl App {
             command_line: None,
             last_search: None,
             composers: HashMap::new(),
+            members: HashMap::new(),
             pending_sends: HashMap::new(),
             next_send: 0,
             mention_menu: None,
@@ -267,9 +271,9 @@ impl App {
             Msg::EffectFailed { error } => self.set_status(StatusKind::Error, error),
             Msg::SendQueued { id } => self.send_queued(id),
             Msg::SendFailed { id, error } => self.send_failed(id, error, &mut effects),
-            Msg::Submit { room, body } => self.submit(room, body, &mut effects),
-            Msg::ComposerEdited { room, empty } => self.composer_edited(room, empty),
-            Msg::MentionQuery { room, query } => self.mention_query(room, query),
+            Msg::Submit { timeline, body } => self.submit(timeline, body, &mut effects),
+            Msg::ComposerEdited { timeline, empty } => self.composer_edited(timeline, empty),
+            Msg::MentionQuery { timeline, query } => self.mention_query(timeline, query),
             Msg::MembersLoaded { room, members } => self.members_loaded(room, members),
             Msg::Downloaded { path } => self.downloaded(path, &mut effects),
             Msg::ImageFetched { item, bytes } => self.image_fetched(item, bytes, &mut effects),
@@ -295,6 +299,12 @@ impl App {
 
     pub fn open_room(&self) -> Option<&RoomId> {
         self.open_room.as_ref()
+    }
+
+    /// The timeline the timeline pane shows, whose composer is the shown
+    /// one: the open room's main timeline.
+    pub fn shown_timeline(&self) -> Option<TimelineId> {
+        self.open_room.clone().map(TimelineId::main)
     }
 
     /// The open room's entries, oldest first (empty when no room is open).

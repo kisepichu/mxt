@@ -42,7 +42,7 @@ fn matrix(effect: MatrixEffect) -> Effect {
 }
 fn focus(room: &str) -> Effect {
     ui(UiEffect::FocusComposer {
-        room: id(room),
+        timeline: main_of(room),
         mode: FocusMode::Insert,
     })
 }
@@ -50,7 +50,7 @@ fn load_members(room: &str) -> Effect {
     matrix(MatrixEffect::LoadMembers(id(room)))
 }
 fn clear(room: &str) -> Effect {
-    ui(UiEffect::ClearComposer(id(room)))
+    ui(UiEffect::ClearComposer(main_of(room)))
 }
 /// The send of `body` from `!c`, the app's `n`-th from 0.
 fn send(n: u64, body: RenderedBody, kind: OutgoingKind) -> Effect {
@@ -65,13 +65,13 @@ fn plain(text: &str) -> RenderedBody {
 }
 fn submit(app: &mut App, body: &str) -> Vec<Effect> {
     app.update(Msg::Submit {
-        room: id(C),
+        timeline: main_of(C),
         body: body.into(),
     })
 }
 fn edited(app: &mut App, room: &str, empty: bool) {
     app.update(Msg::ComposerEdited {
-        room: id(room),
+        timeline: main_of(room),
         empty,
     });
 }
@@ -89,7 +89,7 @@ fn members(app: &mut App, members: Vec<Member>) {
 }
 fn query(app: &mut App, query: Option<&str>) {
     app.update(Msg::MentionQuery {
-        room: id(C),
+        timeline: main_of(C),
         query: query.map(Into::into),
     });
 }
@@ -100,7 +100,7 @@ fn menu(app: &App) -> Option<(Vec<&str>, usize)> {
     })
 }
 fn edit_target<'a>(app: &'a App, room: &str) -> Option<&'a ItemRef> {
-    match app.draft(&id(room)) {
+    match app.draft(&main_of(room)) {
         Some(Draft::Edit { target }) => Some(target.item()),
         _ => None,
     }
@@ -152,15 +152,15 @@ fn composer_keys_ask_the_tui_for_the_text_a_newline_and_the_external_editor() {
     keys(&mut app, "i");
     assert_eq!(
         insert(&mut app, "<CR>"),
-        vec![ui(UiEffect::RequestSubmit(id(C)))]
+        vec![ui(UiEffect::RequestSubmit(main_of(C)))]
     );
     assert_eq!(
         insert(&mut app, "<C-j>"),
-        vec![ui(UiEffect::InsertNewline(id(C)))]
+        vec![ui(UiEffect::InsertNewline(main_of(C)))]
     );
     assert_eq!(
         normal(&mut app, "<C-x><C-e>"),
-        vec![ui(UiEffect::ExternalEditor(id(C)))]
+        vec![ui(UiEffect::ExternalEditor(main_of(C)))]
     );
 }
 
@@ -190,8 +190,8 @@ fn keys_resolved_after_a_timeout_use_the_editor_mode_of_the_last_key() {
     assert_eq!(
         app.update(Msg::Timeout { id: timer }),
         vec![
-            ui(UiEffect::InsertNewline(id(C))),
-            ui(UiEffect::ExternalEditor(id(C))),
+            ui(UiEffect::InsertNewline(main_of(C))),
+            ui(UiEffect::ExternalEditor(main_of(C))),
         ]
     );
 }
@@ -200,15 +200,15 @@ fn keys_resolved_after_a_timeout_use_the_editor_mode_of_the_last_key() {
 fn drafts_are_kept_per_room_across_room_switches() {
     let mut app = opened();
     reset(&mut app, vec![msg(1)]);
-    assert_eq!(app.draft(&id(C)), None);
+    assert_eq!(app.draft(&main_of(C)), None);
     assert_eq!(keys(&mut app, "r"), vec![focus(C), load_members(C)]);
-    assert_eq!(app.draft(&id(C)), Some(&Draft::Reply { to: event(1) }));
+    assert_eq!(app.draft(&main_of(C)), Some(&Draft::Reply { to: event(1) }));
     edited(&mut app, C, false);
 
     normal(&mut app, "<Esc>");
     keys(&mut app, "<C-w>hj<CR>");
     assert_eq!(app.open_room(), Some(&id(B)));
-    assert_eq!(app.draft(&id(B)), None);
+    assert_eq!(app.draft(&main_of(B)), None);
     app.update(Msg::Timeline {
         room: id(B),
         diffs: vec![TimelineDiff::Reset(vec![own(remote(5), "mine")])],
@@ -220,7 +220,7 @@ fn drafts_are_kept_per_room_across_room_switches() {
     normal(&mut app, "<Esc>");
     keys(&mut app, "<C-w>hk<CR>");
     assert_eq!(app.open_room(), Some(&id(C)));
-    assert_eq!(app.draft(&id(C)), Some(&Draft::Reply { to: event(1) }));
+    assert_eq!(app.draft(&main_of(C)), Some(&Draft::Reply { to: event(1) }));
     assert_eq!(edit_target(&app, B), Some(&remote(5)));
 }
 
@@ -231,14 +231,14 @@ fn composer_cancel_keeps_a_reply_text_and_clears_an_edit() {
     keys(&mut app, "r");
     edited(&mut app, C, false);
     assert_eq!(normal(&mut app, "<C-c>"), vec![]);
-    assert_eq!(app.draft(&id(C)), Some(&Draft::New));
+    assert_eq!(app.draft(&main_of(C)), Some(&Draft::New));
 
     edited(&mut app, C, true);
     normal(&mut app, "<Esc>");
     keys(&mut app, "ke");
     assert_eq!(edit_target(&app, C), Some(&remote(1)));
     assert_eq!(normal(&mut app, "<C-c>"), vec![clear(C)]);
-    assert_eq!(app.draft(&id(C)), Some(&Draft::New));
+    assert_eq!(app.draft(&main_of(C)), Some(&Draft::New));
     // Cleared: another edit can start.
     normal(&mut app, "<Esc>");
     keys(&mut app, "e");
@@ -251,7 +251,7 @@ fn composer_leave_ends_a_reply_without_text() {
     reset(&mut app, vec![msg(1)]);
     keys(&mut app, "r");
     assert_eq!(normal(&mut app, "<Esc>"), vec![]);
-    assert_eq!(app.draft(&id(C)), Some(&Draft::New));
+    assert_eq!(app.draft(&main_of(C)), Some(&Draft::New));
     assert_eq!(app.focus(), Focus::Timeline);
 }
 
@@ -264,7 +264,7 @@ fn composer_leave_ends_an_edit_without_text_and_leaves_the_message_alone() {
     edited(&mut app, C, true);
     // Nothing is sent: the message keeps its text.
     assert_eq!(normal(&mut app, "<Esc>"), vec![clear(C)]);
-    assert_eq!(app.draft(&id(C)), Some(&Draft::New));
+    assert_eq!(app.draft(&main_of(C)), Some(&Draft::New));
     assert_eq!(app.focus(), Focus::Timeline);
 }
 
@@ -277,14 +277,14 @@ fn composer_leave_keeps_any_text_with_its_draft() {
     keys(&mut app, "r");
     edited(&mut app, C, false);
     assert_eq!(normal(&mut app, "<Esc>"), vec![]);
-    assert_eq!(app.draft(&id(C)), Some(&Draft::Reply { to: event(2) }));
+    assert_eq!(app.draft(&main_of(C)), Some(&Draft::Reply { to: event(2) }));
     assert_eq!(app.focus(), Focus::Timeline);
 
     // A new draft with text: the text stays, so an edit is refused.
     keys(&mut app, "i");
     normal(&mut app, "<C-c>");
     assert_eq!(normal(&mut app, "<Esc>"), vec![]);
-    assert_eq!(app.draft(&id(C)), Some(&Draft::New));
+    assert_eq!(app.draft(&main_of(C)), Some(&Draft::New));
     assert_eq!(app.focus(), Focus::Timeline);
     keys(&mut app, "ke");
     assert_eq!(status(&app), Some("Clear the composer first"));
@@ -351,7 +351,7 @@ fn message_edit_loads_the_plain_body_of_an_own_text_message_with_its_mentions() 
     edited(&mut app, C, false);
     assert_eq!(keys(&mut app, "e"), vec![]);
     assert_eq!(status(&app), Some("Clear the composer first"));
-    assert_eq!(app.draft(&id(C)), Some(&Draft::New));
+    assert_eq!(app.draft(&main_of(C)), Some(&Draft::New));
 
     edited(&mut app, C, true);
     assert_eq!(
@@ -360,7 +360,7 @@ fn message_edit_loads_the_plain_body_of_an_own_text_message_with_its_mentions() 
             focus(C),
             load_members(C),
             ui(UiEffect::LoadComposer {
-                room: id(C),
+                timeline: main_of(C),
                 text: "@Alice *hi*".into(),
             }),
         ]
@@ -383,7 +383,7 @@ fn message_edit_loads_the_plain_body_of_an_own_text_message_with_its_mentions() 
             clear(C),
         ]
     );
-    assert_eq!(app.draft(&id(C)), Some(&Draft::New));
+    assert_eq!(app.draft(&main_of(C)), Some(&Draft::New));
 }
 
 #[test]
@@ -406,7 +406,7 @@ fn submit_sends_by_the_draft_and_clears_the_composer() {
             clear(C),
         ]
     );
-    assert_eq!(app.draft(&id(C)), Some(&Draft::New));
+    assert_eq!(app.draft(&main_of(C)), Some(&Draft::New));
 }
 
 /// The matrix adapter could not queue the app's `n`-th send.
@@ -426,17 +426,17 @@ fn a_send_that_cannot_be_queued_puts_its_draft_back() {
     query(&mut app, Some("al"));
     insert(&mut app, "<CR>");
     submit(&mut app, "@Alice hi");
-    assert_eq!(app.draft(&id(C)), Some(&Draft::New));
+    assert_eq!(app.draft(&main_of(C)), Some(&Draft::New));
 
     assert_eq!(
         failed(&mut app, 0),
         vec![ui(UiEffect::LoadComposer {
-            room: id(C),
+            timeline: main_of(C),
             text: "@Alice hi".into(),
         })]
     );
     assert_eq!(status(&app), Some("Sending the message failed: boom"));
-    assert_eq!(app.draft(&id(C)), Some(&Draft::Reply { to: event(1) }));
+    assert_eq!(app.draft(&main_of(C)), Some(&Draft::Reply { to: event(1) }));
     // Sent again as a reply, with its mention.
     let mentions = [MentionRef {
         user: UserId::new(ALICE),
@@ -457,7 +457,7 @@ fn a_send_that_cannot_be_queued_puts_its_draft_back() {
     // A queued send has nothing left to put back.
     app.update(Msg::SendQueued { id: SendId(1) });
     assert_eq!(failed(&mut app, 1), vec![]);
-    assert_eq!(app.draft(&id(C)), Some(&Draft::New));
+    assert_eq!(app.draft(&main_of(C)), Some(&Draft::New));
 }
 
 #[test]
@@ -470,7 +470,7 @@ fn a_failed_send_does_not_replace_what_the_user_started_since() {
     edited(&mut app, C, false);
     assert_eq!(failed(&mut app, 0), vec![]);
     assert_eq!(status(&app), Some("Sending the message failed: boom"));
-    assert_eq!(app.draft(&id(C)), Some(&Draft::New));
+    assert_eq!(app.draft(&main_of(C)), Some(&Draft::New));
 
     // A reply started in the empty composer stays a reply to its message.
     edited(&mut app, C, true);
@@ -478,7 +478,7 @@ fn a_failed_send_does_not_replace_what_the_user_started_since() {
     normal(&mut app, "<Esc>");
     keys(&mut app, "r");
     assert_eq!(failed(&mut app, 1), vec![]);
-    assert_eq!(app.draft(&id(C)), Some(&Draft::Reply { to: event(2) }));
+    assert_eq!(app.draft(&main_of(C)), Some(&Draft::Reply { to: event(2) }));
 }
 
 #[test]
@@ -491,7 +491,7 @@ fn a_failed_send_is_not_put_back_after_switching_rooms() {
     assert_eq!(app.open_room(), Some(&id(B)));
     assert_eq!(failed(&mut app, 0), vec![]);
     assert_eq!(status(&app), Some("Sending the message failed: boom"));
-    assert_eq!(app.draft(&id(B)), None);
+    assert_eq!(app.draft(&main_of(B)), None);
 
     // Nor when its room opens again.
     let back = keys(&mut app, "<C-w>hk<CR>");
@@ -501,7 +501,7 @@ fn a_failed_send_is_not_put_back_after_switching_rooms() {
             .iter()
             .any(|effect| matches!(effect, Effect::Ui(UiEffect::LoadComposer { .. })))
     );
-    assert_eq!(app.draft(&id(C)), Some(&Draft::New));
+    assert_eq!(app.draft(&main_of(C)), Some(&Draft::New));
 }
 
 /// `!c` open with the user's `@Alice typo`, its mention a pill, being edited.
@@ -551,7 +551,7 @@ fn an_edit_refused_after_it_was_queued_comes_back_as_an_edit_of_its_message() {
     assert_eq!(
         refused(&mut app, 0),
         vec![ui(UiEffect::LoadComposer {
-            room: id(C),
+            timeline: main_of(C),
             text: "@Alice fixed".into(),
         })]
     );
@@ -589,7 +589,7 @@ fn message_reply_refuses_a_local_echo_and_an_edit_draft() {
     // sent.
     assert_eq!(keys(&mut app, "r"), vec![]);
     assert_eq!(status(&app), Some("Wait until the message is sent"));
-    assert_eq!(app.draft(&id(C)), None);
+    assert_eq!(app.draft(&main_of(C)), None);
     assert_eq!(app.focus(), Focus::Timeline);
 
     // The composer holds the edit's text, which must not become a reply.
@@ -632,7 +632,7 @@ fn the_mention_menu_ranks_members_and_records_accepted_mentions() {
     assert_eq!(
         insert(&mut app, "<CR>"),
         vec![ui(UiEffect::ReplaceMentionToken {
-            room: id(C),
+            timeline: main_of(C),
             text: "@Alfred".into(),
         })]
     );
@@ -660,7 +660,7 @@ fn the_mention_menu_ranks_members_and_records_accepted_mentions() {
     assert_eq!(menu(&app), None);
     assert_eq!(
         insert(&mut app, "<CR>"),
-        vec![ui(UiEffect::RequestSubmit(id(C)))]
+        vec![ui(UiEffect::RequestSubmit(main_of(C)))]
     );
     // No token closes it; a query without candidates opens none.
     query(&mut app, Some("b"));
@@ -674,7 +674,7 @@ fn the_mention_menu_ranks_members_and_records_accepted_mentions() {
     assert_eq!(menu(&app), None);
     assert_eq!(
         insert(&mut app, "<CR>"),
-        vec![ui(UiEffect::RequestSubmit(id(C)))]
+        vec![ui(UiEffect::RequestSubmit(main_of(C)))]
     );
     // Only the focused composer has a menu.
     normal(&mut app, "<Esc>");

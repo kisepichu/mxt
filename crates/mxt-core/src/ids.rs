@@ -51,6 +51,21 @@ string_id! {
     UserId
 }
 
+/// A room's main timeline (`thread: None`), or one of its threads by the
+/// event ID of the thread's root.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TimelineId {
+    pub room: RoomId,
+    pub thread: Option<EventId>,
+}
+
+impl TimelineId {
+    /// The room's main timeline.
+    pub fn main(room: RoomId) -> TimelineId {
+        TimelineId { room, thread: None }
+    }
+}
+
 /// Identifies a `MatrixEffect::Send` in its answer, `Msg::SendQueued` or
 /// `Msg::SendFailed`. The core numbers its sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
