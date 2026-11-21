@@ -33,7 +33,8 @@ marked **Breaking:**.
 - The command line, the `/` search line, picker queries and the recovery
   key prompt have a cursor: `<Left>`, `<Right>`, `<Home>` or `<C-b>`,
   `<End>` or `<C-e>`, `<S-Left>` and `<S-Right>` by word, and typing,
-  `<BS>` and `<Del>` at the cursor.
+  `<BS>` and `<Del>` at the cursor. They work by grapheme cluster, so an
+  emoji with a skin tone is one character, also for the recovery key's `*`.
 
 ### Changed
 
