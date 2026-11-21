@@ -56,6 +56,16 @@ pub static COMMANDS: &[Command] = &[
         },
     },
     Command {
+        name: "join",
+        argument: Argument::Required(":join <target>"),
+        description: "Join a room or accept an invite, or open a direct message with a user",
+        action: |target| {
+            Ok(Action::RoomJoin {
+                target: target.to_owned(),
+            })
+        },
+    },
+    Command {
         name: "mute",
         argument: Argument::None,
         description: "Mute the room under the room list's cursor, or the open room",
@@ -234,6 +244,24 @@ mod tests {
     }
 
     #[test]
+    fn join_takes_the_rest_of_the_line_as_its_target() {
+        let join = |target: &str| {
+            Ok(Some(Action::RoomJoin {
+                target: target.into(),
+            }))
+        };
+        assert_eq!(
+            parse_command("join  #mxt:example.org "),
+            join("#mxt:example.org")
+        );
+        assert_eq!(parse_command("join Book club"), join("Book club"));
+        assert_eq!(
+            parse_command("join").map_err(|error| error.to_string()),
+            Err("usage: :join <target>".to_owned())
+        );
+    }
+
+    #[test]
     fn simple_commands() {
         assert_eq!(parse_command("q"), Ok(Some(Action::AppQuit)));
         assert_eq!(parse_command(" mute "), Ok(Some(Action::RoomMute)));
@@ -346,6 +374,7 @@ mod tests {
             names,
             [
                 ":open",
+                ":join",
                 ":mute",
                 ":unmute",
                 ":upload",

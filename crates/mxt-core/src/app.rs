@@ -3,6 +3,7 @@
 
 mod command_line;
 mod composer;
+mod join;
 mod picker;
 mod recovery;
 mod rooms;
@@ -22,6 +23,7 @@ use crate::keys::Key;
 use crate::line::LineEditor;
 use crate::msg::{EditorMode, Msg, Pane, SyncState};
 use crate::resolver::{Resolved, Resolver, TimerId};
+use crate::room::Invite;
 use crate::rooms::RoomList;
 use crate::settings::Settings;
 use crate::timeline::{ItemRef, TimelineEntry};
@@ -32,6 +34,7 @@ pub use recovery::SecretPrompt;
 
 use command_line::OpenLine;
 use composer::{Composer, MentionMenu, PendingSend};
+use join::JoinWait;
 use picker::OpenPicker;
 use search::Direction;
 use timeline::Timeline;
@@ -97,13 +100,21 @@ enum View {
 
 /// An action waiting for `y` in `CONFIRM` mode.
 enum Confirm {
-    Redact { room: RoomId, item: ItemRef },
+    Redact {
+        room: RoomId,
+        item: ItemRef,
+    },
+    /// `:join` of a user with whom no direct message was found.
+    CreateDm {
+        user: UserId,
+    },
 }
 
 impl Confirm {
-    fn question(&self) -> &'static str {
+    fn question(&self) -> String {
         match self {
-            Confirm::Redact { .. } => "Delete this message? (y/n)",
+            Confirm::Redact { .. } => "Delete this message? (y/n)".to_owned(),
+            Confirm::CreateDm { user } => format!("Create a direct message with {user}? (y/n)"),
         }
     }
 }
@@ -165,6 +176,10 @@ pub struct App {
     confirm: Option<Confirm>,
     /// `SECRET` mode: the recovery key typed so far, and its cursor.
     secret: Option<LineEditor<RecoveryKey>>,
+    /// The pending invites, sorted by name, for `:join`.
+    invites: Vec<Invite>,
+    /// The answer to the latest `:join` or `y`, until the next key or paste.
+    join_wait: Option<JoinWait>,
 }
 
 impl App {
@@ -202,6 +217,8 @@ impl App {
             picker: None,
             confirm: None,
             secret: None,
+            invites: Vec::new(),
+            join_wait: None,
             settings,
         }
     }
@@ -213,7 +230,10 @@ impl App {
             Msg::Key { key, editor } => self.key(key, editor, &mut effects),
             Msg::Paste { text, editor } => self.paste(text, editor, &mut effects),
             Msg::Timeout { id } => self.timeout(id, &mut effects),
-            Msg::RoomUpserted(summary) => self.upsert_room(summary),
+            Msg::RoomUpserted(summary) => {
+                self.upsert_room(summary);
+                self.open_joined(&mut effects);
+            }
             Msg::RoomRemoved(id) => self.remove_room(id, &mut effects),
             Msg::SyncState(state) => self.sync_state = state,
             Msg::Timeline { room, diffs } => self.timeline_diffs(room, diffs, &mut effects),
@@ -248,6 +268,9 @@ impl App {
             Msg::ImageUnavailable { item, reason } => self.image_unavailable(&item, &reason),
             Msg::Recovered => self.recovered(),
             Msg::ConfigWarnings { warnings } => self.config_warnings(warnings),
+            Msg::Invites(invites) => self.invites = invites,
+            Msg::Joined { target, room, how } => self.joined(&target, room, how, &mut effects),
+            Msg::NoDirectMessage { target, user } => self.no_direct_message(&target, user),
         }
         effects
     }
@@ -313,7 +336,7 @@ impl App {
     }
 
     /// The question while in `CONFIRM` mode.
-    pub fn confirmation(&self) -> Option<&str> {
+    pub fn confirmation(&self) -> Option<String> {
         self.confirm.as_ref().map(Confirm::question)
     }
 
@@ -402,6 +425,8 @@ impl App {
         // Outside `feed`, so a status set by a binding survives the keys fed
         // again after it.
         self.status_shown = false;
+        // Before the key runs anything, so a `:join` it runs waits anew.
+        self.join_wait = None;
         self.editor = editor;
         // The mention menu belongs to insert mode, and the tui reports the
         // editor mode with every key.
@@ -424,6 +449,7 @@ impl App {
     /// that a binding ending before it asks.
     fn paste(&mut self, text: String, editor: Option<EditorMode>, effects: &mut Vec<Effect>) {
         self.status_shown = false;
+        self.join_wait = None;
         self.editor = editor;
         if editor != Some(EditorMode::Insert) {
             self.cancel_completion();
@@ -557,6 +583,7 @@ impl App {
             Confirm::Redact { room, item } => {
                 effects.push(Effect::Matrix(MatrixEffect::Redact { room, item }));
             }
+            Confirm::CreateDm { user } => self.create_dm(user, effects),
         }
     }
 
@@ -640,6 +667,7 @@ impl App {
             Action::RoomMarkRead => self.mark_read(effects),
             Action::RoomMute => self.set_mute(true, effects),
             Action::RoomUnmute => self.set_mute(false, effects),
+            Action::RoomJoin { target } => self.join(target, effects),
             Action::MessageView => self.view_message(effects),
             Action::ViewClose => self.close_view(effects),
             Action::HelpCommands => self.view_help(help_text(COMMANDS), effects),

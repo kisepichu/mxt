@@ -30,6 +30,7 @@ use tracing::{debug, warn};
 use crate::{
     Error, SyncLoop,
     error::without_url,
+    join::{self, DirectMessages},
     media, recovery, rooms,
     send_queue::{self, Edits},
     timeline::{Answer, Subscription, event_id, redact, resend, send_message, toggle_reaction},
@@ -180,8 +181,9 @@ enum Queued {
 
 /// Subscriptions run in order, so the last one wins; messages and uploads
 /// are queued in the order they were sent, by `send_messages`, and
-/// notification modes change in order, by `set_mutes`; the rest runs
-/// concurrently.
+/// notification modes change in order, by `set_mutes`; direct message
+/// lookups and creations run one at a time (see `DirectMessages`); the rest
+/// runs concurrently.
 async fn run_effects(
     client: Client,
     settings: NotificationSettings,
@@ -203,6 +205,7 @@ async fn run_effects(
     ));
     // The open room's timeline; at most one.
     let mut timeline: Option<Subscription> = None;
+    let dms = DirectMessages::default();
     loop {
         tokio::select! {
             effect = queue.recv() => match effect {
@@ -297,6 +300,13 @@ async fn run_effects(
                         Ok(Msg::Recovered)
                     };
                     running.spawn(answered(&to_core, "Recovery failed", recovered));
+                }
+                Some(MatrixEffect::Join { target }) => {
+                    running.spawn(join::join(client.clone(), dms.clone(), target, to_core.clone()));
+                }
+                Some(MatrixEffect::CreateDm { user }) => {
+                    let dms = dms.clone();
+                    running.spawn(join::create_dm(client.clone(), dms, user, to_core.clone()));
                 }
                 None => break,
             },
@@ -562,7 +572,7 @@ fn sdk_room(client: &Client, room: &RoomId) -> Result<Room, Error> {
 /// The status line and the `warn` log, which the event loop writes for
 /// every failure it passes to the core, get the brief error, without event
 /// contents or room IDs; `debug` gets the full one.
-fn report(to_core: &UnboundedSender<Msg>, what: &str, error: &Error) {
+pub(crate) fn report(to_core: &UnboundedSender<Msg>, what: &str, error: &Error) {
     report_brief(to_core, what, &error.brief(), error);
 }
 

@@ -30,6 +30,9 @@ matrix-sdk-test.workspace = true
 # `SendId::new`, for the IDs of the tests' sends; also a dev-dependency
 # feature.
 mxt-core = { workspace = true, features = ["testing"] }
+# Mocks and received requests that `MatrixMockServer` does not cover, for
+# the tests of `:join`.
+wiremock.workspace = true
 
 [lints]
 workspace = true

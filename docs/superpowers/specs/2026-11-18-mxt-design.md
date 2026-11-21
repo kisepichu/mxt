@@ -141,7 +141,7 @@ flowchart BT
 | Crate | Responsibility | May depend on |
 |---|---|---|
 | `mxt-core` | Domain types, keymap and its resolver, action registry, pickers, mention rendering, `App` state and `update` | `std` and small pure crates without I/O (`nucleo-matcher`, `emojis`, `pulldown-cmark`, `unicode-segmentation`). Not the SDK, `ruma`, an async runtime, a terminal library, `serde` or `toml`. |
-| `mxt-matrix` | Builds the SDK client, converts SDK data into domain types, executes matrix effects, forwards SDK streams as `Msg`s, reads bridge state, renders HTML bodies into domain rich text, reads and writes the session file | `mxt-core`, `matrix-sdk`, `matrix-sdk-ui`, tokio, `futures-util`, `tracing`, `serde`/`serde_json` (the session file holds the SDK's serde session type), `mime_guess` (the MIME type of an upload), `image` (the dimensions of uploaded images); HTML parsing through `matrix_sdk::ruma::html`, plus a feature-only `ruma` dependency of the SDK's ruma version that enables `html-matrix` (the SDK enables only `html`) and `markdown` (`FormattedBody::markdown`); as dev-dependencies, `matrix-sdk` with its `testing` feature, `matrix-sdk-test` and `mxt-core` with its `testing` feature (the tests against `MatrixMockServer`) |
+| `mxt-matrix` | Builds the SDK client, converts SDK data into domain types, executes matrix effects, forwards SDK streams as `Msg`s, reads bridge state, renders HTML bodies into domain rich text, reads and writes the session file | `mxt-core`, `matrix-sdk`, `matrix-sdk-ui`, tokio, `futures-util`, `tracing`, `serde`/`serde_json` (the session file holds the SDK's serde session type), `mime_guess` (the MIME type of an upload), `image` (the dimensions of uploaded images); HTML parsing through `matrix_sdk::ruma::html`, plus a feature-only `ruma` dependency of the SDK's ruma version that enables `html-matrix` (the SDK enables only `html`) and `markdown` (`FormattedBody::markdown`); as dev-dependencies, `matrix-sdk` with its `testing` feature, `matrix-sdk-test` and `mxt-core` with its `testing` feature (the tests against `MatrixMockServer`), and `wiremock` (the requests of `:join` that `MatrixMockServer` has no mock for) |
 | `mxt-tui` | Layout and widgets, input routing, the composers and the message view (edtui), image decoding and previews, OSC 52 clipboard, local time formatting, executing UI effects | `mxt-core`, ratatui, crossterm, edtui, ratatui-image, image, jiff, `base64` (OSC 52), `futures-util` (the terminal event stream), `unicode-segmentation`, `rustix` (reading the terminal's answer to XTVERSION with a timeout, and the window's size in pixels) |
 | `mxt` | Command line, startup flow, configuration file loading (TOML DTOs), paths, the data directory lock, logging, wiring the adapters and the event loop | all of the above, `serde`, `toml`, `tracing`, `tracing-appender` and `tracing-subscriber` (the log files), `rpassword` (the password and recovery key prompts); `matrix-sdk` as a dev-dependency |
 
@@ -1039,19 +1039,25 @@ and takes the room with the latest activity when one step finds several:
 2. A room the user shares with that user alone: joined, not a space, the
    server's joined member count (`Room::joined_members_count`) is 2, and
    that user is a joined member. The store decides when it has that
-   user's member event (`Room::get_member_no_sync`). Otherwise the room's
-   heroes (`Room::heroes`) decide when they are exactly that user and the
-   room has no invited members (`Room::invited_members_count` is 0),
-   since heroes list invited members as well as joined ones. Otherwise one
-   `/members` request for that room decides (`Room::get_member`). The room
-   has no bridge state (`m.bridge` or `uk.half-shot.bridge`), with one
-   exception: that user is the bridge's bot (`bridgebot`), the room has no
-   `m.room.name`, and the bridge declares no room type or `dm`. This finds
-   a bridge bot's management room, with or without bridge state, and
-   direct messages that `m.direct` lacks. Other bridged rooms are left
-   out, because a bridged channel that only the user and the bridge bot
-   have joined would look the same; the exception relies on mautrix
-   naming every channel it bridges, as "Room names" does.
+   user's member event (`Room::get_member_no_sync`), and rules the room
+   out when its joined members (`Room::joined_user_ids`) include someone
+   other than the user's own account and that user, since only one other
+   member is joined. Otherwise, when the room has no invited members
+   (`Room::invited_members_count` is 0; heroes list invited members as
+   well as joined ones), the room's heroes (`Room::heroes`) decide when
+   they are exactly one user: that user finds the room, anyone else rules
+   it out. Otherwise one `/members` request for that room decides
+   (`Room::get_member`). A store or heroes that are behind can make this
+   step pass over the room wanted; that leads at most to the question of
+   step 5, never to a room created without `y`. The room has no bridge
+   state (`m.bridge` or `uk.half-shot.bridge`), with one exception: that
+   user is the bridge's bot (`bridgebot`), the room has no `m.room.name`,
+   and the bridge declares no room type or `dm`. This finds a bridge bot's
+   management room, with or without bridge state, and direct messages
+   that `m.direct` lacks. Other bridged rooms are left out, because a
+   bridged channel that only the user and the bridge bot have joined
+   would look the same; the exception relies on mautrix naming every
+   channel it bridges, as "Room names" does.
 3. Bridged direct messages by the rule in "Room names": a room that the
    rule takes for a direct message with that user, from the store, the
    same check that names the room in the room list.
@@ -1776,11 +1782,18 @@ direct message lookup logs at `info` which step found a room (see
   `SendQueued`, that a refused upload is reported, stays in the send queue
   and shows as a failed local echo, and that a refused reaction is reported
   and then dropped from the timeline and the send queue. `room.join` is
-  tested the same way: its targets (an alias, a room ID with a pending
-  invite, a matrix.to link with `via`, a left room by its ID with its
-  creators' servers as `via`), each step of the direct message lookup
+  tested the same way, with `wiremock` as one more dev-dependency: the
+  mock server `MatrixMockServer` runs on, in the version and features the
+  SDK's `testing` feature already builds, so nothing more compiles. Its
+  plain mocks answer what `MatrixMockServer` has no mock for (`/join` by
+  ID or alias, the `m.direct` account data, a room's `m.room.create`
+  state), and the tests read the requests it received. They cover the
+  targets (an alias, a room ID with a pending invite, a matrix.to link
+  with `via`, a left room by its ID with its creators' servers as `via`,
+  a space the join entered), each step of the direct message lookup
   finding its room with no `createRoom` request (a bridge bot's room with
-  bridge state among them, and heroes that do or do not decide), an
+  bridge state among them, and heroes that do or do not decide), two-member
+  rooms with someone else passed over without a `/members` request, an
   answer that nothing was found, and the creation of an encrypted direct
   message (`is_direct`, the invite, the preset and `m.room.encryption` in
   the request, then `m.direct`), once only for two quick requests. The
@@ -2067,8 +2080,16 @@ asking for the recovery key ("Startup").
   creates nothing. The owner's account check (`:join` with a bridge bot's
   user ID opens the existing room, and the log names the step that found
   it) confirms it for the bridge checked. Members are lazy-loaded, so the
-  lookup reads the store and, in step 2, the rooms' heroes; a room that
-  neither decides costs one `/members` request in step 2.
+  lookup reads the store and, in step 2, the rooms' heroes, which decide
+  most two-member rooms without a request, the user's direct messages
+  with other people included: another joined member in the store, or a
+  single hero other than the user with nobody invited, rules a room out.
+  Only a room that neither decides, such as one with an invited member,
+  costs one `/members` request in step 2, one after another while the
+  lookup holds its lock; a failed one fails the lookup. A store or heroes
+  that are behind can make step 2 pass over the room wanted: that leads
+  at most to the question of step 5, never to a room created without
+  `y`, though `y` then creates a second direct message with that user.
 - **Ignored settings.** An ignored setting takes its documented default,
   which can be the opposite of what the newer setting asked for. For
   `ui.read_receipts`, whose default sends receipts that others see, mxt

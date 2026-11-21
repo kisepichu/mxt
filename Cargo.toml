@@ -71,6 +71,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # ratatui draws text per grapheme cluster; the view cuts text at the same
 # boundaries.
 unicode-segmentation = "1"
+# Requests matrix-sdk's `MatrixMockServer` has no mock for (`/join` by ID or
+# alias, the `m.direct` account data) and the requests it received, in the
+# tests of `:join`; the version and features matrix-sdk's `testing` feature
+# uses.
+wiremock = { version = "0.6.5", default-features = false }
 
 # edtui from mxt's fork (design, "Nix flake"): the `mxt` branch of
 # kisepichu/edtui, which is 0.11.8 with the cursor and wrapping measured by

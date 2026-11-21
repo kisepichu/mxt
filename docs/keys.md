@@ -54,7 +54,7 @@ once the pane shows the newest message, as moving down to it does.
 | `COMMAND` | the `:` command line or a `/` search line is open | the `command_line` table, then [line editing](#line-editing) |
 | `PICKER` | a picker is open | the `picker` table, then [line editing](#line-editing) of the query |
 | `VIEW NORMAL`, `VIEW INSERT`, `VIEW VISUAL`, `VIEW SEARCH` | the message view, or `:help`, `:map` or `:messages` in it, is open; the mode of its editor | the `message_view` table in normal and visual mode, then the editor |
-| `CONFIRM` | an action asks first, as `dd` does | `y` confirms, any other key cancels |
+| `CONFIRM` | an action asks first, as `dd` does, or `:join` before it creates a direct message | `y` confirms, any other key cancels |
 | `SECRET` | `:recover` asks for the recovery key; the status line shows `Recovery key:` and a `*` for each character, with the cursor among them | [line editing](#line-editing) and a paste's first line; `<CR>` submits, `<Esc>` cancels; no keymap |
 
 In `NORMAL`, the room list and the timeline have no character cursor: the
@@ -187,6 +187,7 @@ use the commands below:
 | `room.open` with other arguments than `]u` and `[u`, for example a `query` | `:open <room>` |
 | `room.mark_read` | |
 | `room.mute`, `room.unmute` | `:mute`, `:unmute` |
+| `room.join`, with a `target` | `:join <target>` |
 | `message.react` with an `emoji`, for example `emoji = "thumbsup"` | `:react <emoji>` |
 | `file.upload` | `:upload <path>` |
 | `account.recover`, which asks for the recovery key | `:recover` |
@@ -235,12 +236,14 @@ user_id = "@alice:example.org"
 
 `:` opens the command line. Everything after the command name is one
 argument, so names and paths with spaces need no quotes. `<Tab>` completes
-command names, room names after `:open`, and emoji shortcodes after
-`:react` (`:react thu` offers `thumbsdown` and `thumbsup`).
+command names, room names after `:open`, the names of pending invites
+after `:join`, and emoji shortcodes after `:react` (`:react thu` offers
+`thumbsdown` and `thumbsup`).
 
 | Command | What it does |
 |---|---|
 | `:open <room>` | Opens the room whose name matches `<room>` best (fuzzy). |
+| `:join <target>` | Joins a room and opens it, or opens a direct message (see [Joining rooms and direct messages](#joining-rooms-and-direct-messages)). |
 | `:mute` | Mutes the room: the room under the cursor in the room list, otherwise the open room. |
 | `:unmute` | Unmutes it: its own notification setting is removed, so the account's default applies. A room that is not muted is left alone. |
 | `:upload <path>` | Sends the file to the open room as an image, video, audio or file message, by the type its name suggests. `~/` is your home directory; a relative path is relative to where mxt was started. Anything that is not a regular file, and files larger than the homeserver's upload limit, are refused. |
@@ -252,10 +255,49 @@ command names, room names after `:open`, and emoji shortcodes after
 | `:q` | Quits. |
 
 `:mute`, `:unmute`, `:recover`, `:help`, `:map`, `:messages` and `:q` take
-no argument, `:open` and `:upload` without one show their usage, and
-`:react`'s argument is optional. `:react` acts on the open room's timeline
-cursor also while the room list has focus, whereas `:mute` and `:unmute`
-there act on the room under the room list's cursor.
+no argument, `:open`, `:join` and `:upload` without one show their usage,
+and `:react`'s argument is optional. `:react` acts on the open room's
+timeline cursor also while the room list has focus, whereas `:mute` and
+`:unmute` there act on the room under the room list's cursor.
+
+### Joining rooms and direct messages
+
+`:join` reads its argument as one of these:
+
+| Argument | What happens |
+|---|---|
+| a room alias, `#name:server` | Joins the room and opens it. |
+| a room ID, `!id:server` | Joins the room, which also accepts a pending invite to it, and opens it; a room in the room list opens at once. |
+| a user ID, `@name:server` | Opens your direct message with that person, below. |
+| a matrix.to link, `https://matrix.to/#/` and one of the above, with or without `?via=<server>` | As for what it links to; a link to a message opens its room. The `via` servers help your homeserver find a room it is not in. |
+| anything else | The name of a pending invite, matched as `:open` matches room names: joins it, which accepts the invite. When two invites have that name, `<Tab>` completes their room IDs instead. |
+
+The status line says `Joining…`, then `Joined <room>` when the room opens,
+or why it failed. A room you are already in just opens. A key you press
+before the answer arrives keeps the room from opening under you; it still
+appears in the room list. mxt does not list spaces: a space you are in is
+an error, and `:join` of another space joins it, then says that mxt does
+not list it.
+
+`:join @name:server` looks for a direct message with that person, in this
+order, and opens the first room it finds (the most recently active one
+when a step finds several):
+
+1. a room in your direct messages (`m.direct`) that they have not left,
+   or one this run of mxt created with them;
+2. a room only you and they have joined; with bridge state only when they
+   are the bridge's bot, the room has no name and the bridge declares it
+   no room type or a `dm`, which finds a bridge bot's room;
+3. a bridged direct message with them, as the room list names it;
+4. their pending invite to a direct message, which it accepts.
+
+Only when none is found does it ask `Create a direct message with
+<user>? (y/n)`. `y` creates an encrypted direct message and invites them,
+and the status line says `Created a direct message` when it opens; any
+other key cancels, and nothing is created. A key you press before the
+question would appear means no question: the status line says `No direct
+message found; :join again to create one`. Opening an existing direct
+message and joining a room by its alias, ID or link never ask.
 
 ## The editors
 
