@@ -30,6 +30,10 @@ marked **Breaking:**.
 - `message.react` takes an optional `emoji`, so a key can react with one
   emoji: `{ action = "message.react", emoji = "thumbsup" }`. An unknown or
   empty emoji is an error when the configuration is loaded.
+- The command line, the `/` search line, picker queries and the recovery
+  key prompt have a cursor: `<Left>`, `<Right>`, `<Home>` or `<C-b>`,
+  `<End>` or `<C-e>`, `<S-Left>` and `<S-Right>` by word, and typing,
+  `<BS>` and `<Del>` at the cursor.
 
 ### Changed
 
@@ -43,6 +47,10 @@ marked **Breaking:**.
   `composer.normal` to `focus.timeline` keeps the old behavior.
 - `+` with no open room or on an empty timeline now says why it does
   nothing: `No room is open` or `No message to react to`.
+- On the command line, the `/` search line, picker queries and the recovery
+  key prompt, `<C-u>` deletes the text before the cursor and `<C-w>` the
+  word before it, with words split as in the editors: `foo.bar` loses `bar`
+  first, and kanji, hiragana and katakana are separate words.
 
 ### Fixed
 
