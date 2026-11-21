@@ -2,7 +2,7 @@ use super::*;
 use mxt_core::action::Action;
 use mxt_core::keymap::InputContext;
 use mxt_core::keys::KeySeq;
-use mxt_core::rooms::RoomSort;
+use mxt_core::rooms::{RoomSort, SortKey};
 use mxt_core::settings::{ImagePreview, ImageProtocol, ReceiptKind};
 use mxt_tui::NetworkPlacement;
 use std::ffi::OsString;
@@ -67,7 +67,7 @@ fn minimal_file_uses_defaults() {
     assert_eq!(c.user_id.as_str(), "@alice:example.org");
     assert_eq!(c.homeserver, None);
     assert_eq!(c.settings.timeoutlen_ms, 1000);
-    assert_eq!(c.settings.room_sort, RoomSort::Recent);
+    assert_eq!(c.settings.room_sort, RoomSort::one(SortKey::Recent));
     assert!(c.settings.room_list_visible);
     assert_eq!(c.settings.image_preview, ImagePreview::Auto);
     assert_eq!(c.settings.read_receipts, ReceiptKind::Public);
@@ -147,7 +147,7 @@ fn settings_are_read() {
     ));
     assert_eq!(c.settings.timeoutlen_ms, 300);
     assert_eq!(c.settings.read_receipts, ReceiptKind::Private);
-    assert_eq!(c.settings.room_sort, RoomSort::Name);
+    assert_eq!(c.settings.room_sort, RoomSort::one(SortKey::Name));
     assert!(!c.settings.room_list_visible);
     assert_eq!(c.settings.image_preview, ImagePreview::Off);
     assert_eq!(
@@ -570,8 +570,8 @@ room_list = { sort = "size", network = "beside" }
             (
                 7,
                 22,
-                "ui.room_list.sort: unknown value \"size\"; expected one of \"recent\", \"name\" \
-                 (ignored)"
+                "ui.room_list.sort: unknown value \"size\"; expected one of \"mentions\", \
+                 \"unread\", \"recent\", \"read\", \"name\" (ignored)"
             ),
             (
                 7,
@@ -584,12 +584,105 @@ room_list = { sort = "size", network = "beside" }
     assert_eq!(c.settings.image_preview, ImagePreview::Auto);
     assert_eq!(c.settings.read_receipts, ReceiptKind::Private);
     assert_eq!(c.time_format, TimeFormat::default());
-    assert_eq!(c.settings.room_sort, RoomSort::Recent);
+    assert_eq!(c.settings.room_sort, RoomSort::default());
     assert_eq!(c.room_list_layout.network, NetworkPlacement::Inline);
     // The log and `:messages` show them with the file.
     assert_eq!(
         c.warnings[1].to_string(),
         "config.toml:5:17: ui.read_receipts: unknown value \"x\", using \"private\""
+    );
+}
+
+/// The room sort and the warnings of `ui.room_list.sort = <value>`, which
+/// are all at the value's start, line 4, column 22.
+fn sort(value: &str) -> (RoomSort, Vec<String>) {
+    let (c, warnings) = warned(&format!(
+        "{MINIMAL}[ui]\nroom_list = {{ sort = {value:?} }}\n"
+    ));
+    let messages = warnings
+        .into_iter()
+        .map(|(line, column, message)| {
+            assert_eq!((line, column), (4, 22), "{message}");
+            message
+        })
+        .collect();
+    (c.settings.room_sort, messages)
+}
+
+#[test]
+fn room_list_sort_is_a_list_of_keys() {
+    use SortKey::{Mentions, Name, Read, Recent, Unread};
+    let list = |keys: &[SortKey]| RoomSort::new(keys.to_vec()).unwrap();
+    let unknown = |key: &str| {
+        format!(
+            "ui.room_list.sort: unknown value {key:?}; expected one of \"mentions\", \
+             \"unread\", \"recent\", \"read\", \"name\" (ignored)"
+        )
+    };
+    for (value, key) in [
+        ("mentions", Mentions),
+        ("unread", Unread),
+        ("recent", Recent),
+        ("read", Read),
+        ("name", Name),
+    ] {
+        assert_eq!(sort(value), (RoomSort::one(key), vec![]), "{value}");
+    }
+    for value in [
+        "mentions, unread, read",
+        "mentions,unread,read",
+        " mentions ,unread,  read ",
+    ] {
+        assert_eq!(
+            sort(value),
+            (list(&[Mentions, Unread, Read]), vec![]),
+            "{value}"
+        );
+    }
+    // An unknown key is skipped; the others apply.
+    assert_eq!(
+        sort("Mentions, unread"),
+        (list(&[Unread]), vec![unknown("Mentions")])
+    );
+    assert_eq!(
+        sort("mentions, size, read"),
+        (list(&[Mentions, Read]), vec![unknown("size")])
+    );
+    assert_eq!(
+        sort("size, age"),
+        (RoomSort::default(), vec![unknown("size"), unknown("age")])
+    );
+    // A list that cannot be used: the default.
+    for value in ["", " "] {
+        assert_eq!(
+            sort(value),
+            (
+                RoomSort::default(),
+                vec!["ui.room_list.sort: names no sort key (ignored)".to_owned()]
+            ),
+            "{value:?}"
+        );
+    }
+    for value in ["mentions,,read", "mentions, read,", ",read"] {
+        assert_eq!(
+            sort(value),
+            (
+                RoomSort::default(),
+                vec![format!(
+                    "ui.room_list.sort: empty sort key in {value:?} (ignored)"
+                )]
+            ),
+            "{value:?}"
+        );
+    }
+    let twice = |key: &str| format!("ui.room_list.sort: {key:?} is listed twice (ignored)");
+    assert_eq!(
+        sort("unread, read, unread"),
+        (RoomSort::default(), vec![twice("unread")])
+    );
+    assert_eq!(
+        sort("size, read, read"),
+        (RoomSort::default(), vec![unknown("size"), twice("read")])
     );
 }
 
@@ -984,7 +1077,7 @@ homeserver = "https://matrix.example.org"
 [ui]
 leader = ","
 timeoutlen = 300
-room_list = { visible = false, sort = "name", width = 40, network = "below" }
+room_list = { visible = false, sort = "mentions, read", width = 40, network = "below" }
 time_format = "%Y-%m-%d %H:%M"
 image_preview = "kitty"
 read_receipts = "private"
@@ -1012,7 +1105,10 @@ opener = ["wslview"]
     assert_eq!(sidebar, Some(&Binding::single(Action::SidebarToggle)));
     assert_eq!(c.settings.timeoutlen_ms, 300);
     assert!(!c.settings.room_list_visible);
-    assert_eq!(c.settings.room_sort, RoomSort::Name);
+    assert_eq!(
+        c.settings.room_sort,
+        RoomSort::new(vec![SortKey::Mentions, SortKey::Read]).unwrap()
+    );
     assert_eq!(
         c.room_list_layout,
         RoomListLayout {

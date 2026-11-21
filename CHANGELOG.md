@@ -8,6 +8,20 @@ marked **Breaking:**.
 
 ## [Unreleased]
 
+### Added
+
+- `ui.room_list.sort` takes a comma-separated list of keys, applied in
+  order, each deciding between the rooms the keys before it leave tied:
+  `mentions` (rooms with unread mentions first), `unread` (rooms with
+  unread messages first), `recent` (latest activity first), `read` (the
+  rooms you read most recently first, by your own latest read receipt from
+  any device; rooms you never read last) and `name`, for example
+  `sort = "mentions, unread, read"`. Remaining ties go by name; `"recent"`
+  and `"name"` mean what they did. With `read`, a room you open moves up
+  when it had something new for you. The cursor stays on its room when
+  rooms move. mxt 0.1.3 ignores such a value with a warning and sorts by
+  `recent`, so a configuration shared with it can carry it.
+
 ### Fixed
 
 - Moving the timeline cursor down with `j` or `<C-d>` near the newest message

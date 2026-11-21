@@ -7,32 +7,111 @@ use crate::fuzzy;
 use crate::ids::RoomId;
 use crate::room::{RoomName, RoomSummary, UnreadCounts};
 
-/// The order of the room list.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum RoomSort {
-    /// Latest activity, newest first; rooms without activity last; ties by the
-    /// `Name` order.
-    #[default]
+/// One key of the room list's order (design, "Room list"). Each decides
+/// only between the rooms that the keys before it leave tied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortKey {
+    /// Rooms with unread mentions first: whether a room has any, not how
+    /// many, so a new mention does not reorder the rooms that have some.
+    Mentions,
+    /// Rooms with unread messages first, by the rule of `filter = "unread"`.
+    Unread,
+    /// Latest activity, newest first; rooms without activity last.
     Recent,
+    /// The user's own latest read receipt, newest first; rooms never read
+    /// last.
+    Read,
     /// Case-insensitive by the full displayed name (`network / room`), which
-    /// groups rooms by network; ties by room id.
+    /// groups rooms by network.
     Name,
 }
 
-impl RoomSort {
-    /// A total order: room ids are unique and break every tie.
-    fn compare(self, a: &RoomSummary, b: &RoomSummary) -> Ordering {
-        let by_name = || {
-            lowercase(&a.name)
-                .cmp(lowercase(&b.name))
-                .then_with(|| a.id.cmp(&b.id))
-        };
+impl SortKey {
+    pub const ALL: [SortKey; 5] = [
+        SortKey::Mentions,
+        SortKey::Unread,
+        SortKey::Recent,
+        SortKey::Read,
+        SortKey::Name,
+    ];
+
+    /// The key in `ui.room_list.sort`: "mentions", "unread", "recent",
+    /// "read", "name".
+    pub fn config_name(self) -> &'static str {
         match self {
-            // `None` sorts before `Some` and older before newer, so comparing
-            // `b` with `a` puts the newest first and rooms without activity last.
-            RoomSort::Recent => b.latest_activity.cmp(&a.latest_activity).then_with(by_name),
-            RoomSort::Name => by_name(),
+            SortKey::Mentions => "mentions",
+            SortKey::Unread => "unread",
+            SortKey::Recent => "recent",
+            SortKey::Read => "read",
+            SortKey::Name => "name",
         }
+    }
+
+    /// `Less` when `a` comes first. `None` sorts before `Some` and `false`
+    /// before `true`, so comparing `b` with `a` puts the newest time and the
+    /// rooms with something unread first, and rooms without a time last.
+    fn compare(self, a: &RoomSummary, b: &RoomSummary) -> Ordering {
+        let unread = |room: &RoomSummary| RoomFilter::Unread.matches(&room.unread);
+        match self {
+            SortKey::Mentions => (b.unread.mentions > 0).cmp(&(a.unread.mentions > 0)),
+            SortKey::Unread => unread(b).cmp(&unread(a)),
+            SortKey::Recent => b.latest_activity.cmp(&a.latest_activity),
+            SortKey::Read => b.last_read.cmp(&a.last_read),
+            SortKey::Name => lowercase(&a.name).cmp(lowercase(&b.name)),
+        }
+    }
+}
+
+/// The order of the room list: a non-empty list of distinct sort keys,
+/// applied in order. Rooms that every key leaves tied are in `Name` order,
+/// and rooms with the same name by room ID, so the order is total.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomSort {
+    keys: Vec<SortKey>,
+}
+
+/// Why a list of keys is no `RoomSort`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomSortError {
+    Empty,
+    /// The first key that is listed a second time.
+    Repeated(SortKey),
+}
+
+impl RoomSort {
+    pub fn new(keys: Vec<SortKey>) -> Result<RoomSort, RoomSortError> {
+        if keys.is_empty() {
+            return Err(RoomSortError::Empty);
+        }
+        if let Some(index) = (1..keys.len()).find(|&index| keys[..index].contains(&keys[index])) {
+            return Err(RoomSortError::Repeated(keys[index]));
+        }
+        Ok(RoomSort { keys })
+    }
+
+    pub fn one(key: SortKey) -> RoomSort {
+        RoomSort { keys: vec![key] }
+    }
+
+    pub fn keys(&self) -> &[SortKey] {
+        &self.keys
+    }
+
+    /// A total order: room IDs are unique and break every tie.
+    fn compare(&self, a: &RoomSummary, b: &RoomSummary) -> Ordering {
+        self.keys
+            .iter()
+            .map(|key| key.compare(a, b))
+            .find(|order| order.is_ne())
+            .unwrap_or_else(|| SortKey::Name.compare(a, b))
+            .then_with(|| a.id.cmp(&b.id))
+    }
+}
+
+impl Default for RoomSort {
+    /// `"recent"`.
+    fn default() -> RoomSort {
+        RoomSort::one(SortKey::Recent)
     }
 }
 
@@ -138,20 +217,20 @@ impl RoomList {
         }
     }
 
-    pub fn sort(&self) -> RoomSort {
-        self.sort
-    }
-
     /// Inserts or replaces the room with the same id and restores the order.
     /// Returns the room's old index (`None` for a new room) and its new index.
     pub fn upsert(&mut self, summary: RoomSummary) -> (Option<usize>, usize) {
         let old = self.remove(&summary.id).map(|(index, _)| index);
-        let sort = self.sort;
-        let new = self
+        (old, self.insert(summary))
+    }
+
+    /// Places a room that is not in the list; returns its index.
+    fn insert(&mut self, summary: RoomSummary) -> usize {
+        let index = self
             .rooms
-            .partition_point(|room| sort.compare(room, &summary) == Ordering::Less);
-        self.rooms.insert(new, summary);
-        (old, new)
+            .partition_point(|room| self.sort.compare(room, &summary) == Ordering::Less);
+        self.rooms.insert(index, summary);
+        index
     }
 
     /// Returns the removed room and the index it had.
@@ -180,12 +259,13 @@ impl RoomList {
         self.rooms.is_empty()
     }
 
-    /// Optimistic clearing: sets the room's counts to zero (and `marked` to false).
-    /// The order does not depend on counts, so it stays the same.
-    pub fn clear_unread(&mut self, id: &RoomId) {
-        if let Some(room) = self.rooms.iter_mut().find(|room| room.id == *id) {
-            room.unread = UnreadCounts::default();
-        }
+    /// Optimistic clearing: sets the room's counts to zero (and `marked` to
+    /// false) and places the room again, since the `mentions` and `unread`
+    /// keys depend on them. Returns the room's old and new index.
+    pub fn clear_unread(&mut self, id: &RoomId) -> Option<(usize, usize)> {
+        let (old, mut room) = self.remove(id)?;
+        room.unread = UnreadCounts::default();
+        Some((old, self.insert(room)))
     }
 }
 
@@ -261,6 +341,7 @@ mod tests {
             unread,
             mode: NotificationMode::Default,
             latest_activity: at.map(Timestamp::from_millis),
+            last_read: None,
         }
     }
 
@@ -268,6 +349,22 @@ mod tests {
         UnreadCounts {
             messages,
             ..UnreadCounts::default()
+        }
+    }
+
+    fn mentions(mentions: u64) -> UnreadCounts {
+        UnreadCounts {
+            messages: mentions,
+            notifications: mentions,
+            mentions,
+            marked: false,
+        }
+    }
+
+    fn read_at(summary: RoomSummary, at: Option<u64>) -> RoomSummary {
+        RoomSummary {
+            last_read: at.map(Timestamp::from_millis),
+            ..summary
         }
     }
 
@@ -283,10 +380,23 @@ mod tests {
         list
     }
 
+    fn recent() -> RoomSort {
+        RoomSort::one(SortKey::Recent)
+    }
+
+    /// The room IDs in the order of `keys`.
+    fn order(keys: &[SortKey], rooms: Vec<RoomSummary>) -> Vec<String> {
+        let list = list(RoomSort::new(keys.to_vec()).unwrap(), rooms);
+        list.rooms()
+            .iter()
+            .map(|r| r.id.as_str().to_owned())
+            .collect()
+    }
+
     #[test]
     fn recent_order_is_newest_first_with_inactive_rooms_last() {
         let l = list(
-            RoomSort::Recent,
+            recent(),
             vec![
                 room("!a:example.org", None, "a", Some(10), unread(0)),
                 room("!b:example.org", None, "b", None, unread(0)),
@@ -302,7 +412,7 @@ mod tests {
     #[test]
     fn recent_ties_fall_back_to_the_name_order() {
         let l = list(
-            RoomSort::Recent,
+            recent(),
             vec![
                 room("!z:example.org", None, "Same", Some(10), unread(0)),
                 room("!y:example.org", None, "same", Some(10), unread(0)),
@@ -326,7 +436,7 @@ mod tests {
     #[test]
     fn name_order_is_case_insensitive_on_the_full_name() {
         let l = list(
-            RoomSort::Name,
+            RoomSort::one(SortKey::Name),
             vec![
                 room(
                     "!1:example.org",
@@ -352,9 +462,215 @@ mod tests {
     }
 
     #[test]
+    fn mentions_puts_rooms_with_any_mention_first_by_presence_not_count() {
+        // Rooms with 1 and 5 mentions are tied, and so are the others,
+        // whatever else is unread: each group goes by name, not by activity.
+        let rooms = vec![
+            room("!d:example.org", None, "delta", Some(40), unread(3)),
+            room("!b:example.org", None, "bravo", Some(20), mentions(5)),
+            room("!c:example.org", None, "charlie", None, unread(0)),
+            room("!a:example.org", None, "alpha", Some(10), mentions(1)),
+        ];
+        assert_eq!(
+            order(&[SortKey::Mentions], rooms),
+            [
+                "!a:example.org",
+                "!b:example.org",
+                "!c:example.org",
+                "!d:example.org"
+            ]
+        );
+    }
+
+    #[test]
+    fn unread_puts_rooms_with_any_badge_first_marked_or_counted_alike() {
+        let marked = UnreadCounts {
+            marked: true,
+            ..UnreadCounts::default()
+        };
+        let rooms = vec![
+            room("!a:example.org", None, "alpha", Some(40), unread(0)),
+            room("!b:example.org", None, "bravo", Some(10), marked),
+            room("!c:example.org", None, "charlie", Some(20), unread(1)),
+            room("!d:example.org", None, "delta", Some(30), unread(7)),
+        ];
+        assert_eq!(
+            order(&[SortKey::Unread], rooms),
+            [
+                "!b:example.org",
+                "!c:example.org",
+                "!d:example.org",
+                "!a:example.org"
+            ]
+        );
+    }
+
+    #[test]
+    fn recent_and_read_put_the_newest_time_first_and_rooms_without_one_last() {
+        let rooms = || {
+            vec![
+                read_at(room("!a:example.org", None, "a", Some(30), unread(0)), None),
+                read_at(room("!b:example.org", None, "b", None, unread(0)), Some(20)),
+                read_at(
+                    room("!c:example.org", None, "c", Some(10), unread(0)),
+                    Some(10),
+                ),
+                read_at(
+                    room("!d:example.org", None, "d", Some(20), unread(0)),
+                    Some(30),
+                ),
+            ]
+        };
+        assert_eq!(
+            order(&[SortKey::Recent], rooms()),
+            [
+                "!a:example.org",
+                "!d:example.org",
+                "!c:example.org",
+                "!b:example.org"
+            ]
+        );
+        assert_eq!(
+            order(&[SortKey::Read], rooms()),
+            [
+                "!d:example.org",
+                "!b:example.org",
+                "!c:example.org",
+                "!a:example.org"
+            ]
+        );
+    }
+
+    #[test]
+    fn keys_apply_in_order_each_between_the_rooms_the_ones_before_leave_tied() {
+        let rooms = || {
+            vec![
+                // Read, recently.
+                read_at(
+                    room("!a:example.org", None, "a", Some(50), unread(0)),
+                    Some(40),
+                ),
+                // Unread, read long ago.
+                read_at(
+                    room("!b:example.org", None, "b", Some(10), unread(2)),
+                    Some(10),
+                ),
+                // Unread, read recently.
+                read_at(
+                    room("!c:example.org", None, "c", Some(20), unread(1)),
+                    Some(30),
+                ),
+                // A mention, read long ago.
+                read_at(
+                    room("!d:example.org", None, "d", Some(30), mentions(1)),
+                    Some(5),
+                ),
+                // A mention, read more recently.
+                read_at(
+                    room("!e:example.org", None, "e", Some(40), mentions(2)),
+                    Some(20),
+                ),
+                // Never read.
+                read_at(room("!f:example.org", None, "f", Some(60), unread(0)), None),
+            ]
+        };
+        assert_eq!(
+            order(
+                &[SortKey::Mentions, SortKey::Unread, SortKey::Read],
+                rooms()
+            ),
+            [
+                "!e:example.org",
+                "!d:example.org",
+                "!c:example.org",
+                "!b:example.org",
+                "!a:example.org",
+                "!f:example.org"
+            ]
+        );
+        // Rooms with mentions are unread too; the name decides the rest.
+        assert_eq!(
+            order(&[SortKey::Unread, SortKey::Mentions], rooms()),
+            [
+                "!d:example.org",
+                "!e:example.org",
+                "!b:example.org",
+                "!c:example.org",
+                "!a:example.org",
+                "!f:example.org"
+            ]
+        );
+    }
+
+    #[test]
+    fn rooms_every_key_leaves_tied_go_by_name_then_by_room_id() {
+        let rooms = vec![
+            room("!z:example.org", None, "Same", Some(40), unread(1)),
+            room("!y:example.org", None, "same", Some(10), unread(2)),
+            room("!x:example.org", None, "Other", Some(30), unread(0)),
+            room("!w:example.org", None, "Another", Some(20), unread(3)),
+        ];
+        assert_eq!(
+            order(&[SortKey::Unread], rooms),
+            [
+                "!w:example.org",
+                "!y:example.org",
+                "!z:example.org",
+                "!x:example.org"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_sort_needs_at_least_one_key_and_each_key_once() {
+        use SortKey::{Mentions, Read, Unread};
+        assert_eq!(RoomSort::new(vec![]), Err(RoomSortError::Empty));
+        assert_eq!(
+            RoomSort::new(vec![Unread, Read, Unread]),
+            Err(RoomSortError::Repeated(Unread))
+        );
+        assert_eq!(
+            RoomSort::new(vec![Mentions, Read]).unwrap().keys(),
+            [Mentions, Read]
+        );
+        assert_eq!(RoomSort::default().keys(), [SortKey::Recent]);
+    }
+
+    #[test]
+    fn every_sort_key_has_a_name_of_its_own() {
+        for key in SortKey::ALL {
+            let named: Vec<SortKey> = SortKey::ALL
+                .into_iter()
+                .filter(|other| other.config_name() == key.config_name())
+                .collect();
+            assert_eq!(named, [key]);
+        }
+    }
+
+    #[test]
+    fn clear_unread_places_the_room_again() {
+        let mut l = list(
+            RoomSort::one(SortKey::Unread),
+            vec![
+                room("!a:example.org", None, "a", Some(10), unread(1)),
+                room("!b:example.org", None, "b", Some(20), unread(2)),
+                room("!c:example.org", None, "c", Some(30), unread(0)),
+            ],
+        );
+        let a = RoomId::new("!a:example.org");
+        assert_eq!(l.clear_unread(&a), Some((0, 1)));
+        assert_eq!(
+            ids(&l),
+            ["!b:example.org", "!a:example.org", "!c:example.org"]
+        );
+        assert_eq!(l.get(&a).unwrap().unread, UnreadCounts::default());
+        assert_eq!(l.clear_unread(&RoomId::new("!gone:example.org")), None);
+    }
+
+    #[test]
     fn upsert_replaces_and_reorders() {
         let mut l = list(
-            RoomSort::Recent,
+            recent(),
             vec![
                 room("!a:example.org", None, "a", Some(10), unread(0)),
                 room("!b:example.org", None, "b", Some(20), unread(0)),
@@ -376,7 +692,7 @@ mod tests {
     #[test]
     fn remove_returns_the_index_the_room_had() {
         let mut l = list(
-            RoomSort::Recent,
+            recent(),
             vec![
                 room("!a:example.org", None, "a", Some(10), unread(0)),
                 room("!b:example.org", None, "b", Some(20), unread(0)),
@@ -419,7 +735,7 @@ mod tests {
     fn three_unread() -> RoomList {
         // Order: c, b, a (newest first). b is read.
         list(
-            RoomSort::Recent,
+            recent(),
             vec![
                 room("!a:example.org", None, "a", Some(10), unread(1)),
                 room("!b:example.org", None, "b", Some(20), unread(0)),
@@ -486,7 +802,7 @@ mod tests {
     #[test]
     fn pick_next_returns_none_when_only_current_matches() {
         let l = list(
-            RoomSort::Recent,
+            recent(),
             vec![
                 room("!a:example.org", None, "a", Some(10), unread(1)),
                 room("!b:example.org", None, "b", Some(20), unread(0)),
@@ -514,7 +830,7 @@ mod tests {
     #[test]
     fn fuzzy_target_matches_the_displayed_name_within_the_filter() {
         let l = list(
-            RoomSort::Recent,
+            recent(),
             vec![
                 room(
                     "!1:example.org",
@@ -558,7 +874,7 @@ mod tests {
     #[test]
     fn every_displayed_name_resolves_to_its_own_room() {
         let l = list(
-            RoomSort::Recent,
+            recent(),
             vec![
                 room(
                     "!alerts:example.org",

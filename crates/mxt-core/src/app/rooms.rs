@@ -31,6 +31,17 @@ impl App {
         }
     }
 
+    /// Optimistic clearing (design, "Matrix adapter"): the room's counts go
+    /// to zero at once, and the room moves when the sort keys depend on
+    /// them, the cursor staying on its room.
+    pub(super) fn clear_room_unread(&mut self, id: &RoomId) {
+        if let Some((old, new)) = self.rooms.clear_unread(id)
+            && let Some(cursor) = self.room_cursor
+        {
+            self.room_cursor = Some(follow(cursor, Some(old), new));
+        }
+    }
+
     /// A cursor on the removed room moves to the room now at its index.
     pub(super) fn remove_room(&mut self, id: RoomId, effects: &mut Vec<Effect>) {
         if let Some((index, _)) = self.rooms.remove(&id)
@@ -129,7 +140,7 @@ impl App {
         let Some(id) = self.target_room().map(|room| room.id.clone()) else {
             return self.set_status(StatusKind::Error, "No room");
         };
-        self.rooms.clear_unread(&id);
+        self.clear_room_unread(&id);
         effects.push(Effect::Matrix(MatrixEffect::MarkRoomRead(id)));
     }
 

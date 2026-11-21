@@ -835,6 +835,7 @@ pub(crate) mod tests {
                 unread: UnreadCounts::default(),
                 mode: NotificationMode::Default,
                 latest_activity: Some(Timestamp::from_millis(at)),
+                last_read: None,
             }));
         }
         app
@@ -1167,6 +1168,7 @@ pub(crate) mod tests {
             unread,
             mode,
             latest_activity: None,
+            last_read: None,
         }
     }
 

@@ -24,7 +24,8 @@ user_id = "@alice:example.org"
 [ui]
 leader = "<Space>"
 timeoutlen = 1000                                 # milliseconds
-# sort: "recent" | "name"; width: 12 to 80; network: "inline" | "below"
+# sort: comma-separated keys from "mentions", "unread", "recent", "read", "name"
+# width: 12 to 80; network: "inline" | "below"
 room_list = { visible = true, sort = "recent", width = 30, network = "inline" }
 time_format = "%H:%M"                             # strftime, in the local time zone
 image_preview = "auto"                            # "auto" | "off" | "iterm2" | "sixel" | "kitty" | "halfblocks"
@@ -93,7 +94,8 @@ warnings:
   `[notifications]` or `[keymap.composer.foo]`; what is inside it is not
   checked;
 - a value that a setting with fixed values does not take, such as
-  `image_preview = "wezterm"`;
+  `image_preview = "wezterm"`, and a key that `ui.room_list.sort` does not
+  take, such as `"size"` in `sort = "mentions, size"`;
 - a `ui.time_format` that mxt cannot read, since a newer version may read
   more directives;
 - in a binding: an unknown action, an argument the action does not take,
@@ -109,6 +111,18 @@ value sends private receipts, not the default public ones. While an unknown
 `ui.leader` falls back to `<Space>`, two spellings in one table that only
 the fallback makes the same keys, such as `"<leader>x"` and `"<Space>x"`,
 are not an error: the later of the two in the file is ignored with a warning.
+
+`ui.room_list.sort` is a list, so an unknown key ignores only that key, and
+the other keys apply in their order; when every key is unknown, `"recent"`
+applies. A list that mxt cannot use is a warning too, and `"recent"`
+applies: a list that names no key (`sort = ""`), a list with an empty key
+(two commas in a row, or one at the start or the end), and a list that
+names a key twice. The warnings read `ui.room_list.sort: names no sort key
+(ignored)`, `ui.room_list.sort: empty sort key in "mentions,,read"
+(ignored)` and `ui.room_list.sort: "unread" is listed twice (ignored)`.
+mxt 0.1.3, which knows only `"recent"` and `"name"`, reads a list or a new
+key as an unknown value: a warning, and `"recent"` applies. So a
+configuration shared with machines that run 0.1.3 can carry a list.
 
 Up to mxt 0.1.2, `<C-i>` and `<Tab>` were two keys, and `<C-i>`, which
 terminals send as `<Tab>`, never arrived; now `<C-i>` is another name for
@@ -195,9 +209,27 @@ network = "below"
 | Key | Default | Values | Meaning |
 |---|---|---|---|
 | `visible` | `true` | `true`, `false` | Whether the room list is shown at startup. `<leader>e` (`sidebar.toggle`) shows and hides it. |
-| `sort` | `"recent"` | `"recent"`, `"name"` | `"recent"`: latest activity first. `"name"`: by the displayed name (`network / room`), ignoring case, which groups rooms by network. |
+| `sort` | `"recent"` | a comma-separated list of the [sort keys](#sort-keys), such as `"mentions, unread, read"` | The order of the rooms. The keys apply in order, each deciding only between the rooms that the keys before it leave tied, and rooms that every key leaves tied go by name. Spaces around the commas are optional, and keys are lowercase. A list of one key sorts as before, so `"recent"` and `"name"` keep their meaning. |
 | `width` | `30` | an integer from 12 to 80 | The room list's width in columns, its border included. A terminal narrower than 90 columns gives it a third of its width instead, and it never takes more than half. |
 | `network` | `"inline"` | `"inline"`, `"below"` | Where a bridged room's network name goes. `"inline"`: one row, `Discord / Alice`. `"below"`: the room name on the first row with the badge, and the network name dim on a second row. A room without a network name keeps one row. |
+
+### Sort keys
+
+| Key | First |
+|---|---|
+| `"mentions"` | rooms with unread mentions of you: whether a room has any, not how many |
+| `"unread"` | rooms with unread messages, the rooms that `filter = "unread"` takes: any badge |
+| `"recent"` | the latest activity, newest first; rooms without any last |
+| `"read"` | the rooms you read most recently, by your own latest read receipt in the room, sent from any device; rooms you never read last |
+| `"name"` | by the displayed name (`network / room`), ignoring case, which groups rooms by network |
+
+`sort = "mentions, unread, read"` lists the rooms with unread mentions
+first, then the other unread rooms, then the rest, each group by when you
+last read its rooms. With `"read"`, a room you open moves up when its newest
+message is newer than your last read receipt in it, once the homeserver
+sends the receipt back; opening a room with nothing new leaves it in place,
+since homeservers keep a read receipt only when it moves forward. With
+`"unread"` or `"mentions"`, a room you read moves at once.
 
 ## `[files]`
 

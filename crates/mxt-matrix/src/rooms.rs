@@ -7,7 +7,13 @@ use matrix_sdk::{
     Client, Room, RoomDisplayName, RoomMemberships, RoomState,
     deserialized_responses::SyncOrStrippedState,
     notification_settings::{NotificationSettings, RoomNotificationMode},
-    ruma::{self, OwnedRoomId, OwnedUserId, events::space::parent::SpaceParentEventContent},
+    ruma::{
+        self, OwnedRoomId, OwnedUserId,
+        events::{
+            receipt::{ReceiptThread, ReceiptType},
+            space::parent::SpaceParentEventContent,
+        },
+    },
 };
 use mxt_core::{
     ids::{RoomId, Timestamp},
@@ -40,6 +46,8 @@ pub(crate) struct RoomFacts {
     pub unread: UnreadCounts,
     pub mode: NotificationMode,
     pub latest: Option<Timestamp>,
+    /// The time of the user's own latest read receipt (see `last_read`).
+    pub last_read: Option<Timestamp>,
     pub bridge: Option<BridgeInfo>,
     pub canonical_parent_name: Option<String>,
     /// One entry per joined parent space, `""` for unnamed ones.
@@ -74,6 +82,7 @@ pub(crate) fn summary(facts: &RoomFacts) -> RoomSummary {
         unread: facts.unread,
         mode: facts.mode,
         latest_activity: facts.latest,
+        last_read: facts.last_read,
     }
 }
 
@@ -479,6 +488,7 @@ async fn room_facts(
         latest: room
             .latest_event_timestamp()
             .map(|ts| Timestamp::from_millis(ts.0.into())),
+        last_read: last_read(room).await?,
         bridge: bridge.map(|bridge| bridge.info),
         canonical_parent_name: parents
             .iter()
@@ -490,6 +500,24 @@ async fn room_facts(
             .collect(),
     };
     Ok((facts, parents))
+}
+
+/// The time of the user's own latest read receipt in the room, from any
+/// device (design, "Room list"): the latest `ts` among the stored `m.read`
+/// and `m.read.private` receipts, unthreaded and on the main timeline.
+/// Receipts in threads do not count: the store keeps them per thread root.
+/// `None` when the store has none with a time.
+async fn last_read(room: &Room) -> Result<Option<Timestamp>, Error> {
+    let mut latest = None;
+    for receipt_type in [ReceiptType::Read, ReceiptType::ReadPrivate] {
+        for thread in [ReceiptThread::Unthreaded, ReceiptThread::Main] {
+            let receipt = room
+                .load_user_receipt(receipt_type.clone(), &thread, room.own_user_id())
+                .await?;
+            latest = latest.max(receipt.and_then(|(_, receipt)| receipt.ts));
+        }
+    }
+    Ok(latest.map(|ts| Timestamp::from_millis(ts.0.into())))
 }
 
 /// From the store only: no `/members` request.
@@ -687,7 +715,14 @@ async fn joined_space_name(client: &Client, space: &ruma::RoomId) -> Result<Opti
 
 #[cfg(test)]
 mod tests {
-    use matrix_sdk::ruma::{owned_room_id, user_id};
+    use matrix_sdk::{
+        ruma::{
+            MilliSecondsSinceUnixEpoch, event_id, owned_device_id, owned_event_id, owned_room_id,
+            room_id, user_id,
+        },
+        test_utils::mocks::MatrixMockServer,
+    };
+    use matrix_sdk_test::{JoinedRoomBuilder, event_factory::EventFactory};
 
     use super::*;
     use crate::bridges::RoomType;
@@ -701,6 +736,7 @@ mod tests {
             unread: UnreadCounts::default(),
             mode: NotificationMode::Default,
             latest: None,
+            last_read: None,
             bridge: None,
             canonical_parent_name: None,
             joined_parent_names: Vec::new(),
@@ -898,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn counts_mode_and_latest_activity_pass_through() {
+    fn counts_mode_and_times_pass_through() {
         let unread = UnreadCounts {
             messages: 9,
             notifications: 4,
@@ -909,6 +945,7 @@ mod tests {
             unread,
             mode: NotificationMode::Mute,
             latest: Some(Timestamp::from_millis(1_700_000_000_000)),
+            last_read: Some(Timestamp::from_millis(1_600_000_000_000)),
             ..facts("Lobby")
         };
         let summary = summary(&room);
@@ -919,6 +956,68 @@ mod tests {
             summary.latest_activity,
             Some(Timestamp::from_millis(1_700_000_000_000))
         );
+        assert_eq!(
+            summary.last_read,
+            Some(Timestamp::from_millis(1_600_000_000_000))
+        );
+    }
+
+    /// The user's latest `m.read` or `m.read.private` receipt, unthreaded or
+    /// on the main timeline, from the store; not one in a thread, not
+    /// another user's.
+    #[tokio::test]
+    async fn the_read_time_is_the_latest_of_the_users_receipts_outside_threads() {
+        let server = MatrixMockServer::new().await;
+        let me = user_id!("@alice:example.org");
+        let client = server
+            .client_builder()
+            .logged_in_with_token("1234".to_owned(), me.to_owned(), owned_device_id!("DEVICE"))
+            // Plain HTTP; see the adapter's tests.
+            .on_builder(|builder| builder.disable_ssl_verification())
+            .build()
+            .await;
+        let settings = client.notification_settings().await;
+        let at = |millis: u32| Some(MilliSecondsSinceUnixEpoch(millis.into()));
+        let receipts = EventFactory::new()
+            .read_receipts()
+            .add_with_timestamp(
+                event_id!("$1:example.org"),
+                me,
+                ReceiptType::Read,
+                ReceiptThread::Unthreaded,
+                at(1000),
+            )
+            .add_with_timestamp(
+                event_id!("$2:example.org"),
+                me,
+                ReceiptType::ReadPrivate,
+                ReceiptThread::Main,
+                at(2000),
+            )
+            .add_with_timestamp(
+                event_id!("$3:example.org"),
+                me,
+                ReceiptType::Read,
+                ReceiptThread::Thread(owned_event_id!("$root:example.org")),
+                at(3000),
+            )
+            .add_with_timestamp(
+                event_id!("$4:example.org"),
+                user_id!("@bob:example.org"),
+                ReceiptType::Read,
+                ReceiptThread::Unthreaded,
+                at(4000),
+            )
+            .into_event();
+        let read = JoinedRoomBuilder::new(room_id!("!read:example.org")).add_receipt(receipts);
+        let read = server.sync_room(&client, read).await;
+        let (facts, _) = room_facts(&client, &settings, &read).await.unwrap();
+        assert_eq!(facts.last_read, Some(Timestamp::from_millis(2000)));
+
+        let never = JoinedRoomBuilder::new(room_id!("!never:example.org"));
+        let never = server.sync_room(&client, never).await;
+        let (facts, _) = room_facts(&client, &settings, &never).await.unwrap();
+        assert_eq!(facts.last_read, None);
     }
 
     #[test]

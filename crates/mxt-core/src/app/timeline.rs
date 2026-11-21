@@ -290,7 +290,7 @@ impl App {
         };
         let (room, event) = (room.clone(), event.clone());
         self.timeline.receipt = Some(event.clone());
-        self.rooms.clear_unread(&room);
+        self.clear_room_unread(&room);
         effects.push(Effect::Matrix(MatrixEffect::SendReceipt { room, event }));
     }
 

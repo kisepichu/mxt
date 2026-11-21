@@ -88,6 +88,10 @@ pub struct RoomSummary {
     pub mode: NotificationMode,
     /// The time of the latest activity, if the SDK knows one.
     pub latest_activity: Option<Timestamp>,
+    /// The time of the user's own latest read receipt in the room, from any
+    /// device, for the `read` sort key (design, "Room list"); `None` when
+    /// the user never read it.
+    pub last_read: Option<Timestamp>,
 }
 
 /// A pending invite, for `:join`'s completion (design, "Joining rooms and
