@@ -17,6 +17,9 @@ pub enum TableId {
     Normal,
     RoomList,
     Timeline,
+    /// A thread is shown in place of the timeline; falls back to
+    /// `timeline`, then `normal`.
+    Thread,
     ComposerNormal,
     ComposerVisual,
     ComposerInsert,
@@ -28,10 +31,11 @@ pub enum TableId {
 }
 
 impl TableId {
-    pub const ALL: [TableId; 10] = [
+    pub const ALL: [TableId; 11] = [
         TableId::Normal,
         TableId::RoomList,
         TableId::Timeline,
+        TableId::Thread,
         TableId::ComposerNormal,
         TableId::ComposerVisual,
         TableId::ComposerInsert,
@@ -41,13 +45,15 @@ impl TableId {
         TableId::CommandLine,
     ];
 
-    /// "normal", "room_list", "timeline", "composer.normal", "composer.visual",
-    /// "composer.insert", "composer.completion", "message_view", "picker", "command_line".
+    /// "normal", "room_list", "timeline", "thread", "composer.normal",
+    /// "composer.visual", "composer.insert", "composer.completion",
+    /// "message_view", "picker", "command_line".
     pub fn config_name(self) -> &'static str {
         match self {
             TableId::Normal => "normal",
             TableId::RoomList => "room_list",
             TableId::Timeline => "timeline",
+            TableId::Thread => "thread",
             TableId::ComposerNormal => "composer.normal",
             TableId::ComposerVisual => "composer.visual",
             TableId::ComposerInsert => "composer.insert",
@@ -64,6 +70,8 @@ impl TableId {
 pub enum InputContext {
     RoomList,
     Timeline,
+    /// The timeline has focus and shows a thread.
+    Thread,
     ComposerNormal,
     ComposerVisual,
     ComposerInsert,
@@ -92,9 +100,10 @@ pub enum KeySink {
 impl InputContext {
     /// In declaration order, so `context as usize` indexes arrays built from it
     /// (checked below).
-    const ALL: [InputContext; 10] = [
+    const ALL: [InputContext; 11] = [
         InputContext::RoomList,
         InputContext::Timeline,
+        InputContext::Thread,
         InputContext::ComposerNormal,
         InputContext::ComposerVisual,
         InputContext::ComposerInsert,
@@ -110,6 +119,7 @@ impl InputContext {
         match self {
             InputContext::RoomList => &[TableId::RoomList, TableId::Normal],
             InputContext::Timeline => &[TableId::Timeline, TableId::Normal],
+            InputContext::Thread => &[TableId::Thread, TableId::Timeline, TableId::Normal],
             InputContext::ComposerNormal => &[TableId::ComposerNormal, TableId::Normal],
             InputContext::ComposerVisual => &[TableId::ComposerVisual, TableId::Normal],
             InputContext::ComposerInsert => &[TableId::ComposerInsert],
@@ -125,7 +135,7 @@ impl InputContext {
 
     pub fn sink(self) -> KeySink {
         match self {
-            InputContext::RoomList | InputContext::Timeline => KeySink::Drop,
+            InputContext::RoomList | InputContext::Timeline | InputContext::Thread => KeySink::Drop,
             InputContext::ComposerNormal
             | InputContext::ComposerVisual
             | InputContext::ComposerInsert
@@ -136,9 +146,13 @@ impl InputContext {
         }
     }
 
-    /// Whether digits start a count prefix: RoomList and Timeline only.
+    /// Whether digits start a count prefix: in the room list and the
+    /// timeline, a thread's included.
     pub fn counts(self) -> bool {
-        matches!(self, InputContext::RoomList | InputContext::Timeline)
+        matches!(
+            self,
+            InputContext::RoomList | InputContext::Timeline | InputContext::Thread
+        )
     }
 }
 
@@ -232,6 +246,11 @@ const DEFAULTS: &[(&[TableId], &str, Action)] = &[
     (&[TableId::Timeline], "gx", Action::MessageOpen),
     (&[TableId::Timeline], "gd", Action::MessageGotoReply),
     (&[TableId::Timeline], "R", Action::MessageResend),
+    (&[TableId::Timeline], "t", Action::ThreadOpen),
+    // The main timeline binds neither, so a binding of them in `normal`
+    // still applies there.
+    (&[TableId::Thread], "q", Action::ThreadClose),
+    (&[TableId::Thread], "<Esc>", Action::ThreadClose),
     (&[TableId::ComposerInsert], "<CR>", Action::ComposerSend),
     (&[TableId::ComposerInsert], "<C-j>", Action::ComposerNewline),
     (
@@ -608,6 +627,33 @@ mod tests {
     }
 
     #[test]
+    fn a_thread_looks_in_thread_then_timeline_then_normal() {
+        let km = Keymap::new(
+            &space(),
+            [
+                (TableId::Normal, seq("q"), one(Action::AppQuit)),
+                (TableId::Timeline, seq("x"), one(Action::MessageDelete)),
+                (TableId::Thread, seq("x"), one(Action::MessageYank)),
+            ],
+        );
+        let thread = km.effective(InputContext::Thread);
+        let timeline = km.effective(InputContext::Timeline);
+        let action = |map: &EffectiveMap, keys: &str| map.get(seq(keys).keys()).cloned();
+        assert_eq!(action(thread, "q"), Some(one(Action::ThreadClose)));
+        assert_eq!(action(thread, "<Esc>"), Some(one(Action::ThreadClose)));
+        assert_eq!(action(thread, "x"), Some(one(Action::MessageYank)));
+        assert_eq!(action(thread, "t"), Some(one(Action::ThreadOpen)));
+        assert_eq!(action(thread, "j"), Some(one(Action::CursorDown)));
+        assert_eq!(action(thread, ":"), Some(one(Action::CommandLineOpen)));
+        // The main timeline binds neither `q` nor `<Esc>`.
+        assert_eq!(action(timeline, "q"), Some(one(Action::AppQuit)));
+        assert_eq!(action(timeline, "<Esc>"), None);
+        assert_eq!(action(timeline, "x"), Some(one(Action::MessageDelete)));
+        assert!(InputContext::Thread.counts());
+        assert_eq!(InputContext::Thread.sink(), KeySink::Drop);
+    }
+
+    #[test]
     fn the_arguments_of_every_default_binding_build_the_same_action() {
         let km = Keymap::new(&space(), []);
         for id in TableId::ALL {
@@ -690,6 +736,7 @@ mod tests {
                 "[keymap.normal]",
                 "[keymap.room_list]",
                 "[keymap.timeline]",
+                "[keymap.thread]",
                 "[keymap.composer.normal]",
                 "[keymap.composer.visual]",
                 "[keymap.composer.insert]",
@@ -739,5 +786,10 @@ mod tests {
         assert!(at("dd") < at("<C-d>") && at("<C-d>") < at("e"));
 
         assert_eq!(section(&text, "composer.visual"), Vec::<&str>::new());
+        let thread = section(&text, "thread");
+        for line in ["q -> thread.close", "<Esc> -> thread.close"] {
+            assert!(thread.contains(&line), "{line}: {thread:#?}");
+        }
+        assert!(timeline.contains(&"t -> thread.open"), "{timeline:#?}");
     }
 }

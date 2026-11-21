@@ -1,5 +1,6 @@
-//! The open room's timeline: the matrix-sdk-ui `Timeline` subscription, its
-//! back pagination, and the conversion of its items into core entries.
+//! The open room's timelines, its main timeline and its open thread's: the
+//! matrix-sdk-ui `Timeline` subscriptions, their back pagination, and the
+//! conversion of their items into core entries.
 
 use std::{collections::HashSet, num::NonZeroU32, pin::pin, sync::Arc};
 
@@ -61,9 +62,11 @@ const PAGE: u16 = 20;
 /// reload. Above this, senders keep what lazy loading gives them.
 const MEMBERS_FETCH_LIMIT: u64 = 500;
 
-/// The open room's main timeline, and its tasks: the one that forwards its
-/// diffs, the one that fetches reply details, the one that loads the room's
-/// members (see `MEMBERS_FETCH_LIMIT`), and a back pagination in flight.
+/// A subscribed timeline, the open room's main timeline or its open
+/// thread's, and its tasks: the one that forwards its diffs, the one that
+/// fetches reply details, for the main timeline the one that loads the
+/// room's members (see `MEMBERS_FETCH_LIMIT`), and a back pagination in
+/// flight.
 pub(crate) struct Subscription {
     id: TimelineId,
     timeline: Arc<Timeline>,
@@ -71,27 +74,34 @@ pub(crate) struct Subscription {
 }
 
 impl Subscription {
-    /// Builds `sdk_room`'s main timeline, without the replies in threads
-    /// (design, "Threads"), sends its items as one `Msg::Timeline` with a
-    /// `Reset`, then every batch of its diffs as one `Msg::Timeline`, each
-    /// for the room's main timeline. The SDK's diffs are forwarded as they
-    /// are: a remote echo replaces its local echo with `Remove` and `Insert`
-    /// or `PushBack`. Members are lazy-loaded, so the SDK may lack the
-    /// profiles of senders, the user's own included; in rooms of up to
-    /// `MEMBERS_FETCH_LIMIT` joined members the room's members are loaded in
-    /// the background, and the senders' names arrive as `Set` diffs.
+    /// Builds the timeline `id` of `sdk_room`: the main timeline without
+    /// the replies in threads, or a thread's, root first once its start is
+    /// loaded (design, "Threads"). Sends its items as one `Msg::Timeline`
+    /// with a `Reset`, then every batch of its diffs as one `Msg::Timeline`,
+    /// each for `id`. The SDK's diffs are forwarded as they are: a remote
+    /// echo replaces its local echo with `Remove` and `Insert` or
+    /// `PushBack`. Members are lazy-loaded, so the SDK may lack the
+    /// profiles of senders, the user's own included; with the main timeline
+    /// of a room of up to `MEMBERS_FETCH_LIMIT` joined members the room's
+    /// members are loaded in the background, and the senders' names arrive
+    /// as `Set` diffs; a thread's timeline does not load them again.
     pub(crate) async fn start(
         sdk_room: &Room,
-        room: RoomId,
+        id: TimelineId,
         to_core: UnboundedSender<Msg>,
     ) -> Result<Subscription, Error> {
-        // The SDK makes no item of an event in a thread, remote or local.
-        let focus = TimelineFocus::Live {
-            hide_threaded_events: true,
+        let focus = match &id.thread {
+            // The SDK makes no item of an event in a thread, remote or
+            // local.
+            None => TimelineFocus::Live {
+                hide_threaded_events: true,
+            },
+            Some(root) => TimelineFocus::Thread {
+                root_event_id: event_id(root)?,
+            },
         };
         let built = sdk_room.timeline_builder().with_focus(focus).build().await;
         let timeline = Arc::new(built.map_err(timeline_error)?);
-        let id = TimelineId::main(room);
         let me = sdk_room.own_user_id().to_owned();
         let (items, diffs) = timeline.subscribe().await;
         let (to_fetch, fetches) = mpsc::unbounded_channel();
@@ -109,7 +119,7 @@ impl Subscription {
         let mut tasks = JoinSet::new();
         tasks.spawn(forward(id.clone(), me, diffs, replies, to_core));
         tasks.spawn(fetch_reply_details(timeline.clone(), fetches));
-        if sdk_room.joined_members_count() <= MEMBERS_FETCH_LIMIT {
+        if id.thread.is_none() && sdk_room.joined_members_count() <= MEMBERS_FETCH_LIMIT {
             let members = timeline.clone();
             tasks.spawn(async move { members.fetch_members().await });
         }
@@ -409,6 +419,17 @@ pub(crate) async fn message_type(
         .content()
         .as_message()
         .map(|message| message.msgtype().clone()))
+}
+
+/// Whether `timeline` has `item` among its items.
+pub(crate) async fn holds(timeline: &Timeline, item: &ItemRef) -> bool {
+    let Ok(id) = item_id(item) else {
+        return false;
+    };
+    timeline.items().await.iter().any(|item| {
+        item.as_event()
+            .is_some_and(|event| event.identifier() == id)
+    })
 }
 
 /// The SDK disables a room's send queue after any failed request, and only

@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use super::rooms::RoomSwitch;
 use super::{App, StatusKind};
 use crate::effect::{Effect, UiEffect};
-use crate::ids::{EventId, RoomId};
+use crate::ids::{EventId, TimelineId};
 use crate::resolver::TimerId;
 use crate::timeline::ItemRef;
 
@@ -22,11 +22,12 @@ const LOADING: &str = "Loading older messages…";
 /// `Msg::PaginationDone`.
 const GRACE_MS: u64 = 1000;
 
-/// A position: a room and the remote event under its timeline cursor, or
-/// the room alone when there is none (an empty timeline, a local echo).
+/// A position: a timeline (a room's main timeline, or a thread shown in its
+/// place) and the remote event under its cursor, or the timeline alone when
+/// there is none (an empty timeline, a local echo).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Jump {
-    room: RoomId,
+    timeline: TimelineId,
     event: Option<EventId>,
 }
 
@@ -103,23 +104,36 @@ pub(super) enum JumpDirection {
     Forward,
 }
 
-/// An entry whose event is not loaded: older messages load until it is, or
-/// until the room's start is loaded without it and a grace period passes.
-/// The entry is the one the list's index is on, in the open room. The next
-/// key or paste, a failed load and opening another room end the wait, and
-/// its grace period with it.
+/// An event that is not loaded: older messages load until it is, or until
+/// the shown timeline's start is loaded without it and a grace period
+/// passes. The next key or paste, a failed load and opening another room
+/// end the wait, and its grace period with it.
 pub(super) struct JumpWait {
     event: EventId,
-    direction: JumpDirection,
-    skipped: Skipped,
-    /// The grace period's timer, while the room's start is loaded without
-    /// the event.
+    then: AfterGone,
+    /// The grace period's timer, while the timeline's start is loaded
+    /// without the event.
     grace: Option<TimerId>,
+}
+
+/// What follows when a waited-for event is gone.
+#[derive(Clone, Copy)]
+pub(super) enum AfterGone {
+    /// The jump list goes on to the next entry in `direction` from the one
+    /// its index is on, in the open room; `skipped` are the entries skipped
+    /// on the way, for the status line.
+    Next {
+        direction: JumpDirection,
+        skipped: Skipped,
+    },
+    /// The cursor follows the newest message: `thread.close`'s wait for the
+    /// root, and `gd`'s for a message in another thread.
+    Follow,
 }
 
 /// The entries skipped on the way, for the status line.
 #[derive(Clone, Copy, Default)]
-struct Skipped {
+pub(super) struct Skipped {
     /// Entries of rooms that are not in the room list.
     left: usize,
     /// Entries whose event is not in their room's timeline from its start.
@@ -153,24 +167,26 @@ enum Reach {
     Room(usize),
     /// The room is not in the room list.
     Left,
-    /// The room is open, its start is loaded, and the event is not there.
+    /// The entry's timeline is the shown one or the open room's main
+    /// timeline kept aside for a thread, its start is loaded, and the event
+    /// is not there: judged at once, before the move.
     Gone,
 }
 
 impl App {
-    /// The position a jump records: the open room and the remote event
-    /// under its timeline cursor; `None` while no room is open.
+    /// The position a jump records: the shown timeline and the remote event
+    /// under its cursor; `None` while no room is open.
     fn position(&self) -> Option<Jump> {
-        let room = self.open_room.clone()?;
+        let timeline = self.shown_timeline()?;
         let event = match self.timeline.cursor_item().map(|item| &item.id) {
             Some(ItemRef::Remote(event)) => Some(event.clone()),
             Some(ItemRef::Local(_)) | None => None,
         };
-        Some(Jump { room, event })
+        Some(Jump { timeline, event })
     }
 
-    /// Records the position before a jump: opening another room, `gg`,
-    /// `G`, a search or `gd` in the timeline.
+    /// Records the position before a jump: opening another room, opening
+    /// or closing a thread, `gg`, `G`, a search or `gd` in the timeline.
     pub(super) fn record_jump(&mut self) {
         if let Some(position) = self.position() {
             self.jumps.record(position);
@@ -234,14 +250,12 @@ impl App {
     }
 
     fn reach(&self, jump: &Jump) -> Reach {
-        let Some(room) = self.rooms.position(&jump.room) else {
+        let Some(room) = self.rooms.position(&jump.timeline.room) else {
             return Reach::Left;
         };
-        match &jump.event {
-            Some(event)
-                if self.open_room.as_ref() == Some(&jump.room)
-                    && self.timeline.reached_start()
-                    && self.timeline.event_position(event).is_none() =>
+        match (&jump.event, self.kept_timeline(&jump.timeline)) {
+            (Some(event), Some(timeline))
+                if timeline.reached_start() && timeline.event_position(event).is_none() =>
             {
                 Reach::Gone
             }
@@ -251,9 +265,10 @@ impl App {
 
     /// Goes to the entry at `index`, whose room is at `room` in the room
     /// list: opens it without recording a jump, which focuses the timeline,
-    /// and puts the cursor on the entry's event, or makes it follow the
-    /// newest message for a room alone. An event that is not loaded is
-    /// waited for while older messages load.
+    /// shows the entry's timeline (see [`App::show_timeline`]), and puts the
+    /// cursor on the entry's event, or makes it follow the newest message
+    /// for a timeline alone. An event that is not loaded is waited for
+    /// while older messages load.
     fn go_to(
         &mut self,
         index: usize,
@@ -263,34 +278,59 @@ impl App {
         effects: &mut Vec<Effect>,
     ) {
         self.jumps.index = index;
-        let event = self.jumps.entries[index].event.clone();
+        let Jump { timeline, event } = self.jumps.entries[index].clone();
         self.open_at(room, RoomSwitch::FromJumpList, effects);
-        let Some(event) = event else {
-            self.timeline.follow();
-            return self.arrived(skipped);
-        };
+        self.show_timeline(&timeline, effects);
+        let then = AfterGone::Next { direction, skipped };
+        match event {
+            Some(event) => self.place_or_wait(event, then, effects),
+            None => {
+                self.timeline.follow();
+                self.arrived(then);
+            }
+        }
+    }
+
+    /// Puts the cursor on `event` in the shown timeline, or, when it is not
+    /// loaded, waits for it while older messages load; `then` says what
+    /// follows when it is gone.
+    pub(super) fn place_or_wait(
+        &mut self,
+        event: EventId,
+        then: AfterGone,
+        effects: &mut Vec<Effect>,
+    ) {
         if let Some(at) = self.timeline.event_position(&event) {
             self.place_timeline_cursor(at, effects);
-            return self.arrived(skipped);
+            return self.arrived(then);
         }
-        let text = match skipped.text() {
+        let skipped = match then {
+            AfterGone::Next { skipped, .. } => skipped.text(),
+            AfterGone::Follow => None,
+        };
+        let text = match skipped {
             Some(skipped) => format!("{skipped}; loading older messages…"),
             None => LOADING.to_owned(),
         };
         self.set_status(StatusKind::Info, text);
         self.jump_wait = Some(JumpWait {
             event,
-            direction,
-            skipped,
+            then,
             grace: None,
         });
-        self.paginate(effects);
+        // Loads older messages, or starts the grace period when the start is
+        // loaded already (of a main timeline kept aside, say).
+        self.check_jump_wait(effects);
     }
 
-    /// The status once the cursor is on the entry: what was skipped, or
+    /// The status once the cursor is where it goes: what was skipped, or
     /// nothing, and no [`LOADING`] left on the status line.
-    fn arrived(&mut self, skipped: Skipped) {
-        match skipped.text() {
+    fn arrived(&mut self, then: AfterGone) {
+        let skipped = match then {
+            AfterGone::Next { skipped, .. } => skipped.text(),
+            AfterGone::Follow => None,
+        };
+        match skipped {
             Some(text) => self.set_status(StatusKind::Info, text),
             None => {
                 if self.status().is_some_and(|status| status.text == LOADING) {
@@ -300,20 +340,20 @@ impl App {
         }
     }
 
-    /// After the open room's timeline changed or a page of older messages
+    /// After the shown timeline changed or a page of older messages
     /// arrived: the waited-for event gets the cursor once it is loaded; once
-    /// the room's start is loaded without it, the grace period starts, after
-    /// which the event is gone (see [`App::jump_grace_over`]); otherwise more
-    /// older messages load.
+    /// the timeline's start is loaded without it, the grace period starts,
+    /// after which the event is gone (see [`App::jump_grace_over`]);
+    /// otherwise more older messages load.
     pub(super) fn check_jump_wait(&mut self, effects: &mut Vec<Effect>) {
         let Some(wait) = &mut self.jump_wait else {
             return;
         };
         if let Some(at) = self.timeline.event_position(&wait.event) {
-            let skipped = wait.skipped;
+            let then = wait.then;
             self.jump_wait = None;
             self.place_timeline_cursor(at, effects);
-            return self.arrived(skipped);
+            return self.arrived(then);
         }
         if !self.timeline.reached_start() {
             // A reset timeline has its start to load again; the grace
@@ -332,16 +372,27 @@ impl App {
     }
 
     /// `Msg::Timeout`: when `id` is the wait's grace timer, the event is
-    /// gone, and the next entry in the same direction is gone to. Whether
-    /// it was.
+    /// gone: the next entry in the same direction is gone to, or the cursor
+    /// follows the newest message. Whether it was.
     pub(super) fn jump_grace_over(&mut self, id: TimerId, effects: &mut Vec<Effect>) -> bool {
         let Some(wait) = self.jump_wait.take_if(|wait| wait.grace == Some(id)) else {
             return false;
         };
-        let mut skipped = wait.skipped;
-        skipped.gone += 1;
-        // With no entry left, the room stays open: the jump went there.
-        self.jump_from(self.jumps.index, wait.direction, skipped, effects);
+        match wait.then {
+            AfterGone::Next {
+                direction,
+                mut skipped,
+            } => {
+                skipped.gone += 1;
+                // With no entry left, the room stays open: the jump went
+                // there.
+                self.jump_from(self.jumps.index, direction, skipped, effects);
+            }
+            AfterGone::Follow => {
+                self.timeline.follow();
+                self.arrived(AfterGone::Follow);
+            }
+        }
         true
     }
 }

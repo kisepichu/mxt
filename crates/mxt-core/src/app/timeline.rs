@@ -1,9 +1,13 @@
-//! The open room's timeline: its diffs, the cursor, back pagination, read
-//! receipts, and the message actions on the item under the cursor.
+//! The shown timeline (the open room's main timeline, or a thread in its
+//! place): its diffs, the cursor, back pagination, read receipts, and the
+//! message actions on the item under the cursor.
 
+use std::collections::HashSet;
+
+use super::jumps::AfterGone;
 use super::{App, Confirm, Focus, Motion, StatusKind, View};
 use crate::effect::{Effect, MatrixEffect, UiEffect, ViewContent};
-use crate::ids::{EventId, TimelineId, Timestamp};
+use crate::ids::{EventId, RoomId, TimelineId, Timestamp};
 use crate::msg::Pane;
 use crate::rich::is_web_url;
 use crate::settings::ImagePreview;
@@ -19,7 +23,8 @@ const PAGINATE_WITHIN: usize = 10;
 /// Why an action that needs the item's remote event refuses a local echo.
 pub(super) const NOT_SENT: &str = "Wait until the message is sent";
 
-/// The open room's main timeline state; opening a room starts a new one.
+/// A timeline's state, the open room's main timeline or a thread's; opening
+/// a room or a thread starts a new one.
 #[derive(Default)]
 pub(super) struct Timeline {
     entries: Vec<TimelineEntry>,
@@ -33,6 +38,10 @@ pub(super) struct Timeline {
     /// latest activity at `room.mark_read`. Thread roots with a newer reply
     /// are marked unread (design, "Threads").
     read_up_to: Option<Timestamp>,
+    /// In the main timeline, the threads' events that got an unthreaded
+    /// receipt since mxt opened the room: a thread opened again sends them
+    /// no receipt, so none gets a threaded one too (design, "Threads").
+    unthreaded_thread_receipts: HashSet<EventId>,
 }
 
 /// An item and its index in the entries.
@@ -41,14 +50,14 @@ struct Anchor {
     item: ItemRef,
 }
 
-/// Back pagination of the open room's timeline.
+/// Back pagination of a timeline.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum Pagination {
     #[default]
     Idle,
     /// A `PaginateBackwards` request is in flight.
     InFlight,
-    /// The room's start is loaded.
+    /// The timeline's start is loaded.
     ReachedStart,
 }
 
@@ -149,6 +158,13 @@ impl Timeline {
         })
     }
 
+    /// The remote item of `event`.
+    pub(super) fn event_item(&self, event: &EventId) -> Option<&TimelineItem> {
+        self.entries.iter().find_map(|entry| {
+            as_item(entry).filter(|item| matches!(&item.id, ItemRef::Remote(id) if id == event))
+        })
+    }
+
     /// The newest remote item: the event a receipt goes on, with its
     /// timestamp.
     fn newest_remote_event(&self) -> Option<(&EventId, Timestamp)> {
@@ -160,16 +176,37 @@ impl Timeline {
             }
         })
     }
+
+    /// Whether the last receipt requested is on the newest remote item and
+    /// that item is older than `time`.
+    fn read_before(&self, time: Timestamp) -> bool {
+        self.newest_remote_event()
+            .is_some_and(|(event, at)| self.receipt.as_ref() == Some(event) && at < time)
+    }
+
+    /// The `PaginateBackwards` request in flight failed, so another may go
+    /// out.
+    fn request_ended(&mut self) {
+        if self.pagination == Pagination::InFlight {
+            self.pagination = Pagination::Idle;
+        }
+    }
 }
 
 impl App {
-    /// `Msg::Timeline`: only the open room's main timeline's diffs count.
+    /// `Msg::Timeline`: the shown timeline's diffs, and the main timeline's
+    /// while a thread is shown, which go to it aside without moving
+    /// anything else: no pagination, receipt or jump wait looks at it until
+    /// it is shown again. Other timelines' diffs are ignored.
     pub(super) fn timeline_diffs(
         &mut self,
         timeline: &TimelineId,
         diffs: Vec<TimelineDiff>,
         effects: &mut Vec<Effect>,
     ) {
+        if let Some(main) = self.main_aside(timeline) {
+            return main.apply(diffs);
+        }
         if !self.shows(timeline) {
             return;
         }
@@ -177,6 +214,32 @@ impl App {
         self.check_jump_wait(effects);
         self.check_pagination(effects);
         self.check_receipt(effects);
+    }
+
+    /// The open room's main timeline while it is kept aside for a thread,
+    /// when `timeline` names it.
+    fn main_aside(&mut self, timeline: &TimelineId) -> Option<&mut Timeline> {
+        if !self.names_open_main(timeline) {
+            return None;
+        }
+        self.thread.as_mut().map(|open| &mut open.main)
+    }
+
+    /// The state of `timeline` when the core has it: the shown timeline, or
+    /// the open room's main timeline kept aside for a thread.
+    pub(super) fn kept_timeline(&self, timeline: &TimelineId) -> Option<&Timeline> {
+        if self.shows(timeline) {
+            Some(&self.timeline)
+        } else if self.names_open_main(timeline) {
+            self.thread.as_ref().map(|open| &open.main)
+        } else {
+            None
+        }
+    }
+
+    /// Whether `timeline` is the open room's main timeline.
+    fn names_open_main(&self, timeline: &TimelineId) -> bool {
+        timeline.thread.is_none() && self.open_room.as_ref() == Some(&timeline.room)
     }
 
     /// `Msg::PaginationDone`. Pagination goes on while the cursor is still
@@ -187,27 +250,36 @@ impl App {
         reached_start: bool,
         effects: &mut Vec<Effect>,
     ) {
-        if !self.shows(timeline) {
-            return;
-        }
-        self.timeline.pagination = if reached_start {
+        let pagination = if reached_start {
             Pagination::ReachedStart
         } else {
             Pagination::Idle
         };
+        if let Some(main) = self.main_aside(timeline) {
+            main.pagination = pagination;
+            return;
+        }
+        if !self.shows(timeline) {
+            return;
+        }
+        self.timeline.pagination = pagination;
         self.check_jump_wait(effects);
         self.check_pagination(effects);
     }
 
     /// `Msg::PaginationFailed`. The next cursor move or timeline change may
-    /// request again, so a persistent failure does not repeat in a loop.
+    /// request again, so a persistent failure does not repeat in a loop. A
+    /// failure of the main timeline kept aside says nothing: the timeline
+    /// on the pane loads.
     pub(super) fn pagination_failed(&mut self, timeline: &TimelineId, error: String) {
+        if let Some(main) = self.main_aside(timeline) {
+            main.request_ended();
+            return;
+        }
         if !self.shows(timeline) {
             return;
         }
-        if self.timeline.pagination == Pagination::InFlight {
-            self.timeline.pagination = Pagination::Idle;
-        }
+        self.timeline.request_ended();
         // The failure's status says why the jump stops short.
         self.jump_wait = None;
         self.set_status(
@@ -287,7 +359,14 @@ impl App {
     /// receipts") while the terminal is focused and the timeline's last
     /// viewport includes the newest item, clears the room's counts (design,
     /// "Optimistic clearing"), and marks the room read up to the event's
-    /// time for the thread roots' marks.
+    /// time for the thread roots' marks. A thread's receipt is threaded,
+    /// clears nothing and marks nothing read, unless the main timeline is
+    /// read to its newest message and that is older than the thread's
+    /// event: then it is unthreaded and does both (design, "Threads"). The
+    /// root alone gets none: it is in the main timeline, whose receipt
+    /// covers it. Nor does an event that got a thread's unthreaded receipt
+    /// since the room opened, when its thread opens again: that receipt
+    /// read it, and the homeserver drops a threaded one next to it.
     pub(super) fn check_receipt(&mut self, effects: &mut Vec<Effect>) {
         let (Some(room), Some(viewport)) = (&self.open_room, self.timeline_viewport) else {
             return;
@@ -301,18 +380,36 @@ impl App {
         if !(viewport.first..=viewport.last).contains(&newest) {
             return;
         }
-        let Some((event, time)) = self
-            .timeline
-            .newest_remote_event()
-            .filter(|&(event, _)| self.timeline.receipt.as_ref() != Some(event))
-        else {
+        let root = self.thread.as_ref().map(|open| &open.root);
+        let Some((event, time)) = self.timeline.newest_remote_event().filter(|&(event, _)| {
+            self.timeline.receipt.as_ref() != Some(event) && root != Some(event)
+        }) else {
             return;
         };
         let (room, event) = (room.clone(), event.clone());
         self.timeline.receipt = Some(event.clone());
-        self.timeline.read_up_to_at_least(time);
-        self.clear_room_unread(&room);
-        effects.push(Effect::Matrix(MatrixEffect::SendReceipt { room, event }));
+        let Some(open) = &mut self.thread else {
+            self.timeline.read_up_to_at_least(time);
+            self.clear_room_unread(&room);
+            return effects.push(Effect::Matrix(MatrixEffect::SendReceipt { room, event }));
+        };
+        if open.main.unthreaded_thread_receipts.contains(&event) {
+            return;
+        }
+        let unthreaded = open.main.read_before(time);
+        if unthreaded {
+            open.main.unthreaded_thread_receipts.insert(event.clone());
+            open.main.read_up_to_at_least(time);
+        }
+        effects.push(Effect::Matrix(MatrixEffect::SendThreadReceipt {
+            room: room.clone(),
+            root: open.root.clone(),
+            event,
+            unthreaded,
+        }));
+        if unthreaded {
+            self.clear_room_unread(&room);
+        }
     }
 
     /// `message.view`: the item in the full-screen view. An image shows its
@@ -448,11 +545,12 @@ impl App {
         effects.push(Effect::Ui(UiEffect::OpenPath(path)));
     }
 
-    /// `file.upload`: sends the file at `path` to the open room.
+    /// `file.upload`: sends the file at `path` into the shown timeline, the
+    /// open room's or its thread's.
     pub(super) fn upload(&mut self, path: &str, effects: &mut Vec<Effect>) {
-        match &self.open_room {
-            Some(room) => effects.push(Effect::Matrix(MatrixEffect::Upload {
-                room: room.clone(),
+        match self.shown_timeline() {
+            Some(timeline) => effects.push(Effect::Matrix(MatrixEffect::Upload {
+                timeline,
                 path: path.to_owned(),
             })),
             None => self.set_status(StatusKind::Error, "No room is open"),
@@ -460,14 +558,23 @@ impl App {
     }
 
     /// Starts a new timeline when another room or no room is open, and closes
-    /// what belongs to the previous one: its viewport, which must not count
-    /// for the new room's entries before the new room is drawn, the wait for
-    /// a jump's message, a message view (a help view stays), the picker, a
-    /// confirmation, and the focus and mention menu of its composer.
+    /// what belongs to the previous one: its open thread, which it
+    /// unsubscribes, its viewport, which must not count for the new room's
+    /// entries before the new room is drawn, the wait for a jump's message
+    /// and `gd`'s question, a message view (a help view stays), the picker,
+    /// a confirmation, and the focus and mention menu of its composer. Runs
+    /// while the previous room is still the open one.
     pub(super) fn reset_timeline(&mut self, effects: &mut Vec<Effect>) {
+        if let (Some(open), Some(room)) = (self.thread.take(), &self.open_room) {
+            effects.push(Effect::Matrix(MatrixEffect::UnsubscribeThread {
+                room: room.clone(),
+                root: open.root,
+            }));
+        }
         self.timeline = Timeline::default();
         self.timeline_viewport = None;
         self.jump_wait = None;
+        self.reply_lookup = None;
         if matches!(self.view, Some(View::Message(_))) {
             self.close_view(effects);
         }
@@ -486,25 +593,72 @@ impl App {
         }
     }
 
-    /// `message.goto_reply`: the cursor moves to the replied-to message if it
-    /// is loaded.
+    /// `message.goto_reply` (design, "Threads"): the cursor moves to the
+    /// replied-to message if the shown timeline holds it. In a thread, it
+    /// then looks in the main timeline kept aside, and goes there, closing
+    /// the thread as going to a jump list entry without a thread does.
+    /// Otherwise it asks the adapter which thread holds the message (see
+    /// [`App::thread_found`]).
     pub(super) fn goto_reply(&mut self, effects: &mut Vec<Effect>) {
         let Some(item) = self.timeline.cursor_item() else {
             return;
         };
-        let target = item
-            .reply
+        let Some(reply) = &item.reply else {
+            return self.set_status(StatusKind::Error, "The message is not a reply");
+        };
+        let event = reply.event.clone();
+        if let Some(index) = self.timeline.event_position(&event) {
+            self.record_jump();
+            return self.place_timeline_cursor(index, effects);
+        }
+        if self
+            .thread
             .as_ref()
-            .map(|reply| self.timeline.event_position(&reply.event));
-        match target {
-            Some(Some(index)) => {
+            .is_some_and(|open| open.main.event_position(&event).is_some())
+        {
+            self.record_jump();
+            self.leave_thread(effects);
+            return self.place_or_wait(event, AfterGone::Follow, effects);
+        }
+        let Some(room) = self.open_room.clone() else {
+            return;
+        };
+        self.reply_lookup = Some((room.clone(), event.clone()));
+        effects.push(Effect::Matrix(MatrixEffect::FindThread { room, event }));
+    }
+
+    /// `Msg::ThreadFound`, for `gd`'s question while it holds: in a thread
+    /// other than the shown one, `gd` records the jump and goes to the
+    /// message there, as going to a jump list entry does, loading the
+    /// thread's older replies until it arrives. In no thread or in the shown
+    /// one, the message is not loaded: `gd` loads nothing in the timeline it
+    /// is used in.
+    pub(super) fn thread_found(
+        &mut self,
+        room: &RoomId,
+        event: &EventId,
+        root: Option<EventId>,
+        effects: &mut Vec<Effect>,
+    ) {
+        if !self
+            .reply_lookup
+            .as_ref()
+            .is_some_and(|(asked, about)| asked == room && about == event)
+        {
+            return;
+        }
+        self.reply_lookup = None;
+        match root {
+            Some(root) if self.thread.as_ref().is_none_or(|open| open.root != root) => {
                 self.record_jump();
-                self.place_timeline_cursor(index, effects);
+                let thread = TimelineId {
+                    room: room.clone(),
+                    thread: Some(root),
+                };
+                self.show_timeline(&thread, effects);
+                self.place_or_wait(event.clone(), AfterGone::Follow, effects);
             }
-            Some(None) => {
-                self.set_status(StatusKind::Error, "The replied-to message is not loaded");
-            }
-            None => self.set_status(StatusKind::Error, "The message is not a reply"),
+            _ => self.set_status(StatusKind::Error, "The replied-to message is not loaded"),
         }
     }
 

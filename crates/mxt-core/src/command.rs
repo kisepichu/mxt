@@ -80,7 +80,7 @@ pub static COMMANDS: &[Command] = &[
     Command {
         name: "upload",
         argument: Argument::Required(":upload <path>"),
-        description: "Send a file to the open room",
+        description: "Send a file to the open room, or into its open thread",
         action: |path| {
             Ok(Action::FileUpload {
                 path: path.to_owned(),

@@ -55,7 +55,7 @@ fn clear(room: &str) -> Effect {
 /// The send of `body` from `!c`, the app's `n`-th from 0.
 fn send(n: u64, body: RenderedBody, kind: OutgoingKind) -> Effect {
     matrix(MatrixEffect::Send {
-        room: id(C),
+        timeline: main_of(C),
         id: SendId(n),
         message: Outgoing { body, kind },
     })

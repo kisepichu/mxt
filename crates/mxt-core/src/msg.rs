@@ -1,6 +1,6 @@
 //! Messages: what the adapters report to `App::update`.
 
-use crate::ids::{RoomId, SendId, TimelineId, UserId};
+use crate::ids::{EventId, RoomId, SendId, TimelineId, UserId};
 use crate::keys::Key;
 use crate::mention::Member;
 use crate::resolver::TimerId;
@@ -71,7 +71,7 @@ pub enum Msg {
     RoomRemoved(RoomId),
     SyncState(SyncState),
     /// Changes of a timeline, in order; ignored unless it is the open room's
-    /// main timeline.
+    /// main timeline or its open thread.
     Timeline {
         timeline: TimelineId,
         diffs: Vec<TimelineDiff>,
@@ -170,5 +170,13 @@ pub enum Msg {
     NoDirectMessage {
         target: String,
         user: UserId,
+    },
+    /// The thread that holds `event` in `room`, answering
+    /// `MatrixEffect::FindThread`: its root, or `None` for an event in no
+    /// thread or one the event cache does not have.
+    ThreadFound {
+        room: RoomId,
+        event: EventId,
+        root: Option<EventId>,
     },
 }

@@ -1,12 +1,13 @@
-//! The timeline pane (design, "Timeline"): the open room's entries, oldest at
-//! the top. The cursor item stays in view: when the cursor moves off the
-//! pane, the view scrolls just far enough to bring its item in at the edge
-//! it moved towards, so it never jumps. The newest entry is at the bottom
-//! while the cursor follows the newest item and after a frame that showed
-//! the newest entry's last row. A pane taller than in the last frame shows
-//! its new rows below the cursor item first, so the newest entry is back at
-//! the bottom when it fits. Only the entries around the cursor are laid
-//! out, so a long timeline costs no more per frame.
+//! The timeline pane (design, "Timeline"): the shown timeline's entries, the
+//! open room's or its thread's, oldest at the top. The cursor item stays in
+//! view: when the cursor moves off the pane, the view scrolls just far
+//! enough to bring its item in at the edge it moved towards, so it never
+//! jumps. The newest entry is at the bottom while the cursor follows the
+//! newest item and after a frame that showed the newest entry's last row. A
+//! pane taller than in the last frame shows its new rows below the cursor
+//! item first, so the newest entry is back at the bottom when it fits. Only
+//! the entries around the cursor are laid out, so a long timeline costs no
+//! more per frame.
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -14,7 +15,7 @@ use std::collections::VecDeque;
 use jiff::fmt::strtime;
 use jiff::tz::TimeZone;
 use mxt_core::app::{App, Focus};
-use mxt_core::ids::Timestamp;
+use mxt_core::ids::{TimelineId, Timestamp};
 use mxt_core::rich::{self, Block, Inline, RichText};
 use mxt_core::timeline::{
     ItemRef, MessageContent, ReactionGroup, ReplyPreview, SendState, ThreadSummary, TimelineEntry,
@@ -78,6 +79,9 @@ pub(crate) struct TimelinePane {
     /// Where the last frame left the view, so the next one keeps it while
     /// the cursor does not follow.
     anchor: Option<Anchor>,
+    /// The timeline the last frame showed: another one (a thread opened or
+    /// closed, another room) is placed as on a first frame.
+    shown: Option<TimelineId>,
 }
 
 enum Anchor {
@@ -102,6 +106,7 @@ impl TimelinePane {
             time_format: TimeFormat::default(),
             zone: TimeZone::system(),
             anchor: None,
+            shown: None,
         }
     }
 
@@ -109,14 +114,23 @@ impl TimelinePane {
         self.time_format = format;
     }
 
-    /// Draws the open room's entries into `area` and returns the first and
-    /// last entry indices with a visible row.
+    /// Draws the shown timeline's entries into `area` and returns the first
+    /// and last entry indices with a visible row.
     pub(crate) fn draw(
         &mut self,
         frame: &mut Frame,
         area: Rect,
         app: &App,
     ) -> Option<(usize, usize)> {
+        // Compared without building the shown `TimelineId` on every frame.
+        let same = match &self.shown {
+            Some(shown) => app.shows(shown),
+            None => app.open_room().is_none(),
+        };
+        if !same {
+            self.shown = app.shown_timeline();
+            self.anchor = None;
+        }
         let entries = app.timeline();
         if entries.is_empty() {
             self.anchor = None;

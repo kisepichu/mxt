@@ -12,7 +12,8 @@ mxt 0.1.2 did nothing. The leader and the longer bindings work as before.
 ## The screen
 
 - The room list is on the left; `<leader>e` hides and shows it. The open
-  room's timeline is on the right, with the composer below it.
+  room's timeline is on the right, with the composer below it. `t` shows a
+  message's thread in the timeline's place (see [Threads](#threads)).
 - The room list is in the order of `ui.room_list.sort`, by latest activity
   unless it says otherwise (see [Sort keys](configuration.md#sort-keys)).
   When rooms move, as messages arrive or as you read them, the cursor stays
@@ -54,6 +55,10 @@ unread count includes replies in that thread: replies newer than what mxt
 last marked read in the room since you opened it (the timeline's newest
 message once the pane shows it, or `room.mark_read`), in a room that has
 unread messages.
+A thread shown in place of the timeline has a title row under the room's
+name, `Thread · Alice: first line`: the root's sender and the first line of
+its text, or `Thread` alone while mxt has not loaded the root. Below it
+come the root, with its `💬` row but never `· unread`, and the replies.
 When newer messages are below the pane, for example after a burst arrived
 while the cursor was on an older message, the composer's top rule ends with
 `↓ N newer`. `N` counts the messages below the pane, yours and those still
@@ -77,9 +82,9 @@ In `NORMAL`, the room list and the timeline have no character cursor: the
 cursor moves one room or one message at a time. That leaves `<Space>` free
 for the leader.
 
-Counts work in the room list and the timeline: `5j` moves five messages
-down. A count applies to `j`, `k`, `<C-d>` and `<C-u>`; `0` only continues
-a count that has started.
+Counts work in the room list and the timeline, a thread's too: `5j` moves
+five messages down. A count applies to `j`, `k`, `<C-d>` and `<C-u>`; `0`
+only continues a count that has started.
 
 ### Line editing
 
@@ -110,7 +115,8 @@ end of `日本語のテキスト` it deletes `テキスト`, then `の`, then `�
 
 `normal` applies wherever the focused table does not bind the key, outside
 text input: in the room list, the timeline, and the composer in normal and
-visual mode.
+visual mode. In a thread, `thread` comes first, then `timeline`, then
+`normal`.
 
 ### `normal`
 
@@ -165,9 +171,28 @@ one. There is no search on the server.
 | `gx` | `message.open` | open the link, or download and open the attachment |
 | `gd` | `message.goto_reply` | go to the message this one replies to |
 | `R` | `message.resend` | send a message marked `failed` again |
+| `t` | `thread.open` | show the message's thread in place of the timeline (see [Threads](#threads)) |
 
 A message that failed for a passing reason, such as a lost connection, also
 goes out by itself once the sync is back; `R` is for the others.
+
+`t` did nothing in the timeline before mxt had threads. It is in
+`timeline`, which comes before `normal`, so if your configuration binds
+`t` in `[keymap.normal]`, write that binding in `[keymap.timeline]` too to
+keep it in the timeline.
+
+### `thread`
+
+These keys apply while a thread is shown in place of the timeline and the
+timeline has focus; every other key is looked up in `timeline`, then in
+`normal`.
+
+| Key | Action | |
+|---|---|---|
+| `q`, `<Esc>` | `thread.close` | back to the timeline, with the cursor on the thread's root |
+
+The timeline binds neither key, so a binding of `q` or `<Esc>` in
+`[keymap.normal]` still applies there.
 
 ### `composer.insert`, `composer.normal` and `composer.completion`
 
@@ -249,33 +274,88 @@ user_id = "@alice:example.org"
 "<leader>+" = { action = "message.react", emoji = "thumbsup" }
 ```
 
+## Threads
+
+`t` (`thread.open`) shows the thread of the message under the cursor in
+place of the timeline: the root, then its replies, oldest first, under the
+title row `Thread · <sender>: <first line>`. On a message without replies
+the thread is new and empty, and the first message you send there starts
+it. `t` refuses a message that is still being sent (`Wait until the
+message is sent`) and a deleted message without replies (`The message is
+deleted`); in a thread it does nothing more.
+
+Reading a thread sends a read receipt for its newest reply once the pane
+shows it, as the timeline does for its newest message, and other clients
+show the thread as read. When you have read the timeline (to its newest
+message, which is older than the reply), that receipt also marks the room
+read up to the reply: the room's badge goes, and the older replies of other
+threads count as read too, in mxt and in other clients, as reading the
+timeline does. Otherwise mxt keeps counting the thread's replies in the
+room's badge, and keeps its root's `· unread`, until you read the timeline
+past them or use `room.mark_read`.
+
+In a thread:
+
+- The timeline's keys work on the thread's messages: moving and counts,
+  `/`, `n`, `N`, `<CR>`, `e`, `dd`, `yy`, `+`, `gx`, `R`, `i` and `a`, and
+  older replies load as the cursor nears the top. `room.mark_read`,
+  `:mute` and `:unmute` act on the room.
+- The composer sends into the thread. Each thread has its own draft, as
+  each room has: what you leave in a thread's composer waits there for the
+  next time you open the thread, and the room's draft, reply or edit is
+  back when you leave the thread. Clients without threads show a message
+  sent into a thread as a reply to the thread's previous message.
+- `r` replies within the thread to the message under the cursor.
+- `:upload` sends the file into the thread.
+- `gd` goes to the replied-to message in the thread, or in the timeline,
+  which closes the thread.
+- `q` or `<Esc>` (`thread.close`) shows the timeline again with the cursor
+  on the root. When the timeline no longer holds the root, older messages
+  load until it does; the status line says `Loading older messages…`, and
+  any key stops the wait. When the root is gone (not there a second after
+  the timeline's oldest message is loaded), the cursor follows the newest
+  message.
+- Opening another room leaves the thread.
+
+In the timeline, `gd` on a reply to a message in a thread (sent from a
+client without threads) opens that thread with the cursor on the message,
+loading older replies until it arrives. A message that neither the
+timeline nor a thread that mxt knows holds is not loaded, as before.
+
+Opening and closing a thread are jumps (see [The jump list](#the-jump-list)):
+`<C-o>` after `t` goes back to the root in the timeline, and `<Tab>` into
+the thread again.
+
 ## The jump list
 
 As in nvim, `<C-o>` goes back to where the timeline cursor was before a
-jump, also in another room, and `<Tab>` forward again. These are jumps:
+jump, also in another room or thread, and `<Tab>` forward again. These are
+jumps:
 
 - opening another room, whichever way: `<CR>` in the room list, the room
   picker, `]u` and `[u`, `:open` and `:join`;
+- opening a thread with `t`, and closing it with `q` or `<Esc>`;
 - `gg` and `G` in the timeline;
 - a search in the timeline with `/`, `n` or `N`;
 - `gd`.
 
 `j`, `k`, `<C-d>` and `<C-u>` are not jumps, nor are a search or `gg` in
-the room list. Before each jump the list notes the room and the message
-under the cursor (the room alone while its timeline is empty), keeps the
-last 100 for as long as mxt runs, and does not note the same place twice
-in a row. `<C-o>` first notes where you are, so `<Tab>` comes back there;
-a jump after going back drops the places after the one you went back to.
-Neither key takes a count.
+the room list. Before each jump the list notes the room, the thread while
+one is shown, and the message under the cursor (the room or thread alone
+while its timeline is empty), keeps the last 100 for as long as mxt runs,
+and does not note the same place twice in a row. `<C-o>` first notes where
+you are, so `<Tab>` comes back there; a jump after going back drops the
+places after the one you went back to. Neither key takes a count.
 
-Going back to a place opens its room, focuses the timeline and puts the
-cursor on the message, after loading older messages when it is not
-loaded; the status line says `Loading older messages…` meanwhile, and any
-key stops the wait. A place in a room you left, or whose message is gone
-(not there a second after the room's oldest message is loaded), is
-skipped, and the status line says so, for example `Skipped a jump to a
-room you left`. With nothing left in that direction nothing moves, and
-the status line says `No older jump` or `No newer jump`.
+Going back to a place opens its room, and its thread or the timeline,
+focuses the timeline and puts the cursor on the message, after loading
+older messages when it is not loaded; the status line says `Loading older
+messages…` meanwhile, and any key stops the wait. A place in a room you
+left, or whose message is gone (not there a second after the oldest
+message of its timeline or thread is loaded), is skipped, and the status
+line says so, for example `Skipped a jump to a room you left`. With nothing
+left in that direction nothing moves, and the status line says `No older
+jump` or `No newer jump`.
 
 Terminals send the same key for `<C-i>` and `<Tab>`, so in mxt, as in
 nvim, `<C-i>` is another name for `<Tab>` (mxt does not turn on the kitty
@@ -302,7 +382,7 @@ after `:join`, and emoji shortcodes after `:react` (`:react thu` offers
 | `:join <target>` | Joins a room and opens it, or opens a direct message (see [Joining rooms and direct messages](#joining-rooms-and-direct-messages)). |
 | `:mute` | Mutes the room: the room under the cursor in the room list, otherwise the open room. |
 | `:unmute` | Unmutes it: its own notification setting is removed, so the account's default applies. A room that is not muted is left alone. |
-| `:upload <path>` | Sends the file to the open room as an image, video, audio or file message, by the type its name suggests. `~/` is your home directory; a relative path is relative to where mxt was started. Anything that is not a regular file, and files larger than the homeserver's upload limit, are refused. |
+| `:upload <path>` | Sends the file to the open room, or into the thread shown in place of its timeline, as an image, video, audio or file message, by the type its name suggests. `~/` is your home directory; a relative path is relative to where mxt was started. Anything that is not a regular file, and files larger than the homeserver's upload limit, are refused. |
 | `:react [<emoji>]` | Toggles a reaction with the emoji on the message under the open room's timeline cursor: adds it, or removes yours. The emoji is an emoji (`:react 👍`) or a shortcode with colons on both sides or none (`:react thumbsup`, `:react :+1:`); an unknown one is an error in the status line, and nothing is sent. Without an emoji, it opens the emoji picker, as `+` does. With no open room, on an empty timeline or on a deleted message, both say so in the status line. |
 | `:recover` | Asks for the recovery key in `SECRET` mode and, as on the first start, cross-signs this device with it and lets it fetch room keys from the key backup (see [First start](../README.md#first-start)). An empty key changes nothing. The status line then says `Recovery complete` or why it failed: a wrong key, or an account without secret storage, which needs recovery set up in another client first. |
 | `:help` | Lists the commands, each with its usage and a one-line description, in the full-screen view. |

@@ -53,9 +53,11 @@ impl App {
                 Ordering::Equal => self.rooms.len().checked_sub(1).map(|last| cursor.min(last)),
             };
         }
-        if let Some(open) = self.open_room.take_if(|open| *open == id) {
+        if self.open_room.as_ref() == Some(&id) {
+            // Before the room stops being the open one, for its thread.
             self.reset_timeline(effects);
-            effects.push(Effect::Matrix(MatrixEffect::UnsubscribeTimeline(open)));
+            self.open_room = None;
+            effects.push(Effect::Matrix(MatrixEffect::UnsubscribeTimeline(id)));
         }
     }
 
@@ -100,12 +102,13 @@ impl App {
     }
 
     /// Opens the room at `index` of the room list: unsubscribes the previous
-    /// room, subscribes the new one with a new timeline, and moves the cursor
-    /// to it. Both rooms move when the sort keys depend on their counts,
-    /// since the open room sorts as read. An open room only gets the focus.
-    /// This is the one place where the open room becomes another room, so a
-    /// recorded switch puts the position before it into the jump list
-    /// whichever action or answer opens the room (design, "Jump list").
+    /// room, its thread first, subscribes the new one with a new timeline,
+    /// and moves the cursor to it. Both rooms move when the sort keys depend
+    /// on their counts, since the open room sorts as read. An open room only
+    /// gets the focus. This is the one place where the open room becomes
+    /// another room, so a recorded switch puts the position before it into
+    /// the jump list whichever action or answer opens the room (design,
+    /// "Jump list").
     pub(super) fn open_at(&mut self, index: usize, switch: RoomSwitch, effects: &mut Vec<Effect>) {
         let id = &self.rooms.rooms()[index].id;
         if self.open_room.as_ref() != Some(id) {
@@ -113,10 +116,10 @@ impl App {
             if switch == RoomSwitch::Recorded {
                 self.record_jump();
             }
+            self.reset_timeline(effects);
             if let Some(previous) = self.open_room.replace(id.clone()) {
                 effects.push(Effect::Matrix(MatrixEffect::UnsubscribeTimeline(previous)));
             }
-            self.reset_timeline(effects);
             self.room_cursor = self.rooms.open(&id);
             effects.push(Effect::Matrix(MatrixEffect::SubscribeTimeline(id)));
         }
@@ -149,7 +152,7 @@ impl App {
         if self.open_room.as_ref() == Some(&id)
             && let Some(latest) = latest
         {
-            self.timeline.read_up_to_at_least(latest);
+            self.main_timeline_mut().read_up_to_at_least(latest);
         }
         self.clear_room_unread(&id);
         effects.push(Effect::Matrix(MatrixEffect::MarkRoomRead(id)));

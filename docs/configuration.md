@@ -253,6 +253,7 @@ table, and every other default stays.
 | `normal` | (fallback only) | depends on the table that falls back to it |
 | `room_list` | the room list has focus | look in `normal`, then ignore the key |
 | `timeline` | the timeline has focus | look in `normal`, then ignore the key |
+| `thread` | the timeline has focus and shows a thread (see [Threads](keys.md#threads)) | look in `timeline`, then `normal`, then ignore the key |
 | `composer.normal`, `composer.visual` | the composer has focus and its editor is in normal or visual mode | look in `normal`, then pass the key to the editor |
 | `composer.insert` | the composer's editor is in insert mode | pass the key to the editor |
 | `composer.completion` | the mention menu is open in insert mode | look in `composer.insert`, then pass the key to the editor |
@@ -262,8 +263,15 @@ table, and every other default stays.
 
 `normal` holds bindings that make sense everywhere outside text input. The
 movement keys are in `room_list` and `timeline`, so `j` and `k` still reach
-the composer's editor. Only `room_list` and `timeline` take a count prefix
-(`5j`).
+the composer's editor. Only `room_list`, `timeline` and `thread` take a
+count prefix (`5j`).
+
+The default `t` (`thread.open`) is in `timeline`, which is checked before
+`normal`: a binding of `t` in `[keymap.normal]` does not apply while the
+timeline has focus unless you write it in `[keymap.timeline]` too. The
+default `q` and `<Esc>` (`thread.close`) are in `thread`, so the timeline
+itself binds neither, and a binding of them in `[keymap.normal]` applies
+there.
 
 The default `<C-o>` and `<Tab>` (`jump.back` and `jump.forward`) are in
 `normal`, so they work in the room list, the timeline and the composer's
@@ -413,10 +421,10 @@ arguments; any other argument ignores the binding with a warning. Actions on
 | `message.yank` | | Copies the message's text to the clipboard (see [Terminal setup](terminal.md#clipboard)). |
 | `message.react` | `emoji` | Without `emoji`, opens the emoji picker; choosing an emoji you already reacted with removes your reaction. With `emoji`, an emoji (`"👍"`) or a shortcode with colons on both sides or none (`"thumbsup"`, `":+1:"`), toggles that reaction: adds it, or removes yours. An empty `emoji` is an error; an unknown one ignores the binding with a warning, since a newer mxt may know it. With no open room, on an empty timeline or on a deleted message, it says so and does nothing. |
 | `message.open` | | Downloads an attachment to `files.download_dir` and opens it with `files.opener`, or opens the message's web link with `files.opener`, or offers a link picker when there are several. Only `http://` and `https://` links. |
-| `message.goto_reply` | | Moves the cursor to the message this one replies to, if it is loaded. |
+| `message.goto_reply` | | Moves the cursor to the message this one replies to, if the shown timeline holds it. In a thread, it goes to a message of the timeline, closing the thread; a message that is a reply in another thread opens that thread with the cursor on it (see [Threads](keys.md#threads)). Otherwise it says the message is not loaded. |
 | `message.resend` | | Sends a failed message again. |
 | `message.view` | | Opens the message in a full-screen view: text in an editor where vim motions, search, visual selection and yanks work (changes are discarded), or an image. |
-| `composer.focus` | `mode` | Moves the focus to the open room's composer. `mode = "insert"` (default) starts insert mode after the character under the cursor; `mode = "keep"` keeps the editor's last mode. |
+| `composer.focus` | `mode` | Moves the focus to the composer of the shown timeline, the open room's or its thread's. `mode = "insert"` (default) starts insert mode after the character under the cursor; `mode = "keep"` keeps the editor's last mode. |
 | `composer.send` | | Sends the composer's text as Markdown. A blank text does nothing. |
 | `composer.newline` | | Inserts a line break. |
 | `composer.cancel` | | Ends a reply (the text stays) or an edit (the composer is cleared). |
@@ -438,8 +446,10 @@ arguments; any other argument ignores the binding with a warning. Actions on
 | `cursor.half_page_down`, `cursor.half_page_up` | | Moves it by half of the visible rooms or messages, times the count. |
 | `search.start` | | Opens a `/` line that searches the focused list. |
 | `search.next`, `search.prev` | | Repeats the last search forwards or backwards. |
-| `jump.back` | | Goes back to where the timeline cursor was before the last jump (opening another room, `gg`, `G`, a search or `gd` in the timeline), opening its room and loading older messages when needed, as nvim's `<C-o>` does; see [The jump list](keys.md#the-jump-list). From the newest place it first notes where you are, so `jump.forward` comes back to it. A place in a room you left or with a message that is gone is skipped. |
+| `jump.back` | | Goes back to where the timeline cursor was before the last jump (opening another room, opening or closing a thread, `gg`, `G`, a search or `gd` in the timeline), opening its room and its thread and loading older messages when needed, as nvim's `<C-o>` does; see [The jump list](keys.md#the-jump-list). From the newest place it first notes where you are, so `jump.forward` comes back to it. A place in a room you left or with a message that is gone is skipped. |
 | `jump.forward` | | Goes forward again in the jump list, as nvim's `<C-i>` does. |
+| `thread.open` | | Shows the thread of the message under the timeline cursor in place of the timeline, or starts a thread on a message without replies; in a thread it only focuses the timeline. Not for a message that is still being sent, nor for a deleted message without replies. See [Threads](keys.md#threads), also for its read receipts. |
+| `thread.close` | | Shows the timeline again in place of the thread, with the cursor on the thread's root. Without a thread it does nothing. |
 | `view.close` | | Closes the message view, also when it shows `:help`, `:map` or `:messages`. |
 | `help.commands` | | Shows the commands with a one-line description each in the full-screen view, as `:help` does. |
 | `help.keymap` | | Shows the bindings of each keymap table after your configuration in the full-screen view, as `:map` does: `keys -> action` or `keys -> action (arguments)`, with `<leader>` written as its key. |
@@ -447,7 +457,7 @@ arguments; any other argument ignores the binding with a warning. Actions on
 | `sidebar.toggle` | | Shows or hides the room list. |
 | `focus.room_list` | | Moves the focus to the room list, and shows it if it is hidden. |
 | `focus.timeline` | | Moves the focus to the timeline. |
-| `file.upload` | `path`, required | Uploads the file at `path` to the open room. `~/` is your home directory; a relative path is relative to the directory mxt was started in. |
+| `file.upload` | `path`, required | Uploads the file at `path` to the open room, or into the thread shown in place of its timeline. `~/` is your home directory; a relative path is relative to the directory mxt was started in. |
 | `account.recover` | | Asks for the recovery key in `SECRET` mode, masked; `<CR>` submits and `<Esc>` cancels. As on the first start, the key cross-signs this device and lets it fetch room keys from the key backup. |
 | `app.quit` | | Quits mxt. |
 | `nop` | | Does nothing. |

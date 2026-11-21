@@ -142,7 +142,7 @@ impl App {
         };
         self.pending_sends.insert(id, pending);
         effects.push(Effect::Matrix(MatrixEffect::Send {
-            room: timeline.room.clone(),
+            timeline: timeline.clone(),
             id,
             message: Outgoing {
                 body: rendered,

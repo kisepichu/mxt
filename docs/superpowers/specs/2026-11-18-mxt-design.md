@@ -1421,6 +1421,11 @@ Read receipts and unread counts:
   first when a sync response falls between the two requests: the outcome
   of the unthreaded receipt alone, with a second request and a result
   that depends on timing. One request gives that outcome every time.
+  Across openings of a thread too: the main timeline remembers, while the
+  room is open, the events that got a thread's unthreaded receipt, and a
+  thread opened again sends no receipt for them, so the threaded receipt
+  that would follow once the main timeline has a newer message never goes
+  out.
 - What does not agree:
   - While the main timeline has unread messages, reading a thread sends
     the threaded receipt. Thread-aware clients then show the thread read,

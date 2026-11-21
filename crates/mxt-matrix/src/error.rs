@@ -55,7 +55,8 @@ pub enum Error {
     UnknownRoom,
     /// An effect names an event with an ID that is not a Matrix event ID.
     InvalidEventId,
-    /// An effect acts on the items of a room whose timeline is not open.
+    /// An effect names a timeline that is not open: the main timeline of a
+    /// room that is not the open one, or a thread that is not subscribed.
     TimelineNotOpen,
     /// Muting or unmuting a room.
     NotificationSettings(NotificationSettingsError),
@@ -258,7 +259,7 @@ impl fmt::Display for Error {
             Error::Timeline(error) => error.fmt(f),
             Error::UnknownRoom => f.write_str("the room is not known to this client"),
             Error::InvalidEventId => f.write_str("the event ID is not valid"),
-            Error::TimelineNotOpen => f.write_str("the room's timeline is not open"),
+            Error::TimelineNotOpen => f.write_str("the timeline is not open"),
             Error::NotificationSettings(error) => error.fmt(f),
             Error::NoAttachment => f.write_str("the message has no attachment"),
             Error::NotAFile => f.write_str("the path is not a regular file"),

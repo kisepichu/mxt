@@ -141,6 +141,28 @@ opener = ["xdg-open"]
 }
 
 #[test]
+fn a_binding_in_the_thread_table_applies_only_in_a_thread() {
+    let c = ok(&format!(
+        "{MINIMAL}[keymap.thread]\n\"x\" = \"message.yank\"\n\"q\" = \"nop\"\n"
+    ));
+    assert_eq!(
+        lookup(&c, InputContext::Thread, "x"),
+        Some(vec!["message.yank"])
+    );
+    assert_eq!(lookup(&c, InputContext::Thread, "q"), Some(vec!["nop"]));
+    // The rest falls back to the timeline's and normal's bindings.
+    assert_eq!(
+        lookup(&c, InputContext::Thread, "t"),
+        Some(vec!["thread.open"])
+    );
+    assert_eq!(
+        lookup(&c, InputContext::Thread, ":"),
+        Some(vec!["command_line.open"])
+    );
+    assert_eq!(lookup(&c, InputContext::Timeline, "x"), None);
+}
+
+#[test]
 fn settings_are_read() {
     let c = ok(&format!(
         "{MINIMAL}[ui]\ntimeoutlen = 300\nread_receipts = \"private\"\nroom_list = {{ visible = false, sort = \"name\", width = 40, network = \"below\" }}\nimage_preview = \"off\"\n[files]\ndownload_dir = \"/tmp/dl\"\nopener = [\"wslview\"]\n"
@@ -1131,6 +1153,7 @@ opener = ["wslview"]
         let context = match id {
             TableId::Normal | TableId::RoomList => InputContext::RoomList,
             TableId::Timeline => InputContext::Timeline,
+            TableId::Thread => InputContext::Thread,
             TableId::ComposerNormal => InputContext::ComposerNormal,
             TableId::ComposerVisual => InputContext::ComposerVisual,
             TableId::ComposerInsert => InputContext::ComposerInsert,

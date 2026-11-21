@@ -11,6 +11,7 @@ mod rooms;
 mod search;
 #[cfg(test)]
 mod tests;
+mod thread;
 mod timeline;
 
 use std::collections::{HashMap, VecDeque};
@@ -18,7 +19,7 @@ use std::collections::{HashMap, VecDeque};
 use crate::action::{Action, Binding};
 use crate::command::{COMMANDS, help_text};
 use crate::effect::{Effect, MatrixEffect, RecoveryKey, UiEffect};
-use crate::ids::{RoomId, SendId, TimelineId, Timestamp, UserId};
+use crate::ids::{EventId, RoomId, SendId, TimelineId, Timestamp, UserId};
 use crate::keymap::{InputContext, KeySink, Keymap, keymap_text};
 use crate::keys::Key;
 use crate::line::LineEditor;
@@ -33,6 +34,7 @@ use crate::timeline::{ItemRef, TimelineEntry};
 pub use command_line::{CommandLine, LineKind};
 pub use picker::{Picker, PickerItem, PickerKey, PickerKind};
 pub use recovery::SecretPrompt;
+pub use thread::ThreadView;
 
 use command_line::OpenLine;
 use composer::{Composer, MentionMenu, PendingSend};
@@ -40,6 +42,7 @@ use join::JoinWait;
 use jumps::{JumpDirection, JumpList, JumpWait};
 use picker::OpenPicker;
 use search::Direction;
+use thread::OpenThread;
 use timeline::Timeline;
 
 /// The largest paste in bytes that goes where text would go: four times the
@@ -146,8 +149,12 @@ pub struct App {
     /// arrive in any order at startup leave it at the top.
     room_cursor: Option<usize>,
     open_room: Option<RoomId>,
-    /// The open room's timeline; empty while no room is open.
+    /// The shown timeline: the open room's main timeline, or the thread
+    /// shown in its place; empty while no room is open.
     timeline: Timeline,
+    /// The thread shown in place of the main timeline, which it keeps
+    /// aside meanwhile.
+    thread: Option<OpenThread>,
     /// The full-screen view, while it is open.
     view: Option<View>,
     focus: Focus,
@@ -191,6 +198,10 @@ pub struct App {
     jumps: JumpList,
     /// The entry whose event loads, until the next key or paste.
     jump_wait: Option<JumpWait>,
+    /// The room and event of `gd`'s `FindThread`, until the next key or
+    /// paste, another room or the room's removal; an answer for anything
+    /// else is ignored.
+    reply_lookup: Option<(RoomId, EventId)>,
 }
 
 impl App {
@@ -210,6 +221,7 @@ impl App {
             room_cursor: None,
             open_room: None,
             timeline: Timeline::default(),
+            thread: None,
             view: None,
             focus,
             sidebar_visible: settings.room_list_visible,
@@ -233,6 +245,7 @@ impl App {
             join_wait: None,
             jumps: JumpList::default(),
             jump_wait: None,
+            reply_lookup: None,
             settings,
         }
     }
@@ -287,6 +300,9 @@ impl App {
             Msg::Invites(invites) => self.invites = invites,
             Msg::Joined { target, room, how } => self.joined(&target, room, how, &mut effects),
             Msg::NoDirectMessage { target, user } => self.no_direct_message(&target, user),
+            Msg::ThreadFound { room, event, root } => {
+                self.thread_found(&room, &event, root, &mut effects);
+            }
         }
         effects
     }
@@ -306,18 +322,23 @@ impl App {
     }
 
     /// The timeline the timeline pane shows, whose composer is the shown
-    /// one: the open room's main timeline.
+    /// one: the open room's main timeline, or its thread while one is
+    /// shown.
     pub fn shown_timeline(&self) -> Option<TimelineId> {
-        self.open_room.clone().map(TimelineId::main)
+        let room = self.open_room.clone()?;
+        let thread = self.thread.as_ref().map(|open| open.root.clone());
+        Some(TimelineId { room, thread })
     }
 
     /// Whether `timeline` is the shown one, as `shown_timeline()` without
     /// building it.
     pub fn shows(&self, timeline: &TimelineId) -> bool {
-        timeline.thread.is_none() && self.open_room.as_ref() == Some(&timeline.room)
+        self.open_room.as_ref() == Some(&timeline.room)
+            && timeline.thread.as_ref() == self.thread.as_ref().map(|open| &open.root)
     }
 
-    /// The open room's entries, oldest first (empty when no room is open).
+    /// The shown timeline's entries, oldest first (empty when no room is
+    /// open).
     pub fn timeline(&self) -> &[TimelineEntry] {
         self.timeline.entries()
     }
@@ -335,8 +356,12 @@ impl App {
     /// The time after which a thread root's latest reply marks it unread
     /// (design, "Threads"): what mxt last marked read in the open room
     /// since it opened it (`read_up_to`), while the room has unread
-    /// messages; `None` otherwise, and before anything was marked read.
+    /// messages; `None` otherwise, before anything was marked read, and
+    /// while a thread is shown, whose root shows no mark.
     pub fn thread_marks_after(&self) -> Option<Timestamp> {
+        if self.thread.is_some() {
+            return None;
+        }
         let room = self.rooms.get(self.open_room.as_ref()?)?;
         if room.unread.messages == 0 {
             return None;
@@ -446,6 +471,7 @@ impl App {
         }
         match self.focus {
             Focus::RoomList => InputContext::RoomList,
+            Focus::Timeline if self.thread.is_some() => InputContext::Thread,
             Focus::Timeline => InputContext::Timeline,
             Focus::Composer => match editor {
                 None | Some(EditorMode::Normal) => InputContext::ComposerNormal,
@@ -469,6 +495,7 @@ impl App {
         // the cursor never jumps under a user who has moved on.
         self.join_wait = None;
         self.jump_wait = None;
+        self.reply_lookup = None;
         self.editor = editor;
         // The mention menu belongs to insert mode, and the tui reports the
         // editor mode with every key.
@@ -493,6 +520,7 @@ impl App {
         self.status_shown = false;
         self.join_wait = None;
         self.jump_wait = None;
+        self.reply_lookup = None;
         self.editor = editor;
         if editor != Some(EditorMode::Insert) {
             self.cancel_completion();
@@ -754,6 +782,8 @@ impl App {
             Action::SearchPrev => self.search_again(Direction::Backward, effects),
             Action::JumpBack => self.jump(JumpDirection::Back, effects),
             Action::JumpForward => self.jump(JumpDirection::Forward, effects),
+            Action::ThreadOpen => self.open_thread(effects),
+            Action::ThreadClose => self.close_thread(effects),
             Action::SidebarToggle => {
                 self.sidebar_visible = !self.sidebar_visible;
                 if !self.sidebar_visible && self.focus == Focus::RoomList {

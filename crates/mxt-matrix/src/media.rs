@@ -7,6 +7,7 @@ use std::{
     io::{self, Cursor, Write as _},
     mem,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use image::{ImageDecoder as _, ImageFormat, ImageReader, metadata::Orientation};
@@ -16,11 +17,12 @@ use matrix_sdk::{
         AttachmentConfig, AttachmentInfo, BaseAudioInfo, BaseFileInfo, BaseImageInfo, BaseVideoInfo,
     },
     media::{MediaFormat, MediaRequestParameters},
+    room::reply::{EnforceThread, Reply},
     ruma::{
-        UInt,
+        OwnedEventId, UInt,
         events::room::{
             MediaSource,
-            message::{ImageMessageEventContent, MessageType},
+            message::{AddMentions, ImageMessageEventContent, MessageType, ReplyWithinThread},
         },
     },
 };
@@ -124,11 +126,19 @@ pub(crate) async fn fetch_image(
     })
 }
 
+/// The thread an upload goes into: its root, and its timeline, whose latest
+/// event the upload's reply fallback points at.
+pub(crate) struct ThreadUpload {
+    pub(crate) root: OwnedEventId,
+    pub(crate) timeline: Arc<Timeline>,
+}
+
 /// `MatrixEffect::Upload` (design, "Files and images"): the file at `path`
-/// (see `expand_home`), queued in `room`'s send queue under its file name.
-/// The SDK picks the message type from the MIME type guessed from the name:
-/// an image for `image/*`, a video or audio message for `video/*` and
-/// `audio/*` (which mxt shows as files), a file otherwise.
+/// (see `expand_home`), queued in `room`'s send queue under its file name,
+/// into `thread` when there is one. The SDK picks the message type from the
+/// MIME type guessed from the name: an image for `image/*`, a video or
+/// audio message for `video/*` and `audio/*` (which mxt shows as files), a
+/// file otherwise.
 ///
 /// Like a message, it shows as a local echo while it uploads, keeps its
 /// place in the room's queue (later messages wait for it), and when it
@@ -136,7 +146,11 @@ pub(crate) async fn fetch_image(
 /// SDK copies the file into its media store, where it stays until it is
 /// sent. Only a regular file up to the homeserver's upload limit is read:
 /// a larger one would be read into memory only to be refused.
-pub(crate) async fn upload(room: &Room, path: PathBuf) -> Result<(), Error> {
+pub(crate) async fn upload(
+    room: &Room,
+    path: PathBuf,
+    thread: Option<ThreadUpload>,
+) -> Result<(), Error> {
     let io_error = |error| Error::Io {
         path: path.clone(),
         error,
@@ -168,7 +182,13 @@ pub(crate) async fn upload(room: &Room, path: PathBuf) -> Result<(), Error> {
         name.to_string_lossy().into_owned()
     });
     let mime = mime_guess::from_path(&path).first_or_octet_stream();
-    let config = AttachmentConfig::new().info(attachment_info(&mime, &bytes));
+    let reply = match thread {
+        Some(thread) => Some(thread_reply(thread).await),
+        None => None,
+    };
+    let config = AttachmentConfig::new()
+        .info(attachment_info(&mime, &bytes))
+        .reply(reply);
     debug!("uploading {}", path.display());
     enable_sending(room);
     room.send_queue()
@@ -176,6 +196,19 @@ pub(crate) async fn upload(room: &Room, path: PathBuf) -> Result<(), Error> {
         .await
         .map(drop)
         .map_err(|error| timeline_error(error.into()))
+}
+
+/// The relation of a message sent into a thread (design, "Threads"), as
+/// `Timeline::send` gives one on a thread's timeline: the thread relation
+/// on the root, with the reply fallback to the thread's latest event, the
+/// root in a new thread, and no mention.
+async fn thread_reply(thread: ThreadUpload) -> Reply {
+    let latest = thread.timeline.latest_event_id().await;
+    Reply {
+        event_id: latest.unwrap_or(thread.root),
+        enforce_thread: EnforceThread::Threaded(ReplyWithinThread::No),
+        add_mentions: AddMentions::No,
+    }
 }
 
 /// The source and the file name of the message's attachment; video and

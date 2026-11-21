@@ -29,13 +29,15 @@ user interface around it. It runs on Linux and macOS.
   edits, and an external editor for long text.
 - Reactions from an emoji picker or with `:react <emoji>`, editing and
   deleting your own messages, and resending messages that failed.
+- Threads: `t` shows a message's thread in place of the timeline, where the
+  timeline's keys work and the composer sends into the thread.
 - Muting rooms, downloading and opening attachments, uploading files, and
   image previews in sixel, kitty or iTerm2 graphics, or in half blocks.
 - A keymap in the configuration file: every key can be rebound, and a key can
   run any action or a sequence of actions. `:map` shows the bindings in
   effect, and `:help` the commands.
 
-Not included: threads, desktop and typing notifications, SSO login, logout,
+Not included: desktop and typing notifications, SSO login, logout,
 several accounts in one process, and setting up cross-signing or recovery for
 an account that has none (do that in another client first).
 

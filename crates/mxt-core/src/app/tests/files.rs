@@ -361,7 +361,7 @@ fn upload_sends_the_file_to_the_open_room() {
     assert_eq!(
         no_timers(keys(&mut app, ":upload /tmp/a b.png<CR>")),
         vec![matrix(MatrixEffect::Upload {
-            room: id(C),
+            timeline: main_of(C),
             path: "/tmp/a b.png".into(),
         })]
     );
