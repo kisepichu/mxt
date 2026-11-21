@@ -43,6 +43,11 @@ marked **Breaking:**.
   burst of messages arrived while the cursor was on an older one, the
   composer's top rule ends with `↓ N newer`; it goes once the pane shows
   the newest message.
+- A jump list, as in nvim: `<C-o>` goes back to where the timeline cursor
+  was before a jump (opening another room, `gg`, `G`, `/`, `n`, `N`, `gd`),
+  opening its room and loading older messages when needed, and `<Tab>`
+  (`<C-i>`) goes forward again. The actions are `jump.back` and
+  `jump.forward`.
 
 ### Changed
 
@@ -70,6 +75,10 @@ marked **Breaking:**.
   key prompt, `<C-u>` deletes the text before the cursor and `<C-w>` the
   word before it, with words split as in the editors: `foo.bar` loses `bar`
   first, and kanji, hiragana and katakana are separate words.
+- `<C-i>` in a binding is another name for `<Tab>`, as in nvim, since
+  terminals send the same key for both: a `<C-i>` binding, which never ran,
+  now runs on `<Tab>`. A table that binds both still loads; its `<C-i>`
+  binding is ignored with a warning.
 
 ### Fixed
 

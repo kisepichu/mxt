@@ -3,6 +3,7 @@
 
 mod command_line;
 mod composer;
+mod jumps;
 mod picker;
 mod recovery;
 mod rooms;
@@ -32,6 +33,7 @@ pub use recovery::SecretPrompt;
 
 use command_line::OpenLine;
 use composer::{Composer, MentionMenu, PendingSend};
+use jumps::{JumpDirection, JumpList, JumpWait};
 use picker::OpenPicker;
 use search::Direction;
 use timeline::Timeline;
@@ -165,6 +167,10 @@ pub struct App {
     confirm: Option<Confirm>,
     /// `SECRET` mode: the recovery key typed so far, and its cursor.
     secret: Option<LineEditor<RecoveryKey>>,
+    /// The positions before jumps, for `jump.back` and `jump.forward`.
+    jumps: JumpList,
+    /// The entry whose event loads, until the next key or paste.
+    jump_wait: Option<JumpWait>,
 }
 
 impl App {
@@ -202,6 +208,8 @@ impl App {
             picker: None,
             confirm: None,
             secret: None,
+            jumps: JumpList::default(),
+            jump_wait: None,
             settings,
         }
     }
@@ -402,6 +410,9 @@ impl App {
         // Outside `feed`, so a status set by a binding survives the keys fed
         // again after it.
         self.status_shown = false;
+        // Before the key runs anything: the cursor never jumps under a user
+        // who has moved on.
+        self.jump_wait = None;
         self.editor = editor;
         // The mention menu belongs to insert mode, and the tui reports the
         // editor mode with every key.
@@ -424,6 +435,7 @@ impl App {
     /// that a binding ending before it asks.
     fn paste(&mut self, text: String, editor: Option<EditorMode>, effects: &mut Vec<Effect>) {
         self.status_shown = false;
+        self.jump_wait = None;
         self.editor = editor;
         if editor != Some(EditorMode::Insert) {
             self.cancel_completion();
@@ -677,6 +689,8 @@ impl App {
             Action::SearchStart => self.start_search(),
             Action::SearchNext => self.search_again(Direction::Forward, effects),
             Action::SearchPrev => self.search_again(Direction::Backward, effects),
+            Action::JumpBack => self.jump(JumpDirection::Back, effects),
+            Action::JumpForward => self.jump(JumpDirection::Forward, effects),
             Action::SidebarToggle => {
                 self.sidebar_visible = !self.sidebar_visible;
                 if !self.sidebar_visible && self.focus == Focus::RoomList {

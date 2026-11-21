@@ -12,6 +12,16 @@ use crate::rooms::{RoomTarget, resolve_room};
 /// When no room matches a target or the picker's query.
 pub(super) const NO_MATCHING_ROOM: &str = "No matching room";
 
+/// Whether opening another room records a jump.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum RoomSwitch {
+    /// An action or an answer opens the room, by whatever path: the
+    /// position before the switch goes into the jump list.
+    Recorded,
+    /// The jump list goes to one of its entries.
+    FromJumpList,
+}
+
 impl App {
     /// The cursor stays on its room when the order changes.
     pub(super) fn upsert_room(&mut self, summary: RoomSummary) {
@@ -59,7 +69,7 @@ impl App {
 
     pub(super) fn open_selected(&mut self, effects: &mut Vec<Effect>) {
         if let Some(index) = self.room_cursor() {
-            self.open_at(index, effects);
+            self.open_at(index, RoomSwitch::Recorded, effects);
         }
     }
 
@@ -73,18 +83,24 @@ impl App {
     /// Opens the room with `id` as `room.open` does.
     pub(super) fn open_id(&mut self, id: &RoomId, effects: &mut Vec<Effect>) {
         match self.rooms.position(id) {
-            Some(index) => self.open_at(index, effects),
+            Some(index) => self.open_at(index, RoomSwitch::Recorded, effects),
             None => self.set_status(StatusKind::Error, NO_MATCHING_ROOM),
         }
     }
 
     /// Opens the room at `index` of the room list: unsubscribes the previous
     /// room, subscribes the new one with a new timeline, and moves the cursor
-    /// to it. An open room only gets the focus.
-    fn open_at(&mut self, index: usize, effects: &mut Vec<Effect>) {
+    /// to it. An open room only gets the focus. This is the one place where
+    /// the open room becomes another room, so a recorded switch puts the
+    /// position before it into the jump list whichever action or answer
+    /// opens the room (design, "Jump list").
+    pub(super) fn open_at(&mut self, index: usize, switch: RoomSwitch, effects: &mut Vec<Effect>) {
         let id = &self.rooms.rooms()[index].id;
         if self.open_room.as_ref() != Some(id) {
             let id = id.clone();
+            if switch == RoomSwitch::Recorded {
+                self.record_jump();
+            }
             if let Some(previous) = self.open_room.replace(id.clone()) {
                 effects.push(Effect::Matrix(MatrixEffect::UnsubscribeTimeline(previous)));
             }

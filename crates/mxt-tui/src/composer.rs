@@ -771,6 +771,32 @@ mod tests {
     }
 
     #[test]
+    fn tab_and_ctrl_o_edit_in_insert_mode_and_jump_in_normal_mode() {
+        // `normal` binds both to the jump list; insert mode does not look
+        // there, so both go to the editor, which inserts a tab.
+        let (mut app, mut composers) = composing("ab");
+        run(&mut app, &mut composers, "a<Tab>c");
+        assert_eq!(text_of(&composers), "ab\tc");
+        run(&mut app, &mut composers, "<C-o>");
+        assert_eq!(
+            (app.focus(), app.open_room()),
+            (Focus::Composer, Some(&RoomId::new("!a:example.org")))
+        );
+        // In normal mode `<C-o>` goes back to `!a` from `!b`, which `]u`
+        // opened, and `<Tab>` forward again.
+        run(&mut app, &mut composers, "<Esc>]ui<Esc><C-o>");
+        assert_eq!(
+            (app.focus(), app.open_room()),
+            (Focus::Timeline, Some(&RoomId::new("!a:example.org")))
+        );
+        run(&mut app, &mut composers, "i<Esc><Tab>");
+        assert_eq!(
+            (app.focus(), app.open_room()),
+            (Focus::Timeline, Some(&RoomId::new("!b:example.org")))
+        );
+    }
+
+    #[test]
     fn a_binding_in_normal_that_starts_with_g_runs_in_the_composer() {
         // The keymap sees `g` before edtui does, so `g` waits for the
         // binding's next key.

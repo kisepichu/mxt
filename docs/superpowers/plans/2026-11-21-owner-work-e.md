@@ -10,7 +10,9 @@ warnings that the status line points to and a new `:messages` that lists
 them; a cursor and nvim's editing keys in the command line, the search
 lines, picker queries and the recovery key prompt; and `:join <target>`,
 which joins rooms, accepts invites and opens or creates direct messages
-without creating a room by mistake.
+without creating a room by mistake. A sixth, requested by the owner
+later: a jump list with nvim's `<C-o>` and `<C-i>` (Task 6), with its
+design addendum in the same pull request.
 
 **Architecture:** Task 1 is `mxt-tui` only, and Task 2 too apart from two
 doc comments in `mxt-core`: the hint is drawn from the frame the timeline
@@ -37,7 +39,7 @@ for tests.
 ## Global Constraints
 
 - The design is `docs/superpowers/specs/2026-11-18-mxt-design.md`. It
-  describes the result of all five tasks and wins over this plan when they
+  describes the result of all six tasks and wins over this plan when they
   disagree. Sections per task: Task 1 "Timeline" (the newer-messages hint)
   and "Layout"; Task 2 "Input routing", "Keymap resolver", "edtui
   differences from vim"; Task 3 "Layers", "Help views" (`:messages`),
@@ -46,7 +48,9 @@ for tests.
   "Tables and resolution", "Input routing" (pasted text); Task 5 "Joining
   rooms and direct messages", "Matrix adapter" (pending invites),
   "Commands", "Action registry", "Room list", "Modes" (`CONFIRM`),
-  "Logging", "Risks" (finding an existing direct message).
+  "Logging", "Risks" (finding an existing direct message); Task 6 "Jump
+  list", "Default keymap", "Action registry", "Layers" (the `<C-i>`
+  duplicate).
 - Everything in the repository is in English. Tests use made-up
   identifiers (`@alice:example.org`, `!room:example.org`,
   `#mxt:example.org`, a bridge bot `@discordbot:example.org`); no real room
@@ -62,7 +66,7 @@ for tests.
   lock. CI compiles everything for every pull request.
 - Tests assert specific lines, positions or properties, not whole
   generated texts that keep growing (the default keymap, `:help`).
-- Breaking changes (`docs/releasing.md`): none of the five tasks is
+- Breaking changes (`docs/releasing.md`): none of the six tasks is
   breaking, each for the reason in its task, so none adds a
   `**Breaking:**` line and the release after them is a patch release.
 
@@ -82,6 +86,7 @@ flowchart LR
 | 1: newer-messages hint | b | `mxt-tui` | Task 5 |
 | 3: forward-compatible configuration and `:messages` | a | `mxt-core`, `mxt` | Tasks 2 and 4 |
 | 5: `:join` | a | `mxt-core`, `mxt-matrix` | Task 1 |
+| 6: jump list | b | `mxt-core`, `mxt-tui` (tests), `mxt` (the configuration's duplicate check; CI builds it) | Task 5 |
 
 - Slot b runs Task 2, then Task 4, then Task 1; slot a runs Task 3, then
   Task 5. Two tasks run at a time, one per worktree.
@@ -729,3 +734,113 @@ the orchestrator provides:
    on.
 2. Leave the test room in another client, then `:join <its room ID>`
    joins and opens it again.
+
+## Task 6: The jump list
+
+**Slot b. Crates:** `mxt-core`; `mxt-tui` (a test); `mxt` (the
+configuration's check of duplicate key spellings), which slot b does not
+build: CI compiles and tests it.
+**Files:** a new `crates/mxt-core/src/app/jumps.rs` and
+`crates/mxt-core/src/app/tests/jumps.rs`; `crates/mxt-core/src/keys.rs`,
+`action.rs`, `keymap.rs`, `app.rs`, `app/rooms.rs`, `app/timeline.rs`,
+`app/search.rs`, `app/tests.rs`; `crates/mxt-tui/src/composer.rs`
+(tests); `crates/mxt/src/config.rs`, `config/tests.rs`; the design
+("Jump list", "Domain model", "Timeline", "Default keymap", "Action
+registry", "Layers", "Testing"); `docs/keys.md`, `docs/configuration.md`,
+`CHANGELOG.md`.
+**Breaking:** no. No name, table or stored data changes; the actions and
+default keys are new. Every configuration that loaded before loads the
+same: the one new duplicate, a table that binds both `<C-i>` and `<Tab>`,
+is a warning that ignores the `<C-i>` binding, which could never fire, so
+the keys that worked still do; every other duplicate stays an error,
+checked as mxt 0.1.2 read the keys. A `<C-i>` binding without a `<Tab>`
+one in its table, which never fired, now fires on the key it names (the
+user's Ctrl+I, which the terminal sends as `<Tab>`) and replaces that
+table's default `<Tab>`; nothing the user wrote means another key. The
+new defaults in `normal` take keys that did nothing in the room list and
+the timeline and that edtui's normal and visual modes do not bind (edtui
+binds `<Tab>` and `<C-o>` in insert mode only, which never looks at
+`normal`); a user binding of either key in `normal` or the focused table
+still wins. The changed meaning of `<C-i>` gets a `### Changed` line.
+
+Core:
+
+- [ ] `keys.rs`: `KeySeq::parse` reads `<C-i>` as `<Tab>` and `<C-A-i>`
+  as `<A-Tab>`, after the shift check (`<C-S-i>` stays `ShiftIgnored`);
+  `KeySeq::parse_ctrl_i_apart` parses as 0.1.2 did, for the
+  configuration's duplicate check. The terminal adapter is unchanged:
+  crossterm never reports ctrl and `i` without the kitty protocol.
+- [ ] `Action::JumpBack` (`jump.back`) and `Action::JumpForward`
+  (`jump.forward`), no arguments, no count; default keys `<C-o>` and
+  `<Tab>` in `normal`.
+- [ ] `app/jumps.rs`: `JumpList` (entries in a `VecDeque`, at most 100,
+  and the index), `record` (drop the entries after the index, add unless
+  equal to the newest, index to the newest position), `jump.back` and
+  `jump.forward` with the position added at the newest position and taken
+  back when no entry is left, skipping by `Reach` (a room not in the room
+  list; an event missing from an open room whose start is loaded), and the
+  wait (`JumpWait`) for an event that is not loaded: `paginate`, then
+  `check_jump_wait` after `Msg::Timeline` and `Msg::PaginationDone`. The
+  status texts of the design.
+- [ ] `App::open_at` takes a `RoomSwitch`: `Recorded` from every caller
+  but the jump list, which passes `FromJumpList`. `cursor.first` and
+  `cursor.last` in the timeline, a timeline search that finds a match and
+  `gd` that finds its message record before moving. `reset_timeline`, a
+  key, a paste and `Msg::PaginationFailed` end the wait.
+
+`mxt`:
+
+- [ ] `config.rs`, `bindings`: a second map keyed by the keys as
+  `parse_ctrl_i_apart` reads them (with `ui.leader` read the same way)
+  keeps every duplicate that was an error an error, the leader fallback
+  warning included; a duplicate only in the new reading is a warning that
+  ignores the spelling that writes `<C-i>` (the later one when both do),
+  removing an earlier one's binding, with no second warning for an
+  earlier binding already ignored for its action.
+
+Tests:
+
+- [ ] Core (`app/tests/jumps.rs`): back and forward across rooms with the
+  message loaded after the room opens (the `PaginateBackwards` effect, the
+  `Loading older messages…` status and its clearing); room list `<CR>`,
+  `]u`, `:open` and the room picker each record, opening the open room
+  does not; `gg`, `G`, `/`, `N` and `gd` record and `j`, `5j`, `<C-u>` do
+  not; a jump after going back drops the newer entries; the newest entry
+  is not added twice; 150 jumps leave 100 entries (99 moves back, then
+  `No older jump`); a left room is skipped both ways, and with only left
+  rooms behind, nothing moves; a gone message in the open room whose start
+  is loaded is skipped; a message missing once another room's start loads
+  is skipped on to the next entry, which loads; with nothing after it the
+  room stays open; a key or a failed page ends the wait; `<Tab>` and
+  `<C-o>` in the composer's insert mode, the mention menu, a picker, the
+  command line and the message view keep their meaning, and in the
+  composer's normal and visual modes they jump. `keys.rs`: the alias, with
+  alt and in a sequence, `<C-S-i>` still an error, and the apart reading.
+- [ ] `mxt-tui` (`composer.rs`): with edtui, in insert mode `<Tab>`
+  inserts a tab and `<C-o>` stays in the composer, and in normal mode
+  `<C-o>` and `<Tab>` move between the rooms `]u` went between.
+- [ ] `mxt` (`config/tests.rs`): `<Tab>` then `<C-i>` and `<C-i>` then
+  `<Tab>` in one table load with the warning at the `<C-i>` line and the
+  `<Tab>` binding in effect; the same in a sequence and with alt; an
+  earlier `<C-i>` with an unknown action gets one warning; an earlier
+  `<C-i>` with a later `<Tab>` whose action is unknown leaves the default;
+  `<C-I>` after `<Tab>` and `<C-i>`, and `<Tab>` with `<tab>`, stay
+  errors.
+- [ ] After PR #75 (`:join`) is merged: merge `origin/main` into the
+  branch and add a test that `:join` of a listed room records a jump.
+
+Docs:
+
+- [ ] `docs/keys.md`: the two keys in the `normal` table, a section on the
+  jump list (what records, back and forward, loading, skipping, what the
+  keys do where `normal` does not apply), and `<C-i>` being `<Tab>`.
+  `docs/configuration.md`: the actions, the key notation paragraph on
+  `<C-i>`, and the duplicate warning beside the leader one.
+- [ ] CHANGELOG `### Added`: "A jump list, as in nvim: `<C-o>` goes back
+  to where the timeline cursor was before a jump (opening another room,
+  `gg`, `G`, `/`, `n`, `N`, `gd`), also in another room, and `<Tab>`
+  (`<C-i>`) forward again; the actions are `jump.back` and
+  `jump.forward`." `### Changed`: "`<C-i>` in a binding is another name
+  for `<Tab>`, as in nvim, since terminals send the same key for both: a
+  `<C-i>` binding, which never fired, now fires on `<Tab>`. A table that
+  binds both still loads; the `<C-i>` binding is ignored with a warning."

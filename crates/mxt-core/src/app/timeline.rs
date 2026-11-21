@@ -63,6 +63,16 @@ impl Timeline {
         self.anchor.is_none()
     }
 
+    /// The cursor follows the newest item again.
+    pub(super) fn follow(&mut self) {
+        self.anchor = None;
+    }
+
+    /// Whether the room's start is loaded.
+    pub(super) fn reached_start(&self) -> bool {
+        self.pagination == Pagination::ReachedStart
+    }
+
     pub(super) fn cursor_item(&self) -> Option<&TimelineItem> {
         self.cursor()
             .and_then(|index| as_item(&self.entries[index]))
@@ -118,7 +128,7 @@ impl Timeline {
         Some(Anchor { index, item })
     }
 
-    fn event_position(&self, event: &EventId) -> Option<usize> {
+    pub(super) fn event_position(&self, event: &EventId) -> Option<usize> {
         self.entries.iter().position(|entry| {
             as_item(entry)
                 .is_some_and(|item| matches!(&item.id, ItemRef::Remote(id) if id == event))
@@ -138,6 +148,7 @@ impl App {
             return;
         }
         self.timeline.apply(diffs);
+        self.check_jump_wait(effects);
         self.check_pagination(effects);
         self.check_receipt(effects);
     }
@@ -158,6 +169,7 @@ impl App {
         } else {
             Pagination::Idle
         };
+        self.check_jump_wait(effects);
         self.check_pagination(effects);
     }
 
@@ -170,6 +182,8 @@ impl App {
         if self.timeline.pagination == Pagination::InFlight {
             self.timeline.pagination = Pagination::Idle;
         }
+        // The failure's status says why the jump stops short.
+        self.jump_wait = None;
         self.set_status(
             StatusKind::Error,
             format!("Could not load older messages: {error}"),
@@ -183,6 +197,10 @@ impl App {
         let Some(cursor) = self.timeline.cursor() else {
             return;
         };
+        if matches!(motion, Motion::First | Motion::Last) {
+            // `gg` and `G` are jumps (design, "Jump list").
+            self.record_jump();
+        }
         let half_pages =
             |count: u32| (count as usize).saturating_mul(self.half_page(Pane::Timeline));
         let entries = self.timeline.entries();
@@ -214,13 +232,7 @@ impl App {
     /// [`PAGINATE_WITHIN`] older items, or there are no items yet, unless the
     /// room's start is loaded or a request is in flight.
     fn check_pagination(&mut self, effects: &mut Vec<Effect>) {
-        let Some(room) = &self.open_room else {
-            return;
-        };
-        let timeline = &mut self.timeline;
-        if timeline.pagination != Pagination::Idle {
-            return;
-        }
+        let timeline = &self.timeline;
         let older = timeline.cursor().map_or(0, |cursor| {
             timeline.entries[..cursor]
                 .iter()
@@ -229,7 +241,18 @@ impl App {
                 .count()
         });
         if older <= PAGINATE_WITHIN {
-            timeline.pagination = Pagination::InFlight;
+            self.paginate(effects);
+        }
+    }
+
+    /// Requests back pagination of the open room, unless its start is
+    /// loaded or a request is in flight.
+    pub(super) fn paginate(&mut self, effects: &mut Vec<Effect>) {
+        let Some(room) = &self.open_room else {
+            return;
+        };
+        if self.timeline.pagination == Pagination::Idle {
+            self.timeline.pagination = Pagination::InFlight;
             effects.push(Effect::Matrix(MatrixEffect::PaginateBackwards(
                 room.clone(),
             )));
@@ -417,12 +440,13 @@ impl App {
 
     /// Starts a new timeline when another room or no room is open, and closes
     /// what belongs to the previous one: its viewport, which must not count
-    /// for the new room's entries before the new room is drawn, a message
-    /// view (a help view stays), the picker, a confirmation, and the focus
-    /// and mention menu of its composer.
+    /// for the new room's entries before the new room is drawn, the wait for
+    /// a jump's message, a message view (a help view stays), the picker, a
+    /// confirmation, and the focus and mention menu of its composer.
     pub(super) fn reset_timeline(&mut self, effects: &mut Vec<Effect>) {
         self.timeline = Timeline::default();
         self.timeline_viewport = None;
+        self.jump_wait = None;
         if matches!(self.view, Some(View::Message(_))) {
             self.close_view(effects);
         }
@@ -452,7 +476,10 @@ impl App {
             .as_ref()
             .map(|reply| self.timeline.event_position(&reply.event));
         match target {
-            Some(Some(index)) => self.place_timeline_cursor(index, effects),
+            Some(Some(index)) => {
+                self.record_jump();
+                self.place_timeline_cursor(index, effects);
+            }
             Some(None) => {
                 self.set_status(StatusKind::Error, "The replied-to message is not loaded");
             }
