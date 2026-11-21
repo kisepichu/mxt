@@ -39,6 +39,10 @@ marked **Breaking:**.
   `<End>` or `<C-e>`, `<S-Left>` and `<S-Right>` by word, and typing,
   `<BS>` and `<Del>` at the cursor. They work by grapheme cluster, so an
   emoji with a skin tone is one character, also for the recovery key's `*`.
+- When newer messages are below the timeline pane, for example after a
+  burst of messages arrived while the cursor was on an older one, the
+  composer's top rule ends with `↓ N newer`; it goes once the pane shows
+  the newest message.
 
 ### Changed
 
