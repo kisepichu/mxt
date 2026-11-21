@@ -75,7 +75,8 @@ These are errors:
 - a `ui.room_list.width` outside 12 to 80, and an empty `ui.time_format`;
 - a `files.download_dir` that is neither absolute nor starts with `~/`, and a
   `files.opener` without a program;
-- malformed key notation, such as `"<C-x"`, `"<S-1>"` or `"<C-leader>"`;
+- malformed key notation, such as `"<C-x"`, `"<C-x<CR>"`, `"<>"`, `"<S-1>"`
+  or `"<C-leader>"`;
 - `pick` together with `query`, `file.upload` without `path`, an empty
   `query`, `path` or `emoji`, a binding table without `action`, and an empty
   array as a binding;
@@ -104,9 +105,9 @@ has the default in the tables below, and the default binding of the same
 keys in the same table stays, if there is one. An array with one unknown
 action is ignored whole. `ui.read_receipts` is the one exception: an unknown
 value sends private receipts, not the default public ones. While an unknown
-`ui.leader` falls back to `<Space>`, `"<leader>x"` and `"<Space>x"` in one
-table are the same keys; the later of the two in the file is then ignored
-with a warning, not an error.
+`ui.leader` falls back to `<Space>`, two spellings in one table that only
+the fallback makes the same keys, such as `"<leader>x"` and `"<Space>x"`,
+are not an error: the later of the two in the file is ignored with a warning.
 
 A warning has the form of an error and ends in `(ignored)`. For example, with
 a misspelled action on line 5:
@@ -128,6 +129,15 @@ configuration; see :messages` (or how many) in the error color. `:messages`
 lists each warning, and the log has them too (see
 [Files](../README.md#files)). Nothing is silently ignored: a typo is an
 error, or a warning that the status line points to at every start.
+
+A misspelled required key is both: mxt stops because the key is missing,
+and prints the warnings it found before the error, which name the
+misspelling. For example, with `[acount]` on line 1:
+
+```text
+mxt: /home/alice/.config/mxt/config.toml:1:1: missing field `account`
+/home/alice/.config/mxt/config.toml:1:2: acount: unknown table (ignored)
+```
 
 Within one binding the first problem decides, in this order: its keys, the
 same keys spelled twice, then each action, its name, the names of its
@@ -252,7 +262,8 @@ Keys use nvim's notation. Key sequences are TOML strings, so quote them:
   `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`, `Space`,
   `F1` to `F12`, and `lt`, `Bslash` and `Bar` for `<`, `\` and `|`.
 - `<leader>` is `ui.leader`; it takes no modifiers.
-- A `<` without a `>` after it is an error; write `<lt>` for `<`. A key name
+- A `<` without its `>` is an error, also when the `>` of a later key
+  follows (`"<C-x<CR>"`), and so is `<>`; write `<lt>` for `<`. A key name
   or a modifier that mxt does not know, such as `<F13>` or `<D-s>`, ignores
   the binding with a warning (see [Errors and warnings](#errors-and-warnings)).
 - With ctrl, letters have no case: `<C-a>` and `<C-A>` are the same key.

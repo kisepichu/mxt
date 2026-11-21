@@ -761,6 +761,31 @@ fn an_unknown_leader_falls_back_to_space() {
     let (line, msg) = err(&text("\"<C-a>\" = \"nop\"\n\"<C-A>\" = \"app.quit\"\n"));
     assert_eq!(line, 7);
     assert!(msg.ends_with("on line 6"), "{msg}");
+    let (line, msg) = err(&text(
+        "\"<leader>x\" = \"nop\"\n\"<Leader>x\" = \"app.quit\"\n",
+    ));
+    assert_eq!(line, 7);
+    assert!(msg.ends_with("on line 6"), "{msg}");
+    // Both spellings may write `<leader>`: only the fallback makes these one.
+    let (_, warnings) = warned(&text(
+        "\"<leader>x<Space>\" = \"app.quit\"\n\"<Space>x<leader>\" = \"nop\"\n",
+    ));
+    assert_eq!(
+        warnings,
+        expected(&[
+            (
+                4,
+                10,
+                "ui.leader: invalid key \"<F13>\": unknown key <F13> (ignored)"
+            ),
+            (
+                7,
+                1,
+                "keymap.normal: \"<Space>x<leader>\" is the same key sequence as \
+                 \"<leader>x<Space>\" on line 6, since ui.leader fell back to \"<Space>\" (ignored)"
+            ),
+        ])
+    );
 }
 
 #[test]
@@ -796,6 +821,32 @@ fn wrong_types_and_malformed_values_stay_errors() {
             10,
             "ui.leader: invalid key \"<leader>\": <leader> cannot be used in the leader itself",
         ),
+        (
+            "[keymap.normal]\n\"<C-x<CR>\" = \"nop\"\n",
+            4,
+            1,
+            "keymap.normal: invalid key \"<C-x<CR>\": \"<\" at byte 0 is not closed by \">\"; \
+             write <lt> for a literal \"<\"",
+        ),
+        (
+            "[ui]\nleader = \"<C-x<CR>\"\n",
+            4,
+            10,
+            "ui.leader: invalid key \"<C-x<CR>\": \"<\" at byte 0 is not closed by \">\"; \
+             write <lt> for a literal \"<\"",
+        ),
+        (
+            "[keymap.normal]\n\"<>\" = \"nop\"\n",
+            4,
+            1,
+            "keymap.normal: invalid key \"<>\": \"<\" at byte 0 has no key before \">\"",
+        ),
+        (
+            "[ui]\nleader = \"<>\"\n",
+            4,
+            10,
+            "ui.leader: invalid key \"<>\": \"<\" at byte 0 has no key before \">\"",
+        ),
     ] {
         assert_eq!(
             err_at(&format!("{MINIMAL}{text}")),
@@ -813,6 +864,31 @@ fn wrong_types_and_malformed_values_stay_errors() {
     ] {
         assert_eq!(err(&format!("{MINIMAL}{text}")).0, line, "{text}");
     }
+}
+
+#[test]
+fn a_missing_key_is_printed_with_the_warnings_before_it() {
+    let printed = |text: &str| {
+        parse(text, Path::new("config.toml"), Path::new("/home/alice"))
+            .unwrap_err()
+            .to_string()
+    };
+    // A missing `account` is about the file, not about the first table.
+    assert_eq!(
+        printed("[acount]\nuser_id = \"@alice:example.org\"\n"),
+        "config.toml:1:1: missing field `account`\n\
+         config.toml:1:2: acount: unknown table (ignored)"
+    );
+    assert_eq!(
+        printed("[ui]\ntimeoutlen = 300\n"),
+        "config.toml:1:1: missing field `account`"
+    );
+    assert_eq!(
+        printed("[account]\nuser-id = \"@alice:example.org\"\n[ui]\nfont = \"Iosevka\"\n"),
+        "config.toml:1:1: account: missing field `user_id`\n\
+         config.toml:2:1: account.user-id: unknown key (ignored)\n\
+         config.toml:4:1: ui.font: unknown key (ignored)"
+    );
 }
 
 #[test]

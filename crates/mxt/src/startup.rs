@@ -243,10 +243,15 @@ async fn run_ui(
     let receipts = settings.read_receipts;
     let image_preview = settings.image_preview;
     let mut app = App::new(keymap, settings, user_id);
-    // `main` has logged them; the status line counts them at once.
-    app.update(Msg::ConfigWarnings {
+    // `main` has logged them; the status line counts them at once. The core
+    // only records them, so there is no effect to run before the loop.
+    let warning_effects = app.update(Msg::ConfigWarnings {
         warnings: warnings.iter().map(ToString::to_string).collect(),
     });
+    debug_assert!(
+        warning_effects.is_empty(),
+        "Msg::ConfigWarnings has no effects"
+    );
     let (to_core, from_matrix) = mpsc::unbounded_channel();
     let (to_matrix, effects) = mpsc::unbounded_channel();
     let mut matrix =

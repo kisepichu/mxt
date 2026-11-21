@@ -715,12 +715,14 @@ impl App {
     }
 
     /// Keeps `message` in the history, dropping the oldest beyond
-    /// [`STATUS_HISTORY`]; the status line does not show it.
+    /// [`STATUS_HISTORY`]. The status line does not show it, nor the message
+    /// it was showing, which is no longer the newest.
     fn remember_status(&mut self, message: StatusMessage) {
         if self.status_history.len() == STATUS_HISTORY {
             self.status_history.pop_front();
         }
         self.status_history.push_back(message);
+        self.status_shown = false;
     }
 
     /// `Msg::ConfigWarnings`: the warnings go into the history first, then

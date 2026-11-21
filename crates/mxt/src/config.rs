@@ -13,12 +13,13 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt::{self, Write as _};
 use std::io;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use mxt_core::action::{Action, ActionError, Binding};
 use mxt_core::ids::UserId;
 use mxt_core::keymap::{Keymap, TableId};
-use mxt_core::keys::{Key, KeyParseError, KeySeq};
+use mxt_core::keys::{Key, KeyCode, KeyParseError, KeySeq, Modifiers};
 use mxt_core::settings::{ReceiptKind, Settings};
 use mxt_tui::{RoomListLayout, RoomListWidth, TimeFormat};
 use serde::Deserialize as _;
@@ -81,7 +82,7 @@ pub fn load(path: &Path, home: &Path) -> Result<Config, ConfigError> {
 /// The same for a string, for tests; `path` is only used in messages.
 pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Config, ConfigError> {
     let source = Source { text, path };
-    let mut document = DeTable::parse(text).map_err(|error| source.toml_error(&error))?;
+    let mut document = DeTable::parse(text).map_err(|error| source.syntax_error(&error))?;
     let mut warnings = Vec::new();
     prune(
         &source,
@@ -90,13 +91,21 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Config, ConfigError
         &mut String::new(),
         &mut warnings,
     );
+    let root = document.span();
     let dto::File {
         account,
         ui,
         files,
         keymap,
-    } = dto::File::deserialize(toml::de::Deserializer::from(document))
-        .map_err(|error| source.toml_error(&error))?;
+    } = match dto::File::deserialize(toml::de::Deserializer::from(document)) {
+        Ok(file) => file,
+        // A key that is missing may be there misspelled, which its warning
+        // names (design, "Layers").
+        Err(error) => {
+            warnings.sort_by_key(|warning| (warning.line, warning.column));
+            return Err(source.dto_error(&error, &root, warnings));
+        }
+    };
 
     let user_id = account.user_id;
     if !is_user_id(user_id.get_ref()) {
@@ -302,6 +311,10 @@ pub enum ConfigError {
         line: usize,
         column: usize,
         message: String,
+        /// The warnings found before a wrong type or a missing key stopped
+        /// the reading, printed after the error: a key that is missing may
+        /// be one of them, misspelled. Empty for any other error.
+        warnings: Vec<ConfigWarning>,
     },
 }
 
@@ -315,7 +328,13 @@ impl fmt::Display for ConfigError {
                 line,
                 column,
                 message,
-            } => write!(f, "{}:{line}:{column}: {message}", path.display()),
+                warnings,
+            } => {
+                write!(f, "{}:{line}:{column}: {message}", path.display())?;
+                warnings
+                    .iter()
+                    .try_for_each(|warning| write!(f, "\n{warning}"))
+            }
         }
     }
 }
@@ -361,7 +380,8 @@ impl fmt::Display for ConfigWarning {
 /// stays. Two spellings of one key sequence in a table (`<leader>x` and
 /// `<Space>x`, `<C-a>` and `<C-A>`) are an error at the second, because
 /// `Keymap::new` would keep only one of them; but when `ui.leader` fell back
-/// to `<Space>` and only one of the two writes `<leader>`, a version that
+/// to `<Space>` and only the fallback makes them one (`<leader>x` and
+/// `<Space>x`, `<leader>x<Space>` and `<Space>x<leader>`), a version that
 /// knows the leader tells them apart, so the second is ignored with a
 /// warning.
 fn bindings(
@@ -393,7 +413,7 @@ fn bindings(
                     first.get_ref(),
                     source.position(first.span().start).0,
                 );
-                if leader_fell_back && has_leader(key.get_ref()) != has_leader(first.get_ref()) {
+                if leader_fell_back && differ_by_leader(key.get_ref(), first.get_ref()) {
                     let message = format!("{message}, since ui.leader fell back to \"<Space>\"");
                     warnings.push(source.ignored(&key, message));
                     continue;
@@ -417,12 +437,12 @@ fn bindings(
     Ok(bindings)
 }
 
-/// Whether key notation writes `<leader>`, in any case.
-fn has_leader(keys: &str) -> bool {
-    const LEADER: &[u8] = b"<leader>";
-    keys.as_bytes()
-        .windows(LEADER.len())
-        .any(|window| window.eq_ignore_ascii_case(LEADER))
+/// Whether two spellings that parse are different key sequences with a
+/// leader that no other spelling writes, as a leader this version does not
+/// know: `<F13>` is not key notation, so only `<leader>` gives it.
+fn differ_by_leader(a: &str, b: &str) -> bool {
+    let leader = KeySeq::from_keys(vec![Key::new(KeyCode::F(13), Modifiers::default())]);
+    KeySeq::parse(a, &leader) != KeySeq::parse(b, &leader)
 }
 
 /// Checks the actions of one binding in order; `setting` names it in
@@ -541,12 +561,22 @@ impl Source<'_> {
     }
 
     fn invalid_at(&self, at: usize, message: String) -> ConfigError {
+        self.invalid_with(at, message, Vec::new())
+    }
+
+    fn invalid_with(
+        &self,
+        at: usize,
+        message: String,
+        warnings: Vec<ConfigWarning>,
+    ) -> ConfigError {
         let (line, column) = self.position(at);
         ConfigError::Invalid {
             path: self.path.to_owned(),
             line,
             column,
             message,
+            warnings,
         }
     }
 
@@ -578,19 +608,35 @@ impl Source<'_> {
         (line, before[line_start..].chars().count() + 1)
     }
 
-    /// A syntax error or a serde error (unknown fields, wrong types, missing
-    /// fields), prefixed with the setting it is in when the document parses.
-    fn toml_error(&self, error: &toml::de::Error) -> ConfigError {
+    /// A TOML syntax error; it names no setting, as the document does not
+    /// parse.
+    fn syntax_error(&self, error: &toml::de::Error) -> ConfigError {
+        let at = error.span().map_or(0, |span| span.start);
+        self.invalid_at(at, error.message().to_owned())
+    }
+
+    /// A serde error of the DTOs (wrong types, missing keys) with the
+    /// `warnings` found before it, prefixed with the setting it is in. An
+    /// error with `root`, the span of the document, is about the document
+    /// itself (a missing `account`), so it names no setting, not even the
+    /// table its position falls in.
+    fn dto_error(
+        &self,
+        error: &toml::de::Error,
+        root: &Range<usize>,
+        warnings: Vec<ConfigWarning>,
+    ) -> ConfigError {
         let at = error.span().map_or(0, |span| span.start);
         let setting = DeTable::parse(self.text)
             .ok()
-            .and_then(|root| path_in_table(root.get_ref(), at).map(|path| dotted(&path)))
+            .filter(|_| error.span().as_ref() != Some(root))
+            .and_then(|document| path_in_table(document.get_ref(), at).map(|path| dotted(&path)))
             .filter(|setting| !setting.is_empty());
         let message = match setting {
             Some(setting) => format!("{setting}: {}", error.message()),
             None => error.message().to_owned(),
         };
-        self.invalid_at(at, message)
+        self.invalid_with(at, message, warnings)
     }
 }
 

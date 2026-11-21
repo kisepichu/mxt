@@ -60,7 +60,8 @@ marked **Breaking:**.
   Syntax errors, wrong types, values out of range, conflicting or missing
   arguments and malformed keys still stop it. At startup the status line
   says how many settings were ignored, and the log names each with its
-  line.
+  line. A misspelled required key, such as `[acount]`, stops the start as
+  a missing key, printed with the warning that names the misspelling.
 - On the command line, the `/` search line, picker queries and the recovery
   key prompt, `<C-u>` deletes the text before the cursor and `<C-w>` the
   word before it, with words split as in the editors: `foo.bar` loses `bar`

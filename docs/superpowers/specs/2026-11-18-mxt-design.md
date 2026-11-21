@@ -1635,8 +1635,12 @@ action runs (see "Joining rooms and direct messages").
   see :messages` (`Ignored 3 settings in the configuration; see :messages`
   for more). Nothing is printed to the terminal.
 - A typo is never silently ignored: it is an error, or a warning that the
-  status line points to at every start. A configuration that loaded before
-  loads the same way, since every warning was an error before.
+  status line points to at every start. When the DTOs stop at a wrong type
+  or a missing key, the error is printed with the warnings found so far,
+  since a missing key may be one of them misspelled (`[acount]`,
+  `user-id`), and a key missing at the root (`account`) names no setting.
+  A configuration that loaded before loads the same way, since every
+  warning was an error before.
 - Later versions extend the configuration with new names only (keys,
   tables, actions, arguments, values, key names) and keep the meaning of
   the existing ones, so that older versions can skip what they do not
