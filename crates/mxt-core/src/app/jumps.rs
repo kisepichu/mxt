@@ -167,8 +167,9 @@ enum Reach {
     Room(usize),
     /// The room is not in the room list.
     Left,
-    /// The shown timeline is the entry's, its start is loaded, and the
-    /// event is not there.
+    /// The entry's timeline is the shown one or the open room's main
+    /// timeline kept aside for a thread, its start is loaded, and the event
+    /// is not there: judged at once, before the move.
     Gone,
 }
 
@@ -252,11 +253,9 @@ impl App {
         let Some(room) = self.rooms.position(&jump.timeline.room) else {
             return Reach::Left;
         };
-        match &jump.event {
-            Some(event)
-                if self.shows(&jump.timeline)
-                    && self.timeline.reached_start()
-                    && self.timeline.event_position(event).is_none() =>
+        match (&jump.event, self.kept_timeline(&jump.timeline)) {
+            (Some(event), Some(timeline))
+                if timeline.reached_start() && timeline.event_position(event).is_none() =>
             {
                 Reach::Gone
             }

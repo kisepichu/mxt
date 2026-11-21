@@ -312,7 +312,9 @@ In a thread:
 - `q` or `<Esc>` (`thread.close`) shows the timeline again with the cursor
   on the root. When the timeline no longer holds the root, older messages
   load until it does; the status line says `Loading older messages…`, and
-  any key stops the wait.
+  any key stops the wait. When the root is gone (not there a second after
+  the timeline's oldest message is loaded), the cursor follows the newest
+  message.
 - Opening another room leaves the thread.
 
 In the timeline, `gd` on a reply to a message in a thread (sent from a

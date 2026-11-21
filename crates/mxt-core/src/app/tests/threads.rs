@@ -521,6 +521,30 @@ fn a_threads_receipt_is_threaded_while_the_timeline_is_unread_or_newer() {
 }
 
 #[test]
+fn a_reply_with_the_unthreaded_receipt_gets_no_threaded_one_when_its_thread_opens_again() {
+    let mut app = timed_root(3_000);
+    viewport(&mut app, 0, 2);
+    timed_thread(&mut app);
+    assert_eq!(viewport(&mut app, 0, 1), vec![thread_receipt(10, true)]);
+    keys(&mut app, "q");
+    // A newer message of the timeline is read.
+    app.update(Msg::Timeline {
+        timeline: main_of(C),
+        diffs: vec![TimelineDiff::PushBack(at(5_000, msg(4)))],
+    });
+    assert_eq!(viewport(&mut app, 0, 3), vec![receipt(C, 4)]);
+    keys(&mut app, "t");
+    thread_reset(&mut app, 2, vec![at(2_000, msg(2)), at(4_000, msg(10))]);
+    assert_eq!(viewport(&mut app, 0, 1), vec![]);
+    // A newer reply gets its receipt.
+    app.update(Msg::Timeline {
+        timeline: thread_of(C, 2),
+        diffs: vec![TimelineDiff::PushBack(at(4_500, msg(11)))],
+    });
+    assert_eq!(viewport(&mut app, 0, 2), vec![thread_receipt(11, false)]);
+}
+
+#[test]
 fn a_thread_without_replies_sends_no_receipt_for_its_root() {
     let mut app = on_the_root();
     keys(&mut app, "t");
@@ -572,6 +596,30 @@ fn opening_and_closing_a_thread_are_jumps() {
     assert_eq!(
         (app.shown_timeline(), cursor_event(&app)),
         (Some(thread_of(C, 2)), on(11))
+    );
+}
+
+#[test]
+fn a_jump_to_a_message_gone_from_the_timeline_aside_is_skipped_at_once() {
+    let mut app = opened();
+    reset(&mut app, main_entries());
+    done(&mut app, true);
+    // Entries on message 3 and on the root.
+    keys(&mut app, "ggjt");
+    thread_reset(&mut app, 2, thread_entries());
+    // The root goes from the timeline aside, whose start is loaded.
+    app.update(Msg::Timeline {
+        timeline: main_of(C),
+        diffs: vec![TimelineDiff::Remove(1)],
+    });
+    assert_eq!(no_timers(keys(&mut app, "<C-o>")), vec![unsubscribe(2)]);
+    assert_eq!(
+        (app.shown_timeline(), cursor_event(&app)),
+        (Some(main_of(C)), on(3))
+    );
+    assert_eq!(
+        status(&app),
+        Some("Skipped a jump to a message that is gone")
     );
 }
 
@@ -648,6 +696,43 @@ fn gd_to_a_message_in_a_thread_opens_that_thread() {
     );
     keys(&mut app, "<C-o>");
     assert_eq!(status(&app), Some("No older jump"));
+}
+
+#[test]
+fn gd_in_a_thread_to_a_message_in_another_thread_opens_that_thread() {
+    let mut app = opened();
+    reset(
+        &mut app,
+        vec![msg(1), with_replies(1, msg(2)), with_replies(1, msg(3))],
+    );
+    keys(&mut app, "kt");
+    thread_reset(&mut app, 2, vec![msg(2), reply(10, 30)]);
+    let find = Effect::Matrix(MatrixEffect::FindThread {
+        room: id(C),
+        event: event(30),
+    });
+    assert_eq!(no_timers(keys(&mut app, "gd")), vec![find]);
+    let found = app.update(Msg::ThreadFound {
+        room: id(C),
+        event: event(30),
+        root: Some(event(3)),
+    });
+    assert_eq!(
+        found,
+        vec![unsubscribe(2), subscribe(3), paginate_thread(3)]
+    );
+    assert_eq!(status(&app), Some("Loading older messages…"));
+    thread_reset(&mut app, 3, vec![msg(3), msg(30), msg(31)]);
+    assert_eq!(
+        (app.shown_timeline(), cursor_event(&app)),
+        (Some(thread_of(C, 3)), on(30))
+    );
+    assert_eq!(status(&app), None);
+    // Back to the reply in the first thread.
+    assert_eq!(
+        no_timers(keys(&mut app, "<C-o>")),
+        vec![unsubscribe(3), subscribe(2), paginate_thread(2)]
+    );
 }
 
 #[test]

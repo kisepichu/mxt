@@ -395,6 +395,45 @@ async fn an_upload_into_a_thread_falls_back_to_its_latest_reply() {
 }
 
 #[tokio::test]
+async fn an_effect_on_a_reply_in_a_thread_goes_through_the_threads_timeline() {
+    let mut adapter = with_thread().await;
+    adapter
+        .server
+        .mock_room_send()
+        .body_matches_partial_json(json!({
+            "m.relates_to": {
+                "rel_type": "m.annotation",
+                "event_id": FIRST,
+                "key": "👍",
+            },
+        }))
+        .ok(event_id!("$reaction:example.org"))
+        .expect(1)
+        .mount()
+        .await;
+    // The main timeline has no item of the reply.
+    adapter.effect(MatrixEffect::ToggleReaction {
+        room: room(),
+        item: remote(FIRST),
+        key: "👍".to_owned(),
+    });
+    adapter
+        .core
+        .until_thread("the reaction", |entries| {
+            item(entries, &remote(FIRST)).is_some_and(|reply| {
+                reply
+                    .reactions
+                    .iter()
+                    .map(|group| group.key.as_str())
+                    .eq(["👍"])
+            })
+        })
+        .await;
+    until_requested(&adapter, "/send/m.reaction/").await;
+    adapter.server.server().verify().await;
+}
+
+#[tokio::test]
 async fn a_threads_receipt_is_one_threaded_request() {
     let adapter = Adapter::start().await;
     let reply = event_id!("$reply:example.org");

@@ -122,9 +122,13 @@ impl TimelinePane {
         area: Rect,
         app: &App,
     ) -> Option<(usize, usize)> {
-        let shown = app.shown_timeline();
-        if self.shown != shown {
-            self.shown = shown;
+        // Compared without building the shown `TimelineId` on every frame.
+        let same = match &self.shown {
+            Some(shown) => app.shows(shown),
+            None => app.open_room().is_none(),
+        };
+        if !same {
+            self.shown = app.shown_timeline();
             self.anchor = None;
         }
         let entries = app.timeline();

@@ -2,6 +2,8 @@
 //! place): its diffs, the cursor, back pagination, read receipts, and the
 //! message actions on the item under the cursor.
 
+use std::collections::HashSet;
+
 use super::jumps::AfterGone;
 use super::{App, Confirm, Focus, Motion, StatusKind, View};
 use crate::effect::{Effect, MatrixEffect, UiEffect, ViewContent};
@@ -36,6 +38,10 @@ pub(super) struct Timeline {
     /// latest activity at `room.mark_read`. Thread roots with a newer reply
     /// are marked unread (design, "Threads").
     read_up_to: Option<Timestamp>,
+    /// In the main timeline, the threads' events that got an unthreaded
+    /// receipt since mxt opened the room: a thread opened again sends them
+    /// no receipt, so none gets a threaded one too (design, "Threads").
+    unthreaded_thread_receipts: HashSet<EventId>,
 }
 
 /// An item and its index in the entries.
@@ -190,8 +196,8 @@ impl Timeline {
 impl App {
     /// `Msg::Timeline`: the shown timeline's diffs, and the main timeline's
     /// while a thread is shown, which go to it aside without moving
-    /// anything else: no pagination, receipt or jump looks at it until it
-    /// is shown again. Other timelines' diffs are ignored.
+    /// anything else: no pagination, receipt or jump wait looks at it until
+    /// it is shown again. Other timelines' diffs are ignored.
     pub(super) fn timeline_diffs(
         &mut self,
         timeline: &TimelineId,
@@ -213,9 +219,27 @@ impl App {
     /// The open room's main timeline while it is kept aside for a thread,
     /// when `timeline` names it.
     fn main_aside(&mut self, timeline: &TimelineId) -> Option<&mut Timeline> {
-        let open = self.thread.as_mut()?;
-        (timeline.thread.is_none() && self.open_room.as_ref() == Some(&timeline.room))
-            .then_some(&mut open.main)
+        if !self.names_open_main(timeline) {
+            return None;
+        }
+        self.thread.as_mut().map(|open| &mut open.main)
+    }
+
+    /// The state of `timeline` when the core has it: the shown timeline, or
+    /// the open room's main timeline kept aside for a thread.
+    pub(super) fn kept_timeline(&self, timeline: &TimelineId) -> Option<&Timeline> {
+        if self.shows(timeline) {
+            Some(&self.timeline)
+        } else if self.names_open_main(timeline) {
+            self.thread.as_ref().map(|open| &open.main)
+        } else {
+            None
+        }
+    }
+
+    /// Whether `timeline` is the open room's main timeline.
+    fn names_open_main(&self, timeline: &TimelineId) -> bool {
+        timeline.thread.is_none() && self.open_room.as_ref() == Some(&timeline.room)
     }
 
     /// `Msg::PaginationDone`. Pagination goes on while the cursor is still
@@ -340,7 +364,9 @@ impl App {
     /// read to its newest message and that is older than the thread's
     /// event: then it is unthreaded and does both (design, "Threads"). The
     /// root alone gets none: it is in the main timeline, whose receipt
-    /// covers it.
+    /// covers it. Nor does an event that got a thread's unthreaded receipt
+    /// since the room opened, when its thread opens again: that receipt
+    /// read it, and the homeserver drops a threaded one next to it.
     pub(super) fn check_receipt(&mut self, effects: &mut Vec<Effect>) {
         let (Some(room), Some(viewport)) = (&self.open_room, self.timeline_viewport) else {
             return;
@@ -367,7 +393,14 @@ impl App {
             self.clear_room_unread(&room);
             return effects.push(Effect::Matrix(MatrixEffect::SendReceipt { room, event }));
         };
+        if open.main.unthreaded_thread_receipts.contains(&event) {
+            return;
+        }
         let unthreaded = open.main.read_before(time);
+        if unthreaded {
+            open.main.unthreaded_thread_receipts.insert(event.clone());
+            open.main.read_up_to_at_least(time);
+        }
         effects.push(Effect::Matrix(MatrixEffect::SendThreadReceipt {
             room: room.clone(),
             root: open.root.clone(),
@@ -375,7 +408,6 @@ impl App {
             unthreaded,
         }));
         if unthreaded {
-            open.main.read_up_to_at_least(time);
             self.clear_room_unread(&room);
         }
     }
