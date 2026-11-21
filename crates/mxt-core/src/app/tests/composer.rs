@@ -210,7 +210,7 @@ fn drafts_are_kept_per_room_across_room_switches() {
     assert_eq!(app.open_room(), Some(&id(B)));
     assert_eq!(app.draft(&main_of(B)), None);
     app.update(Msg::Timeline {
-        room: id(B),
+        timeline: main_of(B),
         diffs: vec![TimelineDiff::Reset(vec![own(remote(5), "mine")])],
     });
     // The composer of `!b` is empty although the one of `!c` is not.
@@ -897,7 +897,7 @@ fn opening_another_room_or_losing_the_open_room_closes_what_belongs_to_it() {
     ]);
     let timeline = |app: &mut App, room: &str, entry: TimelineEntry| {
         app.update(Msg::Timeline {
-            room: id(room),
+            timeline: main_of(room),
             diffs: vec![TimelineDiff::Reset(vec![entry])],
         });
     };

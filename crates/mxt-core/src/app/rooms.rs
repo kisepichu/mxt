@@ -136,11 +136,21 @@ impl App {
     }
 
     /// `room.mark_read`. The room's counts are cleared at once (design,
-    /// "Optimistic clearing"), so a following action sees it read.
+    /// "Optimistic clearing"), so a following action sees it read. On the
+    /// open room, the thread roots' marks go up to the room's latest
+    /// activity, the time of the latest event the receipt marks read.
     pub(super) fn mark_read(&mut self, effects: &mut Vec<Effect>) {
-        let Some(id) = self.target_room().map(|room| room.id.clone()) else {
+        let Some((id, latest)) = self
+            .target_room()
+            .map(|room| (room.id.clone(), room.latest_activity))
+        else {
             return self.set_status(StatusKind::Error, "No room");
         };
+        if self.open_room.as_ref() == Some(&id)
+            && let Some(latest) = latest
+        {
+            self.timeline.read_up_to_at_least(latest);
+        }
         self.clear_room_unread(&id);
         effects.push(Effect::Matrix(MatrixEffect::MarkRoomRead(id)));
     }

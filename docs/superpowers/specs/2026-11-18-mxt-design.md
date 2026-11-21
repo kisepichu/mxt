@@ -924,7 +924,8 @@ instead, and it never takes more than half of the width.
   not involved. It reads "newer", not "new": after the cursor moved up, the
   count includes messages the pane showed before.
 - Messages taller than the pane show `[+N lines]`, and `message.view` shows
-  them in full.
+  them in full. A thread root keeps its `💬` row as its last row: the body
+  is cut above it, with the marker where the body is cut.
 
 ### Default keymap
 

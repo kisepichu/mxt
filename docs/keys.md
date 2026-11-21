@@ -43,9 +43,17 @@ reactions follow the message as `👍 2` (yours in bold). Images show as
 `[image: name 800x600]`, files as `[file: name 1.2 MiB]`, and also
 `[sticker: …]`, `(deleted)`, `(unable to decrypt)` (the key may still
 arrive) and `(unsupported: …)`.
-A message taller than the pane ends with `[+N lines]`; `<CR>` shows it in
+A message taller than the pane is cut with `[+N lines]`; `<CR>` shows it in
 full. Date dividers and a `new messages` line, where you stopped reading,
 come between messages.
+Replies in threads are not in the timeline. Their root ends with a dim row
+`💬 3 · 14:32`: the number of replies and the time of the latest, with its
+date when it is on another day than the root, or `💬 3` alone until mxt
+has loaded the latest reply. The row ends with `· unread` while the room's
+unread count includes replies in that thread: replies newer than what mxt
+last marked read in the room since you opened it (the timeline's newest
+message once the pane shows it, or `room.mark_read`), in a room that has
+unread messages.
 When newer messages are below the pane, for example after a burst arrived
 while the cursor was on an older message, the composer's top rule ends with
 `↓ N newer`. `N` counts the messages below the pane, yours and those still

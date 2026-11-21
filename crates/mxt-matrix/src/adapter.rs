@@ -230,14 +230,14 @@ async fn run_effects(
                     let sent = async move { send_receipt(&client, &room, &event, receipts).await };
                     running.spawn(reported(&to_core, "Sending the read receipt failed", sent));
                 }
-                Some(MatrixEffect::PaginateBackwards(room)) => {
-                    match timeline.as_mut().filter(|open| *open.room() == room) {
+                Some(MatrixEffect::PaginateBackwards(id)) => {
+                    match timeline.as_mut().filter(|open| *open.id() == id) {
                         Some(open) => open.paginate_backwards(to_core.clone()),
-                        // Opening the room failed; the answer ends the core's
-                        // request.
+                        // Opening the room failed, or the timeline is
+                        // another; the answer ends the core's request.
                         None => {
                             let _ = to_core.send(Msg::PaginationFailed {
-                                room,
+                                timeline: id,
                                 error: Error::TimelineNotOpen.to_string(),
                             });
                         }

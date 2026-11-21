@@ -1,7 +1,7 @@
 //! The open room's timeline: the matrix-sdk-ui `Timeline` subscription, its
 //! back pagination, and the conversion of its items into core entries.
 
-use std::{collections::HashSet, pin::pin, sync::Arc};
+use std::{collections::HashSet, num::NonZeroU32, pin::pin, sync::Arc};
 
 use futures_util::{Stream, StreamExt as _};
 use matrix_sdk::{
@@ -23,19 +23,19 @@ use matrix_sdk_ui::{
     eyeball_im::VectorDiff,
     timeline::{
         self as sdk, EventSendState, EventTimelineItem, InReplyToDetails, MsgLikeKind, Profile,
-        ReactionsByKeyBySender, RoomExt as _, TimelineDetails, TimelineEventItemId,
+        ReactionsByKeyBySender, RoomExt as _, TimelineDetails, TimelineEventItemId, TimelineFocus,
         TimelineItemContent, TimelineItemKind, VirtualTimelineItem,
     },
 };
 use mxt_core::{
     effect::{Outgoing, OutgoingKind},
-    ids::{EventId, RoomId, SendId, Timestamp, TxnId, UserId},
+    ids::{EventId, RoomId, SendId, TimelineId, Timestamp, TxnId, UserId},
     mention::RenderedBody,
     msg::Msg,
     rich::{Block, Inline, RichText},
     timeline::{
-        ItemRef, MessageContent, ReactionGroup, ReplyPreview, SendState, TimelineDiff,
-        TimelineEntry, TimelineItem,
+        ItemRef, MessageContent, ReactionGroup, ReplyPreview, SendState, ThreadSummary,
+        TimelineDiff, TimelineEntry, TimelineItem,
     },
 };
 use tokio::{
@@ -61,30 +61,37 @@ const PAGE: u16 = 20;
 /// reload. Above this, senders keep what lazy loading gives them.
 const MEMBERS_FETCH_LIMIT: u64 = 500;
 
-/// The open room's timeline, and its tasks: the one that forwards its diffs,
-/// the one that fetches reply details, the one that loads the room's
+/// The open room's main timeline, and its tasks: the one that forwards its
+/// diffs, the one that fetches reply details, the one that loads the room's
 /// members (see `MEMBERS_FETCH_LIMIT`), and a back pagination in flight.
 pub(crate) struct Subscription {
-    room: RoomId,
+    id: TimelineId,
     timeline: Arc<Timeline>,
     tasks: JoinSet<()>,
 }
 
 impl Subscription {
-    /// Builds `sdk_room`'s timeline, sends its items as one `Msg::Timeline`
-    /// with a `Reset`, then every batch of its diffs as one `Msg::Timeline`.
-    /// The SDK's diffs are forwarded as they are: a remote echo replaces its
-    /// local echo with `Remove` and `Insert` or `PushBack`. Members are
-    /// lazy-loaded, so the SDK may lack the profiles of senders, the user's
-    /// own included; in rooms of up to `MEMBERS_FETCH_LIMIT` joined members
-    /// the room's members are loaded in the background, and the senders'
-    /// names arrive as `Set` diffs.
+    /// Builds `sdk_room`'s main timeline, without the replies in threads
+    /// (design, "Threads"), sends its items as one `Msg::Timeline` with a
+    /// `Reset`, then every batch of its diffs as one `Msg::Timeline`, each
+    /// for the room's main timeline. The SDK's diffs are forwarded as they
+    /// are: a remote echo replaces its local echo with `Remove` and `Insert`
+    /// or `PushBack`. Members are lazy-loaded, so the SDK may lack the
+    /// profiles of senders, the user's own included; in rooms of up to
+    /// `MEMBERS_FETCH_LIMIT` joined members the room's members are loaded in
+    /// the background, and the senders' names arrive as `Set` diffs.
     pub(crate) async fn start(
         sdk_room: &Room,
         room: RoomId,
         to_core: UnboundedSender<Msg>,
     ) -> Result<Subscription, Error> {
-        let timeline = Arc::new(sdk_room.timeline().await.map_err(timeline_error)?);
+        // The SDK makes no item of an event in a thread, remote or local.
+        let focus = TimelineFocus::Live {
+            hide_threaded_events: true,
+        };
+        let built = sdk_room.timeline_builder().with_focus(focus).build().await;
+        let timeline = Arc::new(built.map_err(timeline_error)?);
+        let id = TimelineId::main(room);
         let me = sdk_room.own_user_id().to_owned();
         let (items, diffs) = timeline.subscribe().await;
         let (to_fetch, fetches) = mpsc::unbounded_channel();
@@ -96,25 +103,30 @@ impl Subscription {
         let entries = items.iter().map(|item| entry(item, &me)).collect();
         let reset = vec![TimelineDiff::Reset(entries)];
         let _ = to_core.send(Msg::Timeline {
-            room: room.clone(),
+            timeline: id.clone(),
             diffs: reset,
         });
         let mut tasks = JoinSet::new();
-        tasks.spawn(forward(room.clone(), me, diffs, replies, to_core));
+        tasks.spawn(forward(id.clone(), me, diffs, replies, to_core));
         tasks.spawn(fetch_reply_details(timeline.clone(), fetches));
         if sdk_room.joined_members_count() <= MEMBERS_FETCH_LIMIT {
             let members = timeline.clone();
             tasks.spawn(async move { members.fetch_members().await });
         }
         Ok(Subscription {
-            room,
+            id,
             timeline,
             tasks,
         })
     }
 
+    /// The timeline the core names in its messages and effects.
+    pub(crate) fn id(&self) -> &TimelineId {
+        &self.id
+    }
+
     pub(crate) fn room(&self) -> &RoomId {
-        &self.room
+        &self.id.room
     }
 
     /// The timeline, for the effects that act on its items. They run outside
@@ -126,11 +138,11 @@ impl Subscription {
     /// Loads older events in the background, answered with
     /// `Msg::PaginationDone` or `Msg::PaginationFailed`.
     pub(crate) fn paginate_backwards(&mut self, to_core: UnboundedSender<Msg>) {
-        let (room, timeline) = (self.room.clone(), self.timeline.clone());
+        let (id, timeline) = (self.id.clone(), self.timeline.clone());
         self.tasks.spawn(async move {
             let answer = match timeline.paginate_backwards(PAGE).await {
                 Ok(reached_start) => Msg::PaginationDone {
-                    room,
+                    timeline: id,
                     reached_start,
                 },
                 Err(error) => {
@@ -138,7 +150,10 @@ impl Subscription {
                     let brief = error.brief().to_string();
                     warn!("Loading older messages failed: {brief}");
                     debug!("Loading older messages failed: {error}");
-                    Msg::PaginationFailed { room, error: brief }
+                    Msg::PaginationFailed {
+                        timeline: id,
+                        error: brief,
+                    }
                 }
             };
             let _ = to_core.send(answer);
@@ -168,7 +183,7 @@ impl Subscription {
 }
 
 async fn forward(
-    room: RoomId,
+    id: TimelineId,
     me: OwnedUserId,
     diffs: impl Stream<Item = Vec<VectorDiff<Arc<sdk::TimelineItem>>>>,
     mut replies: ReplyDetails,
@@ -184,7 +199,7 @@ async fn forward(
             })
             .collect();
         let changed = Msg::Timeline {
-            room: room.clone(),
+            timeline: id.clone(),
             diffs,
         };
         if to_core.send(changed).is_err() {
@@ -464,15 +479,16 @@ fn entry(item: &sdk::TimelineItem, me: &ruma::UserId) -> TimelineEntry {
 /// Messages and other message-like events, calls included, are items; state
 /// events and membership changes are hidden.
 fn event_entry(event: &EventTimelineItem, me: &ruma::UserId) -> TimelineEntry {
-    let (content, reply, reactions, edited) = match event.content() {
+    let (content, reply, reactions, edited, thread) = match event.content() {
         TimelineItemContent::MsgLike(msg_like) => (
             msg_like_content(&msg_like.kind),
             msg_like.in_reply_to.as_ref().map(reply_preview),
             reaction_groups(&msg_like.reactions, me),
             matches!(&msg_like.kind, MsgLikeKind::Message(message) if message.is_edited()),
+            thread_summary(msg_like.thread_summary.as_ref()),
         ),
         other => match other_content(other) {
-            Some(content) => (content, None, Vec::new(), false),
+            Some(content) => (content, None, Vec::new(), false, None),
             None => return TimelineEntry::Hidden,
         },
     };
@@ -486,6 +502,23 @@ fn event_entry(event: &EventTimelineItem, me: &ruma::UserId) -> TimelineEntry {
         reactions,
         edited,
         send_state: event.send_state().map(send_state),
+        thread_summary: thread,
+    })
+}
+
+/// The summary of the thread a message is the root of (design, "Threads"):
+/// none without one, and none for one that counts no reply, which the SDK
+/// gives when every reply was redacted and a summary the server bundled may
+/// say. The latest reply's time once the SDK has loaded that reply.
+fn thread_summary(summary: Option<&sdk::ThreadSummary>) -> Option<ThreadSummary> {
+    let summary = summary?;
+    let latest = match &summary.latest_event {
+        TimelineDetails::Ready(event) => Some(timestamp(event.timestamp)),
+        _ => None,
+    };
+    Some(ThreadSummary {
+        replies: NonZeroU32::new(summary.num_replies)?,
+        latest,
     })
 }
 
@@ -965,6 +998,39 @@ mod tests {
         assert_eq!(
             reply_preview(&reply(replied(TimelineDetails::Unavailable))),
             preview(Some("@bob:example.org"), Some("(deleted)"))
+        );
+    }
+
+    #[test]
+    fn thread_summaries_count_replies_and_keep_the_latest_reply_time_once_loaded() {
+        let summary = |num_replies, latest_event| sdk::ThreadSummary {
+            latest_event,
+            num_replies,
+        };
+        let three = NonZeroU32::new(3).unwrap();
+        assert_eq!(thread_summary(None), None);
+        // Every reply redacted, or a bundled summary that says so.
+        let none = summary(0, replied(TimelineDetails::Unavailable));
+        assert_eq!(thread_summary(Some(&none)), None);
+        for latest_event in [TimelineDetails::Unavailable, TimelineDetails::Pending] {
+            assert_eq!(
+                thread_summary(Some(&summary(3, latest_event))),
+                Some(ThreadSummary {
+                    replies: three,
+                    latest: None,
+                })
+            );
+        }
+        let mut latest = replied(TimelineDetails::Unavailable);
+        if let TimelineDetails::Ready(event) = &mut latest {
+            event.timestamp = MilliSecondsSinceUnixEpoch(UInt::from(1_500u32));
+        }
+        assert_eq!(
+            thread_summary(Some(&summary(3, latest))),
+            Some(ThreadSummary {
+                replies: three,
+                latest: Some(Timestamp::from_millis(1_500)),
+            })
         );
     }
 

@@ -29,6 +29,7 @@ pub(super) fn item(id: ItemRef, body: &str) -> TimelineEntry {
         reactions: Vec::new(),
         edited: false,
         send_state: None,
+        thread_summary: None,
     })
 }
 /// A remote message with the body `message <n>`.
@@ -49,23 +50,23 @@ pub(super) fn opened() -> App {
 }
 fn diffs(app: &mut App, diffs: Vec<TimelineDiff>) -> Vec<Effect> {
     app.update(Msg::Timeline {
-        room: id("!c:example.org"),
+        timeline: main_of("!c:example.org"),
         diffs,
     })
 }
 pub(super) fn reset(app: &mut App, entries: Vec<TimelineEntry>) -> Vec<Effect> {
     diffs(app, vec![TimelineDiff::Reset(entries)])
 }
-fn viewport(app: &mut App, first: usize, last: usize) -> Vec<Effect> {
+pub(super) fn viewport(app: &mut App, first: usize, last: usize) -> Vec<Effect> {
     app.update(Msg::Viewport {
         pane: Pane::Timeline,
         first,
         last,
     })
 }
-fn done(app: &mut App, reached_start: bool) -> Vec<Effect> {
+pub(super) fn done(app: &mut App, reached_start: bool) -> Vec<Effect> {
     app.update(Msg::PaginationDone {
-        room: id("!c:example.org"),
+        timeline: main_of("!c:example.org"),
         reached_start,
     })
 }
@@ -75,10 +76,10 @@ fn cursor_body(app: &App) -> String {
         other => panic!("cursor on {other:?}"),
     }
 }
-fn paginate(room: &str) -> Effect {
-    Effect::Matrix(MatrixEffect::PaginateBackwards(id(room)))
+pub(super) fn paginate(room: &str) -> Effect {
+    Effect::Matrix(MatrixEffect::PaginateBackwards(main_of(room)))
 }
-fn receipt(room: &str, n: u32) -> Effect {
+pub(super) fn receipt(room: &str, n: u32) -> Effect {
     Effect::Matrix(MatrixEffect::SendReceipt {
         room: id(room),
         event: event(n),
@@ -332,7 +333,7 @@ fn a_failed_pagination_shows_the_error_and_allows_a_new_request() {
         vec![paginate("!c:example.org")]
     );
     let fx = app.update(Msg::PaginationFailed {
-        room: id("!c:example.org"),
+        timeline: main_of("!c:example.org"),
         error: "request timed out".into(),
     });
     assert_eq!(fx, vec![]);
@@ -528,7 +529,7 @@ fn timeline_search_wraps() {
 fn messages_for_another_room_are_ignored() {
     let mut app = opened();
     let other = app.update(Msg::Timeline {
-        room: id("!a:example.org"),
+        timeline: main_of("!a:example.org"),
         diffs: vec![TimelineDiff::Reset(msgs(0..3))],
     });
     assert_eq!(other, vec![]);
@@ -538,13 +539,16 @@ fn messages_for_another_room_are_ignored() {
         vec![paginate("!c:example.org")]
     );
     app.update(Msg::PaginationFailed {
-        room: id("!a:example.org"),
+        timeline: main_of("!a:example.org"),
         error: "boom".into(),
     });
-    app.update(Msg::PaginationDone {
-        room: id("!a:example.org"),
-        reached_start: true,
+    // Applied, it would request the next page at once: the cursor is near
+    // the oldest item.
+    let fx = app.update(Msg::PaginationDone {
+        timeline: main_of("!a:example.org"),
+        reached_start: false,
     });
+    assert_eq!(fx, vec![]);
     assert_eq!(app.status(), None);
     // Still in flight for `!c`, and its start is not reached.
     assert_eq!(keys(&mut app, "k"), vec![]);
@@ -585,7 +589,7 @@ fn an_opened_room_gets_no_receipt_until_its_own_viewport_arrives() {
     assert_eq!(app.open_room(), Some(&id("!b:example.org")));
     // `!b`'s newest item is at an index that `!c`'s last viewport showed.
     let fx = app.update(Msg::Timeline {
-        room: id("!b:example.org"),
+        timeline: main_of("!b:example.org"),
         diffs: vec![TimelineDiff::Reset(msgs(5..7))],
     });
     assert_eq!(fx, vec![paginate("!b:example.org")]);

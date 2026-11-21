@@ -70,18 +70,19 @@ pub enum Msg {
     RoomUpserted(RoomSummary),
     RoomRemoved(RoomId),
     SyncState(SyncState),
-    /// Changes of a room's timeline, in order; ignored unless the room is open.
+    /// Changes of a timeline, in order; ignored unless it is the open room's
+    /// main timeline.
     Timeline {
-        room: RoomId,
+        timeline: TimelineId,
         diffs: Vec<TimelineDiff>,
     },
-    /// A `PaginateBackwards` request finished.
+    /// A `PaginateBackwards` request for `timeline` finished.
     PaginationDone {
-        room: RoomId,
+        timeline: TimelineId,
         reached_start: bool,
     },
     PaginationFailed {
-        room: RoomId,
+        timeline: TimelineId,
         error: String,
     },
     /// Sent by the tui adapter after a render changed which items are visible;

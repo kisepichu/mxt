@@ -23,6 +23,12 @@ marked **Breaking:**.
   its room when rooms move. mxt 0.1.3 ignores such a value with a warning
   and sorts by `recent`, so a configuration shared with it can carry it.
 
+### Changed
+
+- Replies in threads are no longer shown in the timeline. Their root shows
+  `💬 N` with the time of the latest reply, and `· unread` while the room's
+  unread count includes replies in that thread.
+
 ### Fixed
 
 - Moving the timeline cursor down with `j` or `<C-d>` near the newest message

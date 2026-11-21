@@ -13,6 +13,7 @@ mod files;
 mod join;
 mod jumps;
 mod room_actions;
+mod threads;
 mod timeline;
 
 /// The user's own ID.
