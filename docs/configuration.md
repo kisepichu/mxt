@@ -46,12 +46,71 @@ opener = ["xdg-open"]           # ["open"] on macOS, for example ["wslview"] on 
 "<C-s>" = "composer.send"
 ```
 
-## Errors
+## Errors and warnings
 
 mxt checks the whole file before the terminal UI starts. A mistake stops the
 start with the file, the line and the column, the setting, and the reason,
-and mxt exits with a non-zero status. For example, with a misspelled action
-on line 5:
+and mxt exits with a non-zero status. For example, with a room list that is
+too narrow on line 5:
+
+```toml
+[account]
+user_id = "@alice:example.org"
+
+[ui]
+room_list = { width = 5 }
+```
+
+```text
+mxt: /home/alice/.config/mxt/config.toml:5:23: ui.room_list.width: must be from 12 to 80
+```
+
+These are errors:
+
+- a TOML syntax error;
+- a value of the wrong type, such as `timeoutlen = "1s"`, or `filter = 3`
+  in a binding;
+- an `account.user_id` that is missing or not `@localpart:server`, and an
+  `account.homeserver` that is not an `https://` or `http://` URL;
+- a `ui.room_list.width` outside 12 to 80, and an empty `ui.time_format`;
+- a `files.download_dir` that is neither absolute nor starts with `~/`, and a
+  `files.opener` without a program;
+- malformed key notation, such as `"<C-x"`, `"<C-x<CR>"`, `"<>"`, `"<S-1>"`
+  or `"<C-leader>"`;
+- `pick` together with `query`, `file.upload` without `path`, an empty
+  `query`, `path` or `emoji`, a binding table without `action`, and an empty
+  array as a binding;
+- the same key sequence written twice in one table in different spellings,
+  such as `"<leader>x"` and `"<Space>x"`, or `"<C-a>"` and `"<C-A>"`.
+
+A name that this version of mxt does not know is a warning instead: one
+configuration is often shared between machines that run different versions,
+and a setting written for a newer mxt must not stop an older one. These are
+warnings:
+
+- a key or a table that the tables below do not list, such as `ui.font`,
+  `[notifications]` or `[keymap.composer.foo]`; what is inside it is not
+  checked;
+- a value that a setting with fixed values does not take, such as
+  `image_preview = "wezterm"`;
+- a `ui.time_format` that mxt cannot read, since a newer version may read
+  more directives;
+- in a binding: an unknown action, an argument the action does not take,
+  whatever its value, a value that `filter`, `pick` or `mode` does not take,
+  an unknown emoji, and a key name or modifier that mxt does not know, such
+  as `<F13>` or `<D-s>`; such a key name in `ui.leader` too.
+
+The setting or binding is then ignored, and its default applies: a setting
+has the default in the tables below, and the default binding of the same
+keys in the same table stays, if there is one. An array with one unknown
+action is ignored whole. `ui.read_receipts` is the one exception: an unknown
+value sends private receipts, not the default public ones. While an unknown
+`ui.leader` falls back to `<Space>`, two spellings in one table that only
+the fallback makes the same keys, such as `"<leader>x"` and `"<Space>x"`,
+are not an error: the later of the two in the file is ignored with a warning.
+
+A warning has the form of an error and ends in `(ignored)`. For example, with
+a misspelled action on line 5:
 
 ```toml
 [account]
@@ -62,25 +121,31 @@ user_id = "@alice:example.org"
 ```
 
 ```text
-mxt: /home/alice/.config/mxt/config.toml:5:7: keymap.timeline.x: unknown action "message.dlete"
+/home/alice/.config/mxt/config.toml:5:7: keymap.timeline.x: unknown action "message.dlete" (ignored)
 ```
 
-Nothing is silently ignored. These are all errors:
+mxt starts anyway, and the status line says `Ignored 1 setting in the
+configuration; see :messages` (or how many) in the error color. `:messages`
+lists each warning, and the log has them too (see
+[Files](../README.md#files)). Nothing is silently ignored: a typo is an
+error, or a warning that the status line points to at every start.
 
-- a key the tables below do not list, such as `timeoutln`, or a table that
-  does not exist, such as `[keymap.composer.foo]`;
-- a value of the wrong type, or a string outside the accepted values;
-- an `account.user_id` that is not `@localpart:server`, and an
-  `account.homeserver` that is not an `https://` or `http://` URL;
-- a `ui.room_list.width` outside 12 to 80, and a `ui.time_format` that is
-  empty or has an unknown directive;
-- a `files.download_dir` that is neither absolute nor starts with `~/`, and a
-  `files.opener` without a program;
-- invalid key notation, an unknown action, an argument the action does not
-  take or a wrong argument value, `pick` together with `query`, and an empty
-  array as a binding;
-- the same key sequence written twice in one table in different spellings,
-  such as `"<leader>x"` and `"<Space>x"`, or `"<C-a>"` and `"<C-A>"`.
+A misspelled required key is both: mxt stops because the key is missing,
+and prints the warnings it found before the error, which name the
+misspelling. For example, with `[acount]` on line 1:
+
+```text
+mxt: /home/alice/.config/mxt/config.toml:1:1: missing field `account`
+/home/alice/.config/mxt/config.toml:1:2: acount: unknown table (ignored)
+```
+
+Within one binding the first problem decides, in this order: its keys, the
+same keys spelled twice, then each action, its name, the names of its
+arguments, conflicts between them, and their values. So
+`{ action = "room.open", sort = "name", pick = "next", query = "x" }` is a
+warning about `sort`, and
+`{ action = "room.open", pick = "next", query = "x", filter = "dm" }` an
+error about `pick` with `query`.
 
 ## `[account]`
 
@@ -93,12 +158,12 @@ Nothing is silently ignored. These are all errors:
 
 | Key | Default | Values | Meaning |
 |---|---|---|---|
-| `leader` | `"<Space>"` | [key notation](#key-notation), without `<leader>` | What `<leader>` stands for in the default keymap and in your bindings. |
+| `leader` | `"<Space>"` | [key notation](#key-notation), without `<leader>` | What `<leader>` stands for in the default keymap and in your bindings. A key name that mxt does not know, such as `"<F13>"`, is ignored with a warning, and `<Space>` applies. |
 | `timeoutlen` | `1000` | milliseconds, a non-negative integer | How long a key sequence that starts a longer binding waits for the next key, like nvim's `timeoutlen`. |
 | `room_list` | see below | a table | The room list. |
-| `time_format` | `"%H:%M"` | a [strftime format](https://docs.rs/jiff/latest/jiff/fmt/strtime/index.html), not empty | The time in each message header, in the local time zone. |
+| `time_format` | `"%H:%M"` | a [strftime format](https://docs.rs/jiff/latest/jiff/fmt/strtime/index.html), not empty | The time in each message header, in the local time zone. A format that mxt cannot read is ignored with a warning, and `"%H:%M"` applies; an empty one is an error. |
 | `image_preview` | `"auto"` | `"auto"`, `"off"`, `"iterm2"`, `"sixel"`, `"kitty"`, `"halfblocks"` | `"auto"` shows images in the message view in the graphics protocol mxt chooses for the terminal (see [Terminal setup](terminal.md#images)). `"iterm2"`, `"sixel"`, `"kitty"` and `"halfblocks"` use that protocol instead, for a terminal where the choice is wrong. `"off"` shows only the file name and size there, and mxt never asks the terminal for its graphics protocol. |
-| `read_receipts` | `"public"` | `"public"`, `"private"` | `"public"` sends `m.read` receipts, which other users see. `"private"` sends `m.read.private`, which only your own devices see. |
+| `read_receipts` | `"public"` | `"public"`, `"private"` | `"public"` sends `m.read` receipts, which other users see. `"private"` sends `m.read.private`, which only your own devices see. An unknown value, such as one a newer mxt knows, sends private receipts, not the default public ones, with a warning that says so: receipts go out as soon as a room opens, before you may have seen the warning. |
 
 `room_list` is a table; write it inline as in the example, or as a section:
 
@@ -140,7 +205,7 @@ table, and every other default stays.
 | `composer.normal`, `composer.visual` | the composer has focus and its editor is in normal or visual mode | look in `normal`, then pass the key to the editor |
 | `composer.insert` | the composer's editor is in insert mode | pass the key to the editor |
 | `composer.completion` | the mention menu is open in insert mode | look in `composer.insert`, then pass the key to the editor |
-| `message_view` | the message view (also `:help` and `:map`) is open and its editor is in normal or visual mode | pass the key to the editor |
+| `message_view` | the message view (also `:help`, `:map` and `:messages`) is open and its editor is in normal or visual mode | pass the key to the editor |
 | `picker` | a picker (rooms, emoji or links) is open | edit the query with the key (see [Line editing](keys.md#line-editing)) |
 | `command_line` | the `:` command line or a `/` search line is open | edit the line with the key (see [Line editing](keys.md#line-editing)) |
 
@@ -196,8 +261,11 @@ Keys use nvim's notation. Key sequences are TOML strings, so quote them:
   (also `Backspace`), `Del` (also `Delete`), `Insert` (also `Ins`), `Up`,
   `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`, `Space`,
   `F1` to `F12`, and `lt`, `Bslash` and `Bar` for `<`, `\` and `|`.
-- `<leader>` is `ui.leader`.
-- A `<` that does not start a key name is an error; write `<lt>` for `<`.
+- `<leader>` is `ui.leader`; it takes no modifiers.
+- A `<` without its `>` is an error, also when the `>` of a later key
+  follows (`"<C-x<CR>"`), and so is `<>`; write `<lt>` for `<`. A key name
+  or a modifier that mxt does not know, such as `<F13>` or `<D-s>`, ignores
+  the binding with a warning (see [Errors and warnings](#errors-and-warnings)).
 - With ctrl, letters have no case: `<C-a>` and `<C-A>` are the same key.
   `S-` on a character must give an uppercase letter (`<S-a>` is `A`), so
   write `!` instead of `<S-1>`.
@@ -268,8 +336,8 @@ user_id = "@alice:example.org"
 ### Actions
 
 Actions are named `<target>.<verb>`. Only the actions marked so take
-arguments; any other argument is an error. Actions on "the message" use the
-message under the timeline cursor.
+arguments; any other argument ignores the binding with a warning. Actions on
+"the message" use the message under the timeline cursor.
 
 | Action | Arguments | What it does |
 |---|---|---|
@@ -282,7 +350,7 @@ message under the timeline cursor.
 | `message.edit` | | Loads your own text message into the composer to edit it. The composer must be empty. |
 | `message.delete` | | Deletes your own message after you confirm with `y`. |
 | `message.yank` | | Copies the message's text to the clipboard (see [Terminal setup](terminal.md#clipboard)). |
-| `message.react` | `emoji` | Without `emoji`, opens the emoji picker; choosing an emoji you already reacted with removes your reaction. With `emoji`, an emoji (`"👍"`) or a shortcode with colons on both sides or none (`"thumbsup"`, `":+1:"`), toggles that reaction: adds it, or removes yours. An unknown or empty `emoji` is an error. With no open room, on an empty timeline or on a deleted message, it says so and does nothing. |
+| `message.react` | `emoji` | Without `emoji`, opens the emoji picker; choosing an emoji you already reacted with removes your reaction. With `emoji`, an emoji (`"👍"`) or a shortcode with colons on both sides or none (`"thumbsup"`, `":+1:"`), toggles that reaction: adds it, or removes yours. An empty `emoji` is an error; an unknown one ignores the binding with a warning, since a newer mxt may know it. With no open room, on an empty timeline or on a deleted message, it says so and does nothing. |
 | `message.open` | | Downloads an attachment to `files.download_dir` and opens it with `files.opener`, or opens the message's web link with `files.opener`, or offers a link picker when there are several. Only `http://` and `https://` links. |
 | `message.goto_reply` | | Moves the cursor to the message this one replies to, if it is loaded. |
 | `message.resend` | | Sends a failed message again. |
@@ -309,9 +377,10 @@ message under the timeline cursor.
 | `cursor.half_page_down`, `cursor.half_page_up` | | Moves it by half of the visible rooms or messages, times the count. |
 | `search.start` | | Opens a `/` line that searches the focused list. |
 | `search.next`, `search.prev` | | Repeats the last search forwards or backwards. |
-| `view.close` | | Closes the message view, also when it shows `:help` or `:map`. |
+| `view.close` | | Closes the message view, also when it shows `:help`, `:map` or `:messages`. |
 | `help.commands` | | Shows the commands with a one-line description each in the full-screen view, as `:help` does. |
 | `help.keymap` | | Shows the bindings of each keymap table after your configuration in the full-screen view, as `:map` does: `keys -> action` or `keys -> action (arguments)`, with `<leader>` written as its key. |
+| `status.messages` | | Shows the status line's recent messages, oldest first, in the full-screen view, as `:messages` does. |
 | `sidebar.toggle` | | Shows or hides the room list. |
 | `focus.room_list` | | Moves the focus to the room list, and shows it if it is hidden. |
 | `focus.timeline` | | Moves the focus to the timeline. |

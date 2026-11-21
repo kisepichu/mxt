@@ -307,8 +307,8 @@ impl App {
         self.view = Some(View::Message(item.id.clone()));
     }
 
-    /// `help.commands` and `help.keymap`: `text` in the full-screen view, in
-    /// place of an open view.
+    /// `help.commands`, `help.keymap` and `status.messages`: `text` in the
+    /// full-screen view, in place of an open view.
     pub(super) fn view_help(&mut self, text: String, effects: &mut Vec<Effect>) {
         effects.push(Effect::Ui(UiEffect::OpenView(ViewContent::Text(text))));
         self.view = Some(View::Help);

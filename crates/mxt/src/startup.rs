@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use mxt_core::app::App;
 use mxt_core::ids::UserId;
+use mxt_core::msg::Msg;
 use mxt_matrix::{
     Client, Homeserver, Matrix, RecoveryStatus, SavedSession, SessionWatch, SyncLoop,
 };
@@ -236,11 +237,21 @@ async fn run_ui(
         room_list_layout,
         download_dir,
         opener,
+        warnings,
         ..
     } = config;
     let receipts = settings.read_receipts;
     let image_preview = settings.image_preview;
     let mut app = App::new(keymap, settings, user_id);
+    // `main` has logged them; the status line counts them at once. The core
+    // only records them, so there is no effect to run before the loop.
+    let warning_effects = app.update(Msg::ConfigWarnings {
+        warnings: warnings.iter().map(ToString::to_string).collect(),
+    });
+    debug_assert!(
+        warning_effects.is_empty(),
+        "Msg::ConfigWarnings has no effects"
+    );
     let (to_core, from_matrix) = mpsc::unbounded_channel();
     let (to_matrix, effects) = mpsc::unbounded_channel();
     let mut matrix =

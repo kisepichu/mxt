@@ -21,13 +21,16 @@
         default = pkgs.rustPlatform.buildRustPackage {
           pname = "mxt";
           inherit (workspace) version;
-          # Only what Cargo needs, so editing docs does not rebuild the package.
+          # What Cargo needs, and the configuration documentation, whose
+          # complete example a test of the `mxt` crate reads with
+          # `include_str!`; editing the other docs does not rebuild the package.
           src = lib.fileset.toSource {
             root = ./.;
             fileset = lib.fileset.unions [
               ./Cargo.toml
               ./Cargo.lock
               ./crates
+              ./docs/configuration.md
             ];
           };
           cargoLock = {

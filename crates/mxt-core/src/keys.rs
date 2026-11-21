@@ -209,7 +209,9 @@ impl KeySeq {
     /// `<...>` group (`<lt>` is a literal `<`). A group holds modifier
     /// prefixes (`C-`, `A-` or `M-`, `S-`, case-insensitive, in any order)
     /// followed by one character or a key name (case-insensitive), or it is
-    /// `<leader>` without modifiers.
+    /// `<leader>` without modifiers. A `<` inside a group can only be its
+    /// character (`<<>`, `<C-<>`); anywhere else it starts another group, so
+    /// the first one has no `>` (`<C-x<CR>`).
     ///
     /// `S-` on a character must leave an uppercase letter (`<S-a>` is `A`).
     /// Otherwise [`Key::new`] would drop the shift, so `<S-1>` and `<C-S-c>`
@@ -255,10 +257,12 @@ fn parse_group(
 ) -> Result<usize, KeyParseError> {
     let close = body.find('>').ok_or(KeyParseError::Unclosed { at })?;
     let mut mods = Modifiers::default();
+    let mut unknown_modifier = None;
     let mut rest = body;
     // A modifier is a character and a dash with more text after them, so
-    // `<C-->` is ctrl and `-`. Modifiers never take a `>`, so `close` is still
-    // the first `>` after them.
+    // `<C-->` is ctrl and `-`. No modifier is a `>`, so the modifiers end
+    // before `close`. An unknown modifier is reported after the key, so that
+    // a group without its `>` is reported as that.
     loop {
         let mut chars = rest.chars();
         let (Some(m), Some('-'), Some(_)) = (chars.next(), chars.next(), chars.next()) else {
@@ -268,7 +272,11 @@ fn parse_group(
             'c' => mods.ctrl = true,
             'a' | 'm' => mods.alt = true,
             's' => mods.shift = true,
-            _ => return Err(KeyParseError::UnknownModifier { name: m.into() }),
+            '>' => break,
+            '<' => return Err(KeyParseError::Unclosed { at }),
+            _ => {
+                unknown_modifier.get_or_insert(m);
+            }
         }
         rest = &rest[m.len_utf8() + 1..];
     }
@@ -277,8 +285,20 @@ fn parse_group(
     // One character before a `>` is that character, even `>` itself (`<C->>`).
     let (end, code) = match (chars.next(), chars.next()) {
         (Some(c), Some('>')) => (start + c.len_utf8(), Some(KeyCode::Char(c))),
-        _ => (close, named_key(&body[start..close])),
+        _ => {
+            let name = &body[start..close];
+            if name.contains('<') {
+                return Err(KeyParseError::Unclosed { at });
+            }
+            if name.is_empty() {
+                return Err(KeyParseError::NoKey { at });
+            }
+            (close, named_key(name))
+        }
     };
+    if let Some(name) = unknown_modifier {
+        return Err(KeyParseError::UnknownModifier { name: name.into() });
+    }
     match code {
         Some(code) => {
             let key = Key::new(code, mods);
@@ -293,7 +313,10 @@ fn parse_group(
             }
             keys.push(key);
         }
-        None if mods == Modifiers::default() && body[start..end].eq_ignore_ascii_case("leader") => {
+        None if body[start..end].eq_ignore_ascii_case("leader") => {
+            if mods != Modifiers::default() {
+                return Err(KeyParseError::ModifiedLeader);
+            }
             if leader.is_empty() {
                 return Err(KeyParseError::NoLeader);
             }
@@ -325,11 +348,16 @@ impl fmt::Display for KeySeq {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KeyParseError {
     Empty,
-    /// A `<` without a matching `>`. Write `<lt>` for a literal `<`.
+    /// A `<` without a matching `>`, also when a later group's `>` follows
+    /// it (`<C-x<CR>`). Write `<lt>` for a literal `<`.
     Unclosed {
         at: usize,
     },
-    /// The text inside `<...>`, such as `Foo` or `C-leader`.
+    /// A group with no key after its modifiers: `<>`, `<C->`.
+    NoKey {
+        at: usize,
+    },
+    /// The text inside `<...>`, such as `Foo` or `C-F13`.
     UnknownKey {
         name: String,
     },
@@ -345,6 +373,21 @@ pub enum KeyParseError {
     },
     /// `<leader>` where no leader is available (inside the leader itself).
     NoLeader,
+    /// `<leader>` with modifiers, such as `<C-leader>`.
+    ModifiedLeader,
+}
+
+impl KeyParseError {
+    /// Whether the error names a key or a modifier this version does not
+    /// know, which a newer version may know: the configuration ignores such
+    /// a binding with a warning (design, "Layers"). Malformed notation is
+    /// never one.
+    pub fn is_unknown_name(&self) -> bool {
+        matches!(
+            self,
+            KeyParseError::UnknownKey { .. } | KeyParseError::UnknownModifier { .. }
+        )
+    }
 }
 
 impl fmt::Display for KeyParseError {
@@ -355,9 +398,11 @@ impl fmt::Display for KeyParseError {
                 f,
                 "\"<\" at byte {at} is not closed by \">\"; write <lt> for a literal \"<\""
             ),
+            KeyParseError::NoKey { at } => write!(f, "\"<\" at byte {at} has no key before \">\""),
             KeyParseError::UnknownKey { name } => write!(f, "unknown key <{name}>"),
             KeyParseError::UnknownModifier { name } => write!(f, "unknown modifier \"{name}-\""),
             KeyParseError::NoLeader => f.write_str("<leader> cannot be used in the leader itself"),
+            KeyParseError::ModifiedLeader => f.write_str("<leader> takes no modifiers"),
             KeyParseError::ShiftIgnored { name, key } => {
                 write!(f, "<{name}> is the same key as {key}")?;
                 match key.code() {
@@ -545,10 +590,40 @@ mod tests {
             parse("<X-a>"),
             Err(KeyParseError::UnknownModifier { .. })
         ));
-        assert!(matches!(
-            parse("<C-leader>"),
-            Err(KeyParseError::UnknownKey { .. })
-        ));
+        assert_eq!(parse("<C-leader>"), Err(KeyParseError::ModifiedLeader));
+        assert_eq!(
+            KeySeq::parse("<C-leader>", &KeySeq::default()),
+            Err(KeyParseError::ModifiedLeader)
+        );
+        // A `<` in a group that is not its character opens another group,
+        // even when a later `>` closes that one.
+        for (text, at) in [
+            ("<C-x<CR>", 0),
+            ("a<C-w<C-h>", 1),
+            ("<D-<CR>", 0),
+            ("<C-<-x>", 0),
+            ("<x<>", 0),
+        ] {
+            assert_eq!(parse(text), Err(KeyParseError::Unclosed { at }), "{text}");
+        }
+        for (text, at) in [("<>", 0), ("a<C->", 1)] {
+            assert_eq!(parse(text), Err(KeyParseError::NoKey { at }), "{text}");
+        }
+        assert_eq!(keys("<<>"), vec![Key::char('<')]);
+        for text in ["<F13>", "<D-s>", "<C-F13>", "<D-<>", "<D-Foo>"] {
+            assert!(parse(text).unwrap_err().is_unknown_name(), "{text}");
+        }
+        for text in [
+            "",
+            "<C-x",
+            "<S-1>",
+            "<C-leader>",
+            "<C-x<CR>",
+            "<D-<CR>",
+            "<>",
+        ] {
+            assert!(!parse(text).unwrap_err().is_unknown_name(), "{text:?}");
+        }
     }
 
     #[test]

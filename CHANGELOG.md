@@ -28,8 +28,12 @@ marked **Breaking:**.
   or a shortcode (`:react thumbsup`, `:react :+1:`), and `<Tab>` completes
   shortcodes; `:react` without one opens the emoji picker, as `+` does.
 - `message.react` takes an optional `emoji`, so a key can react with one
-  emoji: `{ action = "message.react", emoji = "thumbsup" }`. An unknown or
-  empty emoji is an error when the configuration is loaded.
+  emoji: `{ action = "message.react", emoji = "thumbsup" }`. An empty emoji
+  is an error when the configuration is loaded; an unknown one ignores the
+  binding with a warning.
+- `:messages` lists the status line's recent messages (the last 200), the
+  configuration's warnings included, in the full-screen view; the action
+  `status.messages` opens it from a key.
 - The command line, the `/` search line, picker queries and the recovery
   key prompt have a cursor: `<Left>`, `<Right>`, `<Home>` or `<C-b>`,
   `<End>` or `<C-e>`, `<S-Left>` and `<S-Right>` by word, and typing,
@@ -52,6 +56,16 @@ marked **Breaking:**.
   `composer.normal` to `focus.timeline` keeps the old behavior.
 - `+` with no open room or on an empty timeline now says why it does
   nothing: `No room is open` or `No message to react to`.
+- Settings, tables, actions, action arguments, values and key names that
+  this version does not know no longer stop mxt, nor does a
+  `ui.time_format` it cannot read: each is ignored with a warning and its
+  default applies, so one configuration works with older and newer
+  versions. An unknown `ui.read_receipts` value sends private receipts.
+  Syntax errors, wrong types, values out of range, conflicting or missing
+  arguments and malformed keys still stop it. At startup the status line
+  says how many settings were ignored, and the log names each with its
+  line. A misspelled required key, such as `[acount]`, stops the start as
+  a missing key, printed with the warning that names the misspelling.
 - On the command line, the `/` search line, picker queries and the recovery
   key prompt, `<C-u>` deletes the text before the cursor and `<C-w>` the
   word before it, with words split as in the editors: `foo.bar` loses `bar`
