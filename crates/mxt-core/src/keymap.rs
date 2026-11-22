@@ -257,6 +257,19 @@ const DEFAULTS: &[(&[TableId], &str, Action)] = &[
     // vim's insert-mode `<C-c>`. edtui binds no `<C-c>` in insert mode and
     // inserts no ctrl characters, so the key did nothing there before.
     (&[TableId::ComposerInsert], "<C-c>", Action::ComposerNormal),
+    // vim's insert-mode `<C-w>`, and the shells' `<A-BS>`. Neither did
+    // anything in insert mode before, for the same reason as `<C-c>`. The
+    // window prefix `<C-w>` is a `normal` key, which insert mode never sees.
+    (
+        &[TableId::ComposerInsert],
+        "<C-w>",
+        Action::ComposerDeleteWordBefore,
+    ),
+    (
+        &[TableId::ComposerInsert],
+        "<A-BS>",
+        Action::ComposerDeleteWordBefore,
+    ),
     (
         &[TableId::ComposerInsert, TableId::ComposerNormal],
         "<C-x><C-e>",

@@ -155,8 +155,10 @@ fn next(text: &str, at: usize) -> usize {
 }
 
 /// Where `<S-Left>` moves from `at`, and where `<C-w>` deletes from: back
-/// over blanks, then back over a run of clusters of one class.
-fn word_start(text: &str, at: usize) -> usize {
+/// over blanks, then back over a run of clusters of one class. The
+/// composer's `composer.delete_word_before` deletes back to it too, on the
+/// text before its cursor.
+pub fn word_start(text: &str, at: usize) -> usize {
     let mut clusters = text[..at]
         .grapheme_indices(true)
         .rev()
