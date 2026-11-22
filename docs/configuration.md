@@ -238,12 +238,13 @@ The room you have open sorts as read. With `"unread"`, `"notify"` or
 `"mentions"` it does not move into or within the unread rooms while it is
 open, though its badge counts new messages. With `"read"` it counts as read
 up to its newest message, so a room with something new takes its place
-among the read rooms as you open it; a room with nothing new stays in
-place, and so it does when its read receipt comes back, since homeservers
-keep a read receipt only when it moves forward. Once you open another room,
-it sorts as any other room again. A room you read (its read receipt goes
-out, or `room.mark_read`) takes its place among the read rooms at once and
-keeps it until the homeserver sends the receipt back.
+among the read rooms as you open it. Once you open another room, it sorts
+as any other room again. When you read a room with something new (its read
+receipt goes out, or `room.mark_read`), it goes to the top of the read rooms
+at once and stays there when the homeserver sends the receipt back. Opening
+a room with nothing new leaves it in place, since homeservers keep a read
+receipt only when it moves forward; a room whose only news is an edit of an
+older message goes to the time of the edit while open, and back afterwards.
 
 `sort = "mentions, notify, unread, read"` puts the rooms that notify you
 after the rooms with mentions and before the rooms whose only news is a dim

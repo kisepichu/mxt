@@ -371,8 +371,15 @@ a setup.
   newest first and rooms without a time last. Doc comments of `SortKey`
   and `RoomList::open` follow the design ("Room list", "The open room
   sorts as read").
-- [ ] `RoomList::clear_unread` also sets `last_read` to
-  `last_read.max(latest_activity)` before placing the room again.
+- [ ] `RoomList::clear_unread(id, receipt_at)`, `receipt_at` being the
+  time of the event the receipt goes on: when the room has something to
+  read (`RoomFilter::Unread.matches(&room.unread)` or `receipt_at >
+  last_read`), it also raises `last_read` to the later of
+  `latest_activity` and 1 ms after the newest `news_time` of the other
+  rooms before placing the room again; otherwise `last_read` stays.
+  (Amended after review: `last_read.max(latest_activity)` placed the room
+  below the rooms read since its newest message until the echo, the
+  homeserver's time, moved it to the top; design, "Optimistic clearing".)
 - [ ] `RoomList::upsert` keeps `last_read` at the later of the stored
   room's and the update's (receipts only move forward; design, "Optimistic
   clearing").
@@ -388,18 +395,24 @@ a setup.
   dim count to the top of the third; the open room under `read`
   placed by the later of its `last_read` and `latest_activity`;
   `clear_unread` on a room with an old `last_read` moves it to the top of
-  the read rooms; an upsert with an older `last_read` than the stored one
+  the read rooms, above a room read since its newest message and the open
+  room, and one with nothing to read (an edit as its only news) stays; an
+  upsert with an older `last_read` than the stored one
   keeps the stored one, and one with a newer replaces it. In the app
   tests: `room.mark_read` from the room list moves that room to the top of
-  the read group at once.
+  the read group at once, above a room read since its newest message; a
+  `]u` walk over two unread rooms puts each at the top of the read rooms
+  as its receipt goes out, where stale facts and the echo leave it; a
+  room whose only news is an edit goes back to its place once left.
 - [ ] Docs: `docs/configuration.md`, the `"read"` row of the sort keys
   (unread rooms by their newest message, the others by your last read;
   the open room counts as read up to its newest message) and the
   paragraph under the table (`"mentions, unread, read"` and
   `"mentions, notify, unread, read"`: a room that gets a new message goes
   to the top of its group; what `read` alone means;
-  a room you read takes its place at once and keeps it until the receipt
-  comes back).
+  a room you read with something new goes to the top of the read rooms at
+  once and stays there when the receipt comes back; opening a room with
+  nothing new leaves it in place).
 - [ ] CHANGELOG `### Changed`: "The `read` sort key orders unread rooms by
   the time of their newest message and the other rooms by your last read,
   newest first, so with `sort = "mentions, unread, read"` (or
@@ -407,8 +420,8 @@ a setup.
   to the top of its group; before, unread rooms went by your last read
   too, and a room unread after days of silence sat low in its group. The
   room you have open counts as read up to its newest message, and a room
-  you read takes its place among the read rooms at once instead of
-  waiting for the homeserver to confirm the receipt."
+  you read with something new goes to the top of the read rooms at once
+  instead of waiting for the homeserver to confirm the receipt."
 
 ## Task G8: `]u` opens the topmost unread room
 

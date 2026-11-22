@@ -79,8 +79,8 @@ impl SortKey {
 /// unread by the rule of `RoomFilter::Unread` (any badge), its latest
 /// activity, the time of its newest message, or its `last_read` when it has
 /// none; for any other room its `last_read`. The open room sorts as read: the
-/// later of its `last_read` and its latest activity, where its receipt's echo
-/// will put it.
+/// later of its `last_read` and its latest activity; its receipt then lifts
+/// it to the top of the read rooms (see `RoomList::clear_unread`).
 fn news_time(room: &RoomSummary, open: Option<&RoomId>) -> Option<Timestamp> {
     if open == Some(&room.id) {
         room.last_read.max(room.latest_activity)
@@ -322,15 +322,39 @@ impl RoomList {
         self.rooms.is_empty()
     }
 
-    /// Optimistic clearing: sets the room's counts to zero (and `marked` to
-    /// false) and raises its `last_read` to its latest activity, where the
-    /// receipt goes, and places the room again, since the `mentions`,
-    /// `notify`, `unread` and `read` keys depend on them. Returns the room's
-    /// old and new index.
-    pub fn clear_unread(&mut self, id: &RoomId) -> Option<(usize, usize)> {
+    /// Optimistic clearing (design, "Optimistic clearing"): sets the room's
+    /// counts to zero (and `marked` to false) and places the room again,
+    /// since the `mentions`, `notify`, `unread` and `read` keys depend on
+    /// them. `receipt_at` is the time of the event the receipt goes on. A
+    /// room with something to read (a badge, or that event after its
+    /// `last_read`) is read now: the echo of its receipt brings the
+    /// homeserver's time of taking it, which is no earlier than the room's
+    /// latest activity or any other time the list holds (clocks ahead of the
+    /// homeserver's aside). So its `last_read` goes up to the later of its
+    /// latest activity and 1 ms after the newest time `SortKey::Read` gives
+    /// another room, 1 ms keeping it off a tie with that room: the room tops
+    /// the read rooms at once, and the echo keeps it there. A room with
+    /// nothing to read keeps its `last_read` and its place: the homeserver
+    /// ignores a receipt that does not move forward, so no echo comes.
+    /// Returns the room's old and new index.
+    pub fn clear_unread(
+        &mut self,
+        id: &RoomId,
+        receipt_at: Option<Timestamp>,
+    ) -> Option<(usize, usize)> {
         let (old, mut room) = self.take(id)?;
+        if RoomFilter::Unread.matches(&room.unread) || receipt_at > room.last_read {
+            let open = self.open.as_ref();
+            let newest = self
+                .rooms
+                .iter()
+                .filter_map(|other| news_time(other, open))
+                .max();
+            let after =
+                newest.map(|time| Timestamp::from_millis(time.as_millis().saturating_add(1)));
+            room.last_read = room.last_read.max(room.latest_activity).max(after);
+        }
         room.unread = UnreadCounts::default();
-        room.last_read = room.last_read.max(room.latest_activity);
         Some((old, self.insert(room)))
     }
 }
@@ -1078,17 +1102,20 @@ mod tests {
             ],
         );
         let a = RoomId::new("!a:example.org");
-        assert_eq!(l.clear_unread(&a), Some((0, 1)));
+        assert_eq!(l.clear_unread(&a, None), Some((0, 1)));
         assert_eq!(
             ids(&l),
             ["!b:example.org", "!a:example.org", "!c:example.org"]
         );
         assert_eq!(l.get(&a).unwrap().unread, UnreadCounts::default());
-        assert_eq!(l.clear_unread(&RoomId::new("!gone:example.org")), None);
+        assert_eq!(
+            l.clear_unread(&RoomId::new("!gone:example.org"), None),
+            None
+        );
     }
 
     #[test]
-    fn clear_unread_reads_the_room_up_to_its_latest_activity() {
+    fn clear_unread_puts_a_room_with_something_to_read_at_the_top_of_the_read_rooms() {
         let mut l = list(
             RoomSort::new(vec![SortKey::Unread, SortKey::Read]).unwrap(),
             vec![
@@ -1100,31 +1127,86 @@ mod tests {
                     room("!b:example.org", None, "b", Some(30), unread(2)),
                     Some(20),
                 ),
+                // Read after !a's newest message.
                 read_at(
                     room("!c:example.org", None, "c", Some(40), unread(0)),
-                    Some(40),
+                    Some(60),
                 ),
+                // Nothing unread, with activity after the last receipt.
                 read_at(
-                    room("!d:example.org", None, "d", Some(20), unread(0)),
-                    Some(20),
+                    room("!d:example.org", None, "d", Some(70), unread(0)),
+                    Some(10),
                 ),
             ],
         );
+        let at = |time| Some(Timestamp::from_millis(time));
+        // Open, !d counts as read up to its latest activity.
+        assert_eq!(l.open(&RoomId::new("!d:example.org")), Some(2));
+        assert_eq!(
+            ids(&l),
+            [
+                "!a:example.org",
+                "!b:example.org",
+                "!d:example.org",
+                "!c:example.org"
+            ]
+        );
+        // Above the open !d and !c: the echo will bring the homeserver's
+        // time, later than both.
         let a = RoomId::new("!a:example.org");
-        assert_eq!(l.clear_unread(&a), Some((0, 1)));
+        assert_eq!(l.clear_unread(&a, at(50)), Some((0, 1)));
+        assert_eq!(l.get(&a).unwrap().last_read, at(71));
+        let b = RoomId::new("!b:example.org");
+        assert_eq!(l.clear_unread(&b, at(30)), Some((0, 0)));
+        assert_eq!(l.get(&b).unwrap().last_read, at(72));
         assert_eq!(
             ids(&l),
             [
                 "!b:example.org",
                 "!a:example.org",
-                "!c:example.org",
-                "!d:example.org"
+                "!d:example.org",
+                "!c:example.org"
             ]
         );
-        assert_eq!(
-            l.get(&a).unwrap().last_read,
-            Some(Timestamp::from_millis(50))
+        // A room whose latest activity is newer than every other time takes it.
+        l.upsert(room("!e:example.org", None, "e", Some(100), unread(1)));
+        let e = RoomId::new("!e:example.org");
+        assert_eq!(l.clear_unread(&e, at(100)), Some((0, 0)));
+        assert_eq!(l.get(&e).unwrap().last_read, at(100));
+    }
+
+    #[test]
+    fn clear_unread_leaves_a_room_with_nothing_to_read_in_place() {
+        let mut l = list(
+            RoomSort::one(SortKey::Read),
+            vec![
+                read_at(
+                    room("!a:example.org", None, "a", Some(30), unread(0)),
+                    Some(30),
+                ),
+                // Its only news since its receipt is an edit, at 45, of a
+                // message sent at 5.
+                read_at(
+                    room("!b:example.org", None, "b", Some(45), unread(0)),
+                    Some(10),
+                ),
+                read_at(
+                    room("!c:example.org", None, "c", Some(20), unread(0)),
+                    Some(50),
+                ),
+            ],
         );
+        let at = |time| Some(Timestamp::from_millis(time));
+        let (a, b) = (RoomId::new("!a:example.org"), RoomId::new("!b:example.org"));
+        // Receipts on events no newer than their last receipts (for !b the
+        // edited message), which the homeserver ignores.
+        assert_eq!(l.clear_unread(&b, at(5)), Some((2, 2)));
+        assert_eq!(l.get(&b).unwrap().last_read, at(10));
+        assert_eq!(l.clear_unread(&a, at(30)), Some((1, 1)));
+        assert_eq!(l.get(&a).unwrap().last_read, at(30));
+        // `room.mark_read`'s receipt goes on the edit, which is new.
+        assert_eq!(l.clear_unread(&b, at(45)), Some((2, 0)));
+        assert_eq!(l.get(&b).unwrap().last_read, at(51));
     }
 
     #[test]
@@ -1320,7 +1402,7 @@ mod tests {
     fn clear_unread_makes_the_next_pick_skip_the_room() {
         let mut l = three_unread();
         let c = RoomId::new("!c:example.org");
-        l.clear_unread(&c);
+        l.clear_unread(&c, None);
         assert_eq!(l.get(&c).unwrap().unread, UnreadCounts::default());
         assert_eq!(
             resolve_room(&l, None, &pick(RoomFilter::Unread, Pick::First)),
