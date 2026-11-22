@@ -2998,7 +2998,7 @@ dependencies = [
 
 [[package]]
 name = "mxt"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "matrix-sdk",
  "mxt-core",
@@ -3015,7 +3015,7 @@ dependencies = [
 
 [[package]]
 name = "mxt-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "emojis",
  "nucleo-matcher",
@@ -3025,7 +3025,7 @@ dependencies = [
 
 [[package]]
 name = "mxt-matrix"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "futures-util",
  "image",
@@ -3044,7 +3044,7 @@ dependencies = [
 
 [[package]]
 name = "mxt-tui"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64 0.23.1",
  "crossterm",
