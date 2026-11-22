@@ -254,6 +254,9 @@ const DEFAULTS: &[(&[TableId], &str, Action)] = &[
     (&[TableId::Thread], "<Esc>", Action::ThreadClose),
     (&[TableId::ComposerInsert], "<CR>", Action::ComposerSend),
     (&[TableId::ComposerInsert], "<C-j>", Action::ComposerNewline),
+    // vim's insert-mode `<C-c>`. edtui binds no `<C-c>` in insert mode and
+    // inserts no ctrl characters, so the key did nothing there before.
+    (&[TableId::ComposerInsert], "<C-c>", Action::ComposerNormal),
     (
         &[TableId::ComposerInsert, TableId::ComposerNormal],
         "<C-x><C-e>",
@@ -547,6 +550,28 @@ mod tests {
         assert_eq!(
             c.lookup(seq("<C-j>").keys()).binding,
             Some(&one(Action::ComposerNewline))
+        );
+    }
+
+    #[test]
+    fn ctrl_c_in_insert_mode_is_a_default_that_nop_takes_back() {
+        let ctrl_c = |km: &Keymap, context| km.effective(context).get(seq("<C-c>").keys()).cloned();
+        let km = Keymap::new(&space(), []);
+        assert_eq!(
+            ctrl_c(&km, InputContext::ComposerInsert),
+            Some(one(Action::ComposerNormal))
+        );
+        // `<C-c>` did nothing in insert mode before; `nop` keeps that, and
+        // normal mode's `<C-c>` stays.
+        let nop = (TableId::ComposerInsert, seq("<C-c>"), one(Action::Nop));
+        let km = Keymap::new(&space(), [nop]);
+        assert_eq!(
+            ctrl_c(&km, InputContext::ComposerInsert),
+            Some(one(Action::Nop))
+        );
+        assert_eq!(
+            ctrl_c(&km, InputContext::ComposerNormal),
+            Some(one(Action::ComposerCancel))
         );
     }
 

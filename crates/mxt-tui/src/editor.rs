@@ -108,6 +108,19 @@ impl Editor {
         self.keys = key_handler();
     }
 
+    /// `composer.normal`: normal mode as edtui's own `<Esc>` gives it, so
+    /// from insert mode the cursor moves one column left and `.` repeats
+    /// the insert, a visual selection is dropped and a search stopped.
+    /// Normal mode stays as it is. A key waiting for the next one is
+    /// cancelled.
+    pub(crate) fn enter_normal_mode(&mut self) {
+        self.cancel_pending();
+        if self.state.mode != edtui::EditorMode::Normal {
+            self.keys
+                .on_key_event(KeyInput::new(C::Esc), &mut self.state);
+        }
+    }
+
     /// A key the core passed on. Keys edtui has no code for are left out.
     pub(crate) fn feed(&mut self, key: Key) {
         let waiting = self.waiting();
@@ -935,6 +948,56 @@ pub(crate) mod tests {
             feed(&mut editor, "z");
             assert_eq!(text(&editor), "zabc", "{waiting}");
         }
+    }
+
+    #[test]
+    fn entering_normal_mode_from_insert_mode_is_esc() {
+        // The cursor moves onto the `o`, and `.` repeats the insert there.
+        let mut editor = holding("");
+        feed(&mut editor, "ihello");
+        editor.enter_normal_mode();
+        assert_eq!(
+            (editor.mode(), editor.state.cursor.col),
+            (EditorMode::Normal, 4)
+        );
+        feed(&mut editor, ".");
+        assert_eq!(text(&editor), "hellhelloo");
+    }
+
+    #[test]
+    fn entering_normal_mode_drops_a_selection_and_stops_a_search() {
+        let mut editor = holding("one two");
+        feed(&mut editor, "wvl");
+        editor.enter_normal_mode();
+        assert_eq!(editor.mode(), EditorMode::Normal);
+        assert!(editor.state.selection.is_none());
+
+        // As `<Esc>` does, the cursor goes back to where the search started.
+        feed(&mut editor, "0/two");
+        editor.enter_normal_mode();
+        assert_eq!(
+            (editor.mode(), editor.state.cursor.col),
+            (EditorMode::Normal, 0)
+        );
+        assert_eq!(editor.state.search_pattern(), "");
+    }
+
+    #[test]
+    fn entering_normal_mode_keeps_normal_mode_and_cancels_a_waiting_key() {
+        // The cursor stays on the last character.
+        let mut editor = holding("hello");
+        feed(&mut editor, "$");
+        editor.enter_normal_mode();
+        assert_eq!(
+            (editor.mode(), editor.state.cursor.col),
+            (EditorMode::Normal, 4)
+        );
+        // edtui's `d` no longer waits, so `x` deletes.
+        feed(&mut editor, "0d");
+        editor.enter_normal_mode();
+        assert_eq!(editor.key_mode(), EditorMode::Normal);
+        feed(&mut editor, "x");
+        assert_eq!(text(&editor), "ello");
     }
 
     #[test]
