@@ -548,4 +548,6 @@ breaks included, and runs no keys.
   variation selector of `❤️`); `df` and `dt` can split a cluster (`df👍`
   leaves the skin tone); `df<Tab>` cancels, where `f<Tab>` finds a tab;
   operators with `F`, `T`, `;` and `,`; a linewise `p` on the last line
-  pastes above it; `.` does not repeat `r`; `r` in visual mode.
+  pastes above it; `.` does not repeat `r`, and after an insert it repeats
+  the typed characters but not what `<BS>`, `<C-w>` or `<A-BS>` deleted;
+  `r` in visual mode.

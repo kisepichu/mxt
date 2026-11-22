@@ -471,9 +471,9 @@ mod tests {
 
     #[test]
     fn the_word_before_the_cursor_goes_with_the_blanks_after_it() {
-        // Words as the line editor's `<C-w>` splits them: kanji, kana,
-        // punctuation and emoji are words of their own, and `👍🏽` goes
-        // whole.
+        // Words as the line editor's `<C-w>` splits them: kanji, hiragana,
+        // katakana, and punctuation with emoji are words of their own, and
+        // `👍🏽` goes whole.
         for (text, left) in [
             ("foo bar", "foo "),
             ("foo bar  ", "foo "),
@@ -492,6 +492,15 @@ mod tests {
         delete_word(&mut composer);
         type_keys(&mut composer, "x");
         assert_eq!(composer.text(), "one x three");
+
+        // With the cursor past the end of a shorter line, where edtui's
+        // `<Up>` from a later line keeps the column, the whole line before
+        // it goes.
+        let mut composer = inserting("ab\nhello world", SharedRegister::default());
+        type_keys(&mut composer, "<Up>");
+        assert_eq!(composer.editor.state.cursor, Index2::new(0, 11));
+        delete_word(&mut composer);
+        assert_eq!(composer.text(), "\nhello world");
     }
 
     #[test]
