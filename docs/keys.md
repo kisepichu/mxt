@@ -130,14 +130,19 @@ visual mode. In a thread, `thread` comes first, then `timeline`, then
 | `<C-w>l`, `<C-w><C-l>` | `focus.timeline` | focus the timeline |
 | `<C-w>j`, `<C-w><C-j>` | `composer.focus` with `mode = "keep"` | focus the composer below the timeline, in the mode it was left in |
 | `<C-w>k`, `<C-w><C-k>` | `focus.timeline` | focus the timeline above the composer |
-| `]u` / `[u` | `room.open` with `filter = "unread"` and `pick = "next"` / `"prev"` | open the next or previous unread room, wrapping around |
+| `]u` / `[u` | `room.open` with `filter = "unread"` / the same with `pick = "prev"` | open the topmost unread room other than the open one / the previous unread room, wrapping around |
 | `<C-o>` / `<Tab>` | `jump.back` / `jump.forward` | back to where the cursor was before a jump, and forward again (see [The jump list](#the-jump-list)); `<C-i>` is `<Tab>` |
 
 As in nvim, ctrl can stay held for the key after `<C-w>`.
 
 `]u` and `[u` count every badge, dim counts included. Bound with
 `filter = "notify"`, they skip the rooms whose only news is a dim count
-(see [Sort keys](configuration.md#sort-keys)).
+(see [Sort keys](configuration.md#sort-keys)). A room you open but have
+not read yet (the terminal has no focus, or you press `]u` again before
+its timeline is drawn) is still unread: `]u` skips it while it is open,
+and once `]u` has opened another room it is among the unread rooms again,
+so `]u` pressed again goes back and forth between the two topmost unread
+rooms.
 
 ### `room_list` and `timeline`
 

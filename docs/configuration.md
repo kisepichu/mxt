@@ -243,8 +243,13 @@ as any other room again. When you read a room with something new (its read
 receipt goes out, or `room.mark_read`), it goes to the top of the read rooms
 at once and stays there when the homeserver sends the receipt back. Opening
 a room with nothing new leaves it in place, since homeservers keep a read
-receipt only when it moves forward; a room whose only news is an edit of an
-older message goes to the time of the edit while open, and back afterwards.
+receipt only when it moves forward, when you last read the room in mxt or
+in a client that sends the same kind of read receipt; a room you last read
+in a client that marks only the main timeline read, as Element does, or
+with the other kind of receipt (`read_receipts`) goes to the top of the
+read rooms once the homeserver sends mxt's receipt back. A room whose only
+news is an edit of an older message goes to the time of the edit while
+open, and back afterwards.
 
 `sort = "mentions, notify, unread, read"` puts the rooms that notify you
 after the rooms with mentions and before the rooms whose only news is a dim
@@ -375,8 +380,9 @@ and many terminals send Shift+Enter as `<CR>`. Bind the key that arrives.
 
 ### Examples
 
-`]u` and `[u` open the next and previous unread room by default. Open the
-next room that notifies you with `]n`, and the previous one with `[n`:
+`]u` opens the topmost unread room other than the open one by default, and
+`[u` the previous unread room. Open the next room that notifies you after
+the open one with `]n`, and the previous one with `[n`:
 
 ```toml
 [account]
@@ -502,7 +508,7 @@ the room list's order:
 | | `"unread"` | rooms with any badge: unread messages, notifications or mentions, or the manual unread mark |
 | | `"notify"` | rooms with notifications or mentions, or the manual unread mark |
 | | `"mentions"` | rooms with unread mentions |
-| `pick` | `"first"` (default) | the first such room |
+| `pick` | `"first"` (default) | the first such room other than the open room |
 | | `"next"` | the first one after the open room, wrapping around, never the open room itself; the first one when no room is open |
 | | `"prev"` | the same, backwards; the last one when no room is open |
 | `query` | a non-empty string | the best fuzzy match for the query among their names |

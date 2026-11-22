@@ -468,12 +468,15 @@ covered by unit tests.
   would settle either way until the echo. A room with nothing to read
   keeps its `last_read` and its place: its receipt goes on the event of
   the user's receipt or an older one, which the homeserver ignores (see
-  "Room list"), so no echo comes. A room whose only news is an edit is
-  such a room when it is opened, since the timeline shows the edit in the
-  edited message's place, but not for `room.mark_read`, whose receipt goes
-  on the edit. Raising `last_read` to the latest activity alone, as first
-  designed, placed the room below the rooms read since its newest message
-  until the echo moved it to the top. A room other than the open one
+  "Room list"), so no echo comes, when the user's newest receipt is the
+  same kind of unthreaded receipt mxt sends (the configured type, no
+  `thread_id`); a room last read with another kind moves once (see
+  "Risks"). A room whose only news is an edit is such a room when it is
+  opened, since the timeline shows the edit in the edited message's
+  place, but not for `room.mark_read`, whose receipt goes on the edit.
+  Raising `last_read` to the latest activity alone, as first designed,
+  placed the room below the rooms read since its newest message until the
+  echo moved it to the top. A room other than the open one
   moves in the room list when the sort keys depend on the counts or on
   `last_read` (the open room already sorts as read; next item). The next
   SDK update overwrites the counts, with the replies in threads after the
@@ -1070,7 +1073,10 @@ group, and moved the cursor with the room it opened.
   or before the event of the user's receipt of that type and thread,
   `_insert_linearized_receipt_txn` in
   `synapse/storage/databases/main/receipts.py`), so no new `ts` comes back
-  for a room already read, here or on another device. With `unread` or
+  for a room already read, here or on another device that sends the same
+  kind of unthreaded receipt (the configured type, no `thread_id`). A room
+  last read by a client that sends main-thread receipts (Element) or the
+  other type moves once (see "Risks"). With `unread` or
   `mentions` the room moves among the rooms without unread messages when
   it is opened, since the open room sorts as read. The user documentation
   says so.
@@ -3572,7 +3578,12 @@ asking for the recovery key ("Startup").
   only while open. Two rooms read in mxt before the first one's echo
   comes can swap once: that echo, stamped by the homeserver's clock,
   passes the second room's optimistic time until the second room's echo
-  comes.
+  comes. A room last read by a client that sends main-thread receipts
+  (Element) or the other receipt type moves to the top of the read rooms
+  one sync after mxt opens it, though it had nothing to read: the
+  homeserver compares mxt's unthreaded receipt only with the user's
+  unthreaded receipt of that type, which is older or absent, so it keeps
+  it, and the echo brings a new time.
 - **Registers in the editors** (owner work G). Only the black hole
   register `"_` exists; other register names are refused. edtui's `x`
   writes no register, unlike vim's, so `x` and `"_x` are the same,

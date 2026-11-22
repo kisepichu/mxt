@@ -167,10 +167,11 @@ const _: () = {
 /// The tables that share the movement and search defaults.
 const LISTS: &[TableId] = &[TableId::RoomList, TableId::Timeline];
 
-/// `]u` and `[u`: the next or previous unread room.
-const UNREAD_NEXT: Action = Action::RoomOpen(RoomTarget::Pick {
+/// `]u`: the topmost unread room other than the open one (design, "Default
+/// keymap"); `[u`: the previous unread room, wrapping around.
+const UNREAD_FIRST: Action = Action::RoomOpen(RoomTarget::Pick {
     filter: RoomFilter::Unread,
-    pick: Pick::Next,
+    pick: Pick::First,
 });
 const UNREAD_PREV: Action = Action::RoomOpen(RoomTarget::Pick {
     filter: RoomFilter::Unread,
@@ -210,7 +211,7 @@ const DEFAULTS: &[(&[TableId], &str, Action)] = &[
     ),
     (&[TableId::Normal], "<C-w>k", Action::FocusTimeline),
     (&[TableId::Normal], "<C-w><C-k>", Action::FocusTimeline),
-    (&[TableId::Normal], "]u", UNREAD_NEXT),
+    (&[TableId::Normal], "]u", UNREAD_FIRST),
     (&[TableId::Normal], "[u", UNREAD_PREV),
     // nvim's jump list keys; `<C-i>` is `<Tab>`. The composer's insert mode,
     // the pickers, the command line and the message view do not fall back to
@@ -755,7 +756,8 @@ mod tests {
             ",m -> picker.rooms (filter = \"mentions\")",
             ",q -> room.open (filter = \"notify\", query = \"say \\\"hi\\\"\")",
             "<C-w>j -> composer.focus (mode = \"keep\")",
-            "]u -> room.open (filter = \"unread\", pick = \"next\")",
+            "]u -> room.open (filter = \"unread\")",
+            "[u -> room.open (filter = \"unread\", pick = \"prev\")",
         ] {
             assert!(normal.contains(&line), "{line}: {normal:#?}");
         }
