@@ -105,8 +105,8 @@ impl App {
     }
 
     /// `composer.send`, `composer.newline`, `composer.external_editor`,
-    /// `composer.normal`, `composer.delete_word_before`: the tui adapter
-    /// acts on the shown timeline's editor.
+    /// `composer.normal`, `composer.delete_word_before`, `composer.clear`:
+    /// the tui adapter acts on the shown timeline's editor.
     pub(super) fn composer_effect(
         &self,
         effect: fn(TimelineId) -> UiEffect,
@@ -125,6 +125,21 @@ impl App {
         self.composer_effect(UiEffect::ComposerNormal, effects);
         self.cancel_completion();
         if self.focus == Focus::Composer {
+            self.editor = Some(EditorMode::Normal);
+        }
+    }
+
+    /// `composer.clear`: the tui empties the shown timeline's composer as
+    /// one undo state, wherever the focus is. The draft and its mentions
+    /// stay, so a reply or an edit goes on, and `u` brings back the text
+    /// with its mentions; ending the draft is `composer.cancel`'s job. The
+    /// mention menu closes, and while the composer has focus, keys resolved
+    /// again after it in visual mode are resolved in normal mode, as the tui
+    /// drops the selection.
+    pub(super) fn composer_clear(&mut self, effects: &mut Vec<Effect>) {
+        self.composer_effect(UiEffect::EmptyComposer, effects);
+        self.cancel_completion();
+        if self.focus == Focus::Composer && self.editor == Some(EditorMode::Visual) {
             self.editor = Some(EditorMode::Normal);
         }
     }

@@ -138,11 +138,13 @@ pub struct App {
     /// The editor mode reported with the last key, for the keys resolved
     /// again after a binding, also after a timeout. `composer.focus` with
     /// insert mode sets it to insert, as the tui adapter enters insert mode
-    /// for it, and `composer.normal` sets it to normal while the composer
-    /// has focus, as the tui adapter leaves insert, visual or search mode
-    /// for it. Other mode changes before the next key are unknown to the
-    /// core, such as a released `a` in `composer.normal` that starts insert
-    /// mode: keys resolved again after it still use the mode reported last.
+    /// for it, `composer.normal` sets it to normal while the composer has
+    /// focus, as the tui adapter leaves insert, visual or search mode for
+    /// it, and `composer.clear` sets visual to normal while the composer has
+    /// focus, as the tui adapter drops the selection for it. Other mode
+    /// changes before the next key are unknown to the core, such as a
+    /// released `a` in `composer.normal` that starts insert mode: keys
+    /// resolved again after it still use the mode reported last.
     editor: Option<EditorMode>,
     rooms: RoomList,
     /// The room list cursor, once a cursor action, a search or opening a room
@@ -300,6 +302,7 @@ impl App {
             Msg::Submit { timeline, body } => self.submit(timeline, body, &mut effects),
             Msg::ComposerEdited { timeline, empty } => self.composer_edited(timeline, empty),
             Msg::MentionQuery { timeline, query } => self.mention_query(timeline, query),
+            Msg::EditorRefused(error) => self.set_status(StatusKind::Error, error),
             Msg::MembersLoaded { room, members } => self.members_loaded(room, members),
             Msg::Downloaded { path } => self.downloaded(path, &mut effects),
             Msg::ImageFetched { item, bytes } => self.image_fetched(item, bytes, &mut effects),
@@ -780,6 +783,7 @@ impl App {
             Action::ComposerDeleteWordBefore => {
                 self.composer_effect(UiEffect::DeleteWordBefore, effects);
             }
+            Action::ComposerClear => self.composer_clear(effects),
             Action::CompletionNext => self.move_completion(true),
             Action::CompletionPrev => self.move_completion(false),
             Action::CompletionAccept => self.accept_completion(effects),

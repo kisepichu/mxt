@@ -323,10 +323,11 @@ and runs the `timeline` binding when the next key is not `u` or when
 `timeoutlen` passes. Some keys never reach the keymap: in the editors' search
 mode, after a key that waits for its character (`f`, `F`, `t`, `T`, `r`),
 after an operator (`d`, `c`, `y`), after a text object's `i` or `a` and after
-`g`, as in nvim, and in the message view's insert mode, every key goes to the
-editor (see [Keys](keys.md#the-editors)). A binding that starts with one of
-these keys, such as `"gt"` in `normal`, still runs: the keymap gets that key
-before the editor does.
+`g`, as in nvim, after `"` and in the command after `"_`, and in the message
+view's insert mode, every key goes to the editor (see
+[Keys](keys.md#the-editors)). A binding that starts with one of these keys,
+such as `"gt"` in `normal`, still runs: the keymap gets that key before the
+editor does.
 
 ### Binding values
 
@@ -469,7 +470,8 @@ arguments; any other argument ignores the binding with a warning. Actions on
 | `composer.leave` | | Moves the focus to the timeline. When the composer is empty, a reply or an edit ends first, as with `composer.cancel`; any text, even a space, stays with its reply or edit. `focus.timeline` leaves the reply or edit as it is. |
 | `composer.external_editor` | | Edits the composer's text in `$VISUAL` or `$EDITOR`. |
 | `composer.normal` | | Puts the composer's editor in normal mode, as `<Esc>` does in insert mode (the cursor moves back one character and `.` repeats the insert); a visual selection is dropped and a search stopped. In normal mode it does nothing. After `composer.send`, as in `"<CR>" = ["composer.send", "composer.normal"]`, the editor is in normal mode after sending, also when a blank text sends nothing. |
-| `composer.delete_word_before` | | In insert mode, deletes the word before the cursor and the blanks after it, split into words as the command line's `<C-w>` splits them (see [Keys](keys.md#line-editing)); at the start of a line it deletes the line break, joining the line to the one above. `u` in normal mode brings the deleted text back, and the register is not changed. In normal and visual mode it does nothing. |
+| `composer.delete_word_before` | | In insert mode, deletes the word before the cursor and the blanks after it, split into words as the command line's `<C-w>` splits them (see [Keys](keys.md#line-editing)); at the start of a line it deletes the line break, joining the line to the one above. `u` in normal mode brings the deleted text back, and the register is not changed. The action does nothing in normal and visual mode. |
+| `composer.clear` | | Empties the composer as one change: `u` in normal mode brings the text back, and the register is not changed. A reply or an edit stays (`composer.cancel` ends it). The editor keeps its mode, except that visual mode becomes normal mode. It has no default key. |
 | `completion.next`, `completion.prev` | | Selects the next or previous member in the mention menu. |
 | `completion.accept` | | Inserts the selected mention. |
 | `completion.cancel` | | Closes the mention menu. |
