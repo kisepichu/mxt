@@ -22,8 +22,10 @@ SDK.
 - Show bridged rooms as `<network> / <room>` (for example
   `myserver / #general`), so rooms with the same name on different networks
   can be told apart.
-- Show unread state per room, including unread messages in muted rooms, and
-  let keybindings jump between rooms by unread state.
+- Show unread state per room, including unread messages in muted rooms as
+  a dim count, and let keybindings jump between rooms by unread state; a
+  muted room takes part in that jumping and in the `unread` order only
+  with unread mentions or the manual unread mark (see "Room list").
 - Default keybindings follow common nvim conventions. Every binding can be
   changed in the configuration file.
 - Compose messages with vim-style modal editing.
@@ -143,8 +145,8 @@ flowchart BT
 |---|---|---|
 | `mxt-core` | Domain types, keymap and its resolver, action registry, pickers, mention rendering, `App` state and `update` | `std` and small pure crates without I/O (`nucleo-matcher`, `emojis`, `pulldown-cmark`, `unicode-segmentation`). Not the SDK, `ruma`, an async runtime, a terminal library, `serde` or `toml`. |
 | `mxt-matrix` | Builds the SDK client, converts SDK data into domain types, executes matrix effects, forwards SDK streams as `Msg`s, reads bridge state, renders HTML bodies into domain rich text, reads and writes the session file | `mxt-core`, `matrix-sdk`, `matrix-sdk-ui`, tokio, `futures-util`, `tracing`, `serde`/`serde_json` (the session file holds the SDK's serde session type), `mime_guess` (the MIME type of an upload), `image` (the dimensions of uploaded images); HTML parsing through `matrix_sdk::ruma::html`, plus a feature-only `ruma` dependency of the SDK's ruma version that enables `html-matrix` (the SDK enables only `html`) and `markdown` (`FormattedBody::markdown`); as dev-dependencies, `matrix-sdk` with its `testing` feature, `matrix-sdk-test` and `mxt-core` with its `testing` feature (the tests against `MatrixMockServer`), and `wiremock` (the requests of `:join` that `MatrixMockServer` has no mock for) |
-| `mxt-tui` | Layout and widgets, input routing, the composers and the message view (edtui), image decoding and previews, OSC 52 clipboard, local time formatting, executing UI effects | `mxt-core`, ratatui, crossterm, edtui, ratatui-image, image, jiff, `base64` (OSC 52), `futures-util` (the terminal event stream), `unicode-segmentation`, `rustix` (reading the terminal's answer to XTVERSION with a timeout, and the window's size in pixels) |
-| `mxt` | Command line, startup flow, configuration file loading (TOML DTOs), paths, the data directory lock, logging, wiring the adapters and the event loop | all of the above, `serde`, `toml`, `tracing`, `tracing-appender` and `tracing-subscriber` (the log files), `rpassword` (the password and recovery key prompts); `matrix-sdk` as a dev-dependency |
+| `mxt-tui` | Layout and widgets, input routing, the composers and the message view (edtui), image decoding and previews (the message view's, and the timeline's on a worker thread), OSC 52 clipboard, local time formatting, executing UI effects | `mxt-core`, ratatui, crossterm, edtui, ratatui-image, image, jiff, `base64` (OSC 52), `futures-util` (the terminal event stream), `unicode-segmentation`, `rustix` (reading the terminal's answer to XTVERSION with a timeout, and the window's size in pixels) |
+| `mxt` | Command line, startup flow, configuration file loading (TOML DTOs), paths, the data directory lock, logging, the command line history file (`Effect::Store`), wiring the adapters and the event loop | all of the above, `serde`, `toml`, `tracing`, `tracing-appender` and `tracing-subscriber` (the log files), `rpassword` (the password and recovery key prompts); `matrix-sdk` as a dev-dependency |
 
 Because `mxt-core` does not depend on the SDK, its tests build and run without
 compiling matrix-rust-sdk, and SDK upgrades only touch `mxt-matrix`.
@@ -208,13 +210,15 @@ Rules:
   domain types once, at the boundary. Code inside the core trusts them.
 - Identifiers in the core are mxt's own newtypes (`RoomId`, `EventId`,
   `TxnId`, `UserId`), not `ruma` types. Timestamps are UTC milliseconds.
-- Effects come in two groups. `Effect::Matrix(..)` is executed by the matrix
-  adapter (for example `SubscribeTimeline`, `UnsubscribeTimeline`,
+- Effects come in three groups. `Effect::Matrix(..)` is executed by the
+  matrix adapter (for example `SubscribeTimeline`, `UnsubscribeTimeline`,
   `PaginateBackwards`, `LoadMembers`, `FetchImage`, `Send`). `Effect::Ui(..)`
   is executed by the tui adapter (for example `StartTimer { id, after }`,
   `LoadComposer`, `ClearComposer`, `ReplayKeys`, `ReplaceMentionToken`,
-  `OpenView`). Results arrive as `Msg`s (timeline diffs, `Msg::MembersLoaded`,
-  `Msg::ImageFetched`, `Msg::Timeout { id }`).
+  `OpenView`). `Effect::Store(..)` (added after 0.1.4) is executed by the
+  binary, which owns the files mxt keeps beside the SDK's stores, so far
+  `SaveHistory` (see "Line editing"). Results arrive as `Msg`s (timeline
+  diffs, `Msg::MembersLoaded`, `Msg::ImageFetched`, `Msg::Timeout { id }`).
 - Media bytes pass through the core as an opaque `MediaBytes` handle
   (`Arc<[u8]>`). The core never decodes them; it only routes them from the
   matrix adapter to the tui adapter.
@@ -252,7 +256,8 @@ The main types in `mxt-core`:
 - `MessageContent`: `Text { body, rich }` (the event's plain `body`, which
   `message.edit` loads, and its `RichText`), `Notice(RichText)`, `Emote(RichText)`,
   `Image { name, size, dimensions }`, `File { name, size, mime }` (also used
-  for video and audio), `Sticker { body }`, `Redacted`, `Undecryptable`,
+  for video and audio), `Sticker { body, dimensions }` (dimensions added
+  after 0.1.4, for previews), `Redacted`, `Undecryptable`,
   `Unsupported { kind }`.
 - `RichText`: a list of blocks (paragraph, code block with optional language,
   block quote, ordered or unordered list). Paragraphs hold inline spans: text
@@ -267,15 +272,18 @@ The main types in `mxt-core`:
   mention completion in the room's composers, its threads' included.
 - UI state: focus (room list, timeline, composer), mode, keymap resolver
   state, picker state, the line editors' texts and cursors (see "Line
-  editing"), the open view (a message's item, or a help view: `:help`,
+  editing"), the command line and search histories and the history line
+  being browsed, the open view (a message's item, or a help view: `:help`,
   `:map` or `:messages`), cursor positions, the last known viewport of each
   pane, terminal focus (initially focused), the status message and the
-  history of status messages (`:messages`), the pending invites (for
-  `:join`'s completion), the target of the latest `:join`, whose answer
-  the core waits for, the jump list with the entry whose message it
-  loads (see "Jump list"), the open thread, with the main timeline
-  kept aside while the thread is shown, and the replied-to message whose
-  thread `gd` waits for (see "Threads").
+  history of status messages (`:messages`), the last search pattern and
+  whether it is highlighted (see "Search and jumps"), the pending invites
+  (for `:join`'s completion), the target of the latest `:join`, whose
+  answer the core waits for, the jump list with the entry whose message it
+  loads (see "Jump list"), the open thread, with the main timeline kept
+  aside while the thread is shown, the replied-to message whose thread
+  `gd` waits for (see "Threads"), and the timeline previews that the tui
+  adapter wants and those being fetched (see "Files and images").
 
 ### Keymap resolver
 
@@ -446,28 +454,39 @@ covered by unit tests.
   room's threads read too.
 - Optimistic clearing: when the core requests an unthreaded receipt (the
   main timeline's, or the one a thread sends when the main timeline is
-  read; see "Threads") or
-  runs `room.mark_read`, it sets that room's `UnreadCounts` to zero
-  immediately, and a room other than the open one moves in the room list
-  when the sort keys depend on the counts (the open room already sorts as
-  read; next item). The next SDK update overwrites it, with the replies
-  in threads after the receipt counted again. This makes action sequences
-  such as `["room.mark_read", <open the next unread room>]` deterministic.
+  read; see "Threads") or runs `room.mark_read`, it sets that room's
+  `UnreadCounts` to zero immediately and, added after 0.1.4, raises its
+  `last_read` to its latest activity: the receipt goes to the room's
+  newest event, and the homeserver's time for it is no earlier. A room
+  other than the open one moves in the room list when the sort keys
+  depend on the counts or on `last_read` (the open room already sorts as
+  read; next item). The next SDK update overwrites the counts, with the
+  replies in threads after the receipt counted again, but never lowers
+  `last_read`: the room list keeps the later of the stored and the
+  updated time, since homeservers keep a receipt only when it moves
+  forward (see "Room list"), so facts read from the store before the
+  receipt's echo do not move the room back. This makes action sequences
+  such as `["room.mark_read", <open the next unread room>]`
+  deterministic.
 - The open room sorts as read: under the `mentions` and `unread` sort keys
   the core places the open room as if it had no unread messages and no
   mentions, so it never moves into or within those groups while it is
-  open. Once another room is opened, or no room is open, it sorts by its
-  counts again. Its badge and the `filter`s use its real counts, and
-  `recent`, `read` and `name` do not change. The reason: the SDK's counts
-  can arrive after the receipt went out (matrix-sdk 0.19.1 saves a room's
-  counts before it sends the timeline the same events, and the room list
-  reads them on a task of its own), and until the next sync brings the
-  receipt back they still count the events up to it, so the room being
-  read would sit among the unread rooms. The rule relies on no SDK
-  ordering. The badge can still show such a count until the receipt's
-  echo. `RoomList` knows the open room (`RoomList::open`): opening a room
-  places it and the previously open room again, and the room list's
-  cursor goes to the opened room.
+  open, and under `read` it counts as read up to its latest activity: its
+  time is the later of its `last_read` and its latest activity (added
+  after 0.1.4), where its receipt's echo will put it. Once another room is
+  opened, or no room is open, it sorts by its counts and `last_read`
+  again. Its badge and the `filter`s use its real counts, and `recent`
+  and `name` do not change. The reason: the SDK's counts can arrive after
+  the receipt went out (matrix-sdk 0.19.1 saves a room's counts before it
+  sends the timeline the same events, and the room list reads them on a
+  task of its own), and until the next sync brings the receipt back they
+  still count the events up to it, so the room being read would sit among
+  the unread rooms. The rule relies on no SDK ordering. The badge can
+  still show such a count until the receipt's echo. `RoomList` knows the
+  open room (`RoomList::open`): opening a room places it and the
+  previously open room again; the room list's cursor stays on its row
+  when it was on the opened room, and otherwise goes to the opened room
+  (see "Room list").
 - Room keys are shared with the SDK's default recipient strategy
   (`CollectStrategy::AllDevices`), which does not refuse to send when another
   user's identity changes.
@@ -481,7 +500,10 @@ covered by unit tests.
   In encrypted rooms there is often none, and the SDK cannot ask the server to
   scale encrypted media, so the adapter downloads the full file. Files larger
   than 10 MiB are not fetched for previews; an event that gives no size is
-  fetched, and refused after the download if it is larger.
+  fetched, and refused after the download if it is larger. `FetchPreview`,
+  for previews in the timeline (added after 0.1.4), also asks the server to
+  scale an unencrypted image without a thumbnail, and takes stickers too
+  (see "Images in the timeline").
 - Sync path: phase 0 decided on classic `/sync` for the target homeserver,
   and only that path is implemented (see "Phase 0 findings"). The core
   receives the same `Msg`s either way, so another path could be added in
@@ -497,13 +519,16 @@ covered by unit tests.
 - edtui's clipboard is a custom `ClipboardTrait` implementation: copying
   writes the text to the terminal clipboard with OSC 52 and keeps it in an
   internal register, and pasting reads the internal register. Every editor
-  state gets the same `Rc<RefCell<Register>>` handle, and timeline yanks use
-  the same register.
+  state gets a handle to the same `Rc<RefCell<Register>>`, and timeline
+  yanks use the same register. Each editor's handle can drop that
+  editor's writes for one command, for the black hole register (added
+  after 0.1.4; see "Input routing").
 - Text editing is an input detail. The core only knows each composer's
   `Draft` and whether it is empty, which the tui adapter reports with
   `Msg::ComposerEdited { timeline, empty }` when that changes. The composer
   effects (`FocusComposer`, `RequestSubmit`, `InsertNewline`, `LoadComposer`,
-  `ClearComposer`, `ReplaceMentionToken`, `ExternalEditor`) name the
+  `ClearComposer`, `ReplaceMentionToken`, `ExternalEditor`, and after 0.1.4
+  `ComposerNormal`, `EmptyComposer` and `DeleteWordBefore`) name the
   composer's `TimelineId`, and the shown composer is that of the shown
   timeline (`App::shown_timeline()`).
 - Sending: `composer.send` makes the tui adapter read the editor text and send
@@ -531,13 +556,79 @@ covered by unit tests.
   resend").
 - `composer.focus` puts edtui into insert mode by default. With
   `mode = "keep"` it keeps edtui's previous mode.
+- `composer.normal` (`<C-c>` in insert mode, vim's insert-mode CTRL-C;
+  added after 0.1.4) puts the shown timeline's composer in normal mode as
+  edtui's own `<Esc>` does: the tui adapter gives edtui an `<Esc>` in
+  insert, visual and search mode (edtui `src/events/key.rs:143-150,
+  182-185`), so from insert mode the cursor moves one column left and `.`
+  repeats the insert as after `<Esc>` (`src/state.rs:119-128`,
+  `src/actions.rs:156-190`), a visual selection is dropped and a search
+  stopped; in normal mode it does nothing. A key waiting for the next one
+  is cancelled, the mention menu closes, and while the composer has focus
+  keys resolved afresh after it are resolved in normal mode. Like
+  `composer.send` it acts on the shown timeline's composer wherever the
+  focus is (`UiEffect::ComposerNormal(TimelineId)`). An action array runs
+  its actions in order against the state, and the binary executes their
+  effects in that order (`event_loop::update`), so with
+  `"<CR>" = ["composer.send", "composer.normal"]` the text is read
+  (`RequestSubmit`) before the editor leaves insert mode; `Msg::Submit`
+  then comes back and, unless the body is blank, `ClearComposer` resets
+  the editor, which keeps insert mode only (`Composer::reset`), so the
+  composer ends empty and in normal mode; a blank body sends nothing and
+  leaves its text, in normal mode. Without such a binding the composer
+  stays in insert mode after sending.
 - `composer.cancel`: a reply draft becomes `New` and keeps its text. An edit
   draft becomes `New` and the composer is cleared.
+- `composer.clear` (added after 0.1.4, no default key) empties the shown
+  timeline's composer as one change that `u` undoes, writes no register,
+  and keeps the draft (a reply or an edit stays; ending it is
+  `composer.cancel`'s job) and its mentions, so that `u` brings them back
+  with their text. The tui adapter puts the cursor after the last
+  character and runs edtui's `DeleteChar` with the number of characters
+  and line breaks in the text, which saves one undo state and writes no
+  register (edtui `src/actions/delete.rs:73-121`); edtui's undo states are
+  otherwise reachable only through its actions (`capture` is
+  crate-private, `src/state/undo.rs:49`). The mode stays, except that a
+  visual selection is dropped (normal mode); the mention menu closes; an
+  empty composer stays as it is, with no undo state.
+  `UiEffect::EmptyComposer(TimelineId)`, unlike `ClearComposer`, which
+  starts a fresh editor state after a send.
 - `composer.leave` (`<Esc>` in the composer's normal mode): when the draft
   is a reply or an edit and the composer is empty, it ends the draft as
   `composer.cancel` does; then the timeline gets the focus. Any text, also
   whitespace alone (the composer is empty only without a character), keeps
   its draft, so nothing typed is lost. `focus.timeline` never ends a draft.
+- `composer.delete_word_before` (`<C-w>` and `<A-BS>` in insert mode;
+  added after 0.1.4) deletes, in insert mode, the word before the cursor
+  with the blanks between it and the cursor: from where the line editor's
+  `<C-w>` would delete (`mxt_core::line::word_start`, by grapheme cluster
+  with the line editor's word classes, CJK included; see "Line editing")
+  up to the cursor, on the cursor's line. At the start of a line it
+  deletes the line break, joining the line to the one above, as vim's
+  `<C-w>` does with nvim's default `backspace`; at the start of the text
+  it does nothing. The tui adapter runs edtui's `DeleteChar` with the
+  number of characters to delete, so the deletion is one undo state,
+  writes no register, and is to `.` what edtui's `<BS>` is (it saves an
+  undo state on each run, and only typed characters are recorded for
+  `.`; edtui `src/actions/delete.rs:73-121`, `src/actions/insert.rs:24`).
+  edtui's own `DeleteWordBackward` is not used: it writes the register
+  (`src/actions/delete.rs:325-394`) and classifies characters, not
+  grapheme clusters. In normal and visual mode the action does nothing.
+  `UiEffect::DeleteWordBefore(TimelineId)`.
+- `<Up>` and `<Down>` at the composer's edges (added after 0.1.4): in
+  insert and normal mode, with no key waiting, `<Up>` on the first line of
+  the text moves the cursor to the start of the text and `<Down>` on the
+  last line to its end (after the last character in insert mode, on it in
+  normal mode), as text fields do; elsewhere they go to edtui, whose
+  `MoveUp` and `MoveDown` move by lines of the text and stop at the first
+  and the last (`src/actions/motion.rs:54-85`). A line is a line of the
+  text, not a row on the screen: edtui moves by text lines whether or not
+  a line wraps, so `<Up>` from any row of a wrapped first line goes to the
+  start, as `<Up>` from any row of a wrapped line goes to the line above.
+  `k` and `j` keep vim's behaviour, visual mode keeps edtui's, and the
+  mention menu's `<Up>` and `<Down>` (`composer.completion`) come first,
+  since the keymap sees a key before the editor. The message view's
+  editor, the same `Editor`, does the same.
 - Mention completion:
   - After each edit in insert mode, the tui adapter looks for an `@` token at
     the cursor (an `@` at the start of the text or after whitespace, followed
@@ -577,6 +668,8 @@ covered by unit tests.
       other key is dropped with the `g` (`g]`, `gx`, `g:`), and `g<Esc>`
       cancels the `g`. In nvim `g]` is a command of its own, so the default
       `]u` does not apply after `g` there either.
+    - `"` in normal or visual mode: the register's name (see the black
+      hole register below).
 
     These are all the keys after which edtui 0.11.8 (mxt's fork at the
     pinned commit) waits in normal and visual mode: `g` (`gg`), `d`, `c`
@@ -595,6 +688,33 @@ covered by unit tests.
     "Keymap resolver"); keys typed after it go to edtui. No default binding
     in those tables starts with `g`: `gg`, `gx` and `gd` are in `room_list`
     and `timeline`.
+  - The black hole register (added after 0.1.4): `"` in the editors'
+    normal and visual mode, with no key waiting, is mxt's. edtui binds no
+    key sequence that starts with `"` in these modes (it appears only in
+    `ci"`, `di"` and visual `i"`, edtui `src/events/key.rs:585-588,
+    654-661, 719-726`), so before this `"` did nothing there and `_` moved
+    to the first non-blank (`src/events/key.rs:335-350`): `"_dd` deleted
+    the line into the register. The key after `"` goes to the editor
+    without the keymap, as after `f`. `_` makes the next command write
+    neither mxt's register nor the terminal's clipboard: the editor's
+    handle to the shared register drops writes until edtui's command
+    ends, that is until a key leaves nothing waiting (no operator, text
+    object, `g` or character pending), also when the command writes
+    nothing (`"_j`), and until then keys go to the editor without the
+    keymap. So `"_dd`, `"_diw`, `"_cw`, `"_D`, `"_yy` and visual `"_d`
+    and `"_c` leave the register as it was; `"_x` is `x`, since edtui's
+    `x` writes no register (`RemoveChar`, `src/actions/delete.rs:18-44`).
+    Reads are unaffected: `"_p` pastes mxt's register as `p` does, where
+    vim's black hole register reads as empty. Whatever cancels a waiting
+    key (`FocusComposer`, `LoadComposer`, a paste) ends it too. Any other
+    register name (`"a`, `"+`) does nothing but set the status line error
+    `Only the black hole register "_ is supported` (`Msg::EditorRefused`,
+    shown as an error and not logged), and a key that is no character
+    (`<Esc>`) cancels the `"` silently. The flag belongs to the editor's
+    handle, not to the shared register, so it never drops another
+    editor's copy; the message view's editor has it too. mxt handles it,
+    not the edtui fork: mxt owns the clipboard (`SharedRegister`) and
+    already tracks edtui's waiting keys (`Pending`).
 - Pasted text, wherever the keys go: mxt turns on bracketed paste, so the
   terminal reports a paste as one event, which the tui adapter sends as
   `Msg::Paste` with its line breaks as `\n` (terminals and tmux send `\r`).
@@ -782,17 +902,20 @@ so the order is total and the same on every start.
 | Key | First | From |
 |---|---|---|
 | `mentions` | rooms with unread mentions | `mentions > 0`: whether the room has any, not how many, so a new mention does not reorder the rooms that have some |
-| `unread` | rooms with unread messages | the rule of `filter = "unread"` (see "Action registry"): `messages`, `notifications` or `mentions` above zero, or `marked` |
+| `unread` | rooms with unread messages | the rule of `filter = "unread"` (see "Action registry"): `messages`, `notifications` or `mentions` above zero, or `marked`; for a muted room only `mentions` above zero or `marked` |
 | `recent` | the latest activity, newest first | `latest_activity`, the SDK's latest event time; rooms without one last |
-| `read` | your latest read receipt, newest first | `last_read`, the time of your own latest read receipt in the room; rooms you never read last |
+| `read` | the latest news for you, newest first | the room's news time: for a room unread by the rule of `unread`, `latest_activity`, the time of its newest message (its `last_read` when it has no latest activity); for any other room `last_read`, the time of your own latest read receipt in it; for the open room, which sorts as read, the later of the two (see "Matrix adapter"). A room without such a time is last, as rooms you never read were before |
 | `name` | the displayed name | case-insensitive, by the full displayed name (`network / room`), which groups rooms by network, whichever `network` layout is set |
 
 The default is `"recent"`. A value with one key is the list of that key,
 so `"recent"` and `"name"` keep the meaning they had. `sort = "mentions,
 unread, read"` lists the rooms with unread mentions first, then the other
-unread rooms, then the rest, each group by when you last read its rooms.
-Spaces around the commas are optional (`"mentions,unread,read"` is the
-same list), and keys are lowercase, as every fixed value of the
+unread rooms, then the rest; in the first two groups the room with the
+newest message comes first, so a room that gets a new message goes to the
+top of its group, and the rest are in the order you last read them. `read`
+alone orders the rooms by when each last had news for you or you last
+read it. Spaces around the commas are optional (`"mentions,unread,read"`
+is the same list), and keys are lowercase, as every fixed value of the
 configuration (`"Recent"` is an unknown key). A list with an unknown key,
 no key, an empty key or a key given twice loads with a warning (see
 "Layers"). The value stays a string, so mxt 0.1.3, which knows `"recent"`
@@ -802,46 +925,91 @@ warning, and its default `"recent"` applies (0.1.3
 the default). A configuration shared with machines that run 0.1.3 can
 carry the new value; the user documentation says so.
 
+Three rules changed after 0.1.4 (owner work G): muted rooms, the `read`
+key's time for unread rooms, and the cursor when the open room moves. mxt
+0.1.4 counted a muted room with unread messages as unread, ordered unread
+rooms by their `last_read` under `read`, so a room unread after days of
+silence sat low in its group, and moved the cursor with the room it
+opened.
+
+- Muted rooms: a muted room (`NotificationMode::Mute`) counts as unread
+  for the `unread` key and for `filter = "unread"` (the room picker's
+  included), and so for `]u` and `[u`, only while it has unread mentions
+  or the manual unread mark. Muted bridged channels with steady traffic
+  would otherwise fill the unread group and be what `]u` opens. Its dim
+  count of unread messages stays in the room list (see "Unread badges"),
+  and `filter = "notify"`, `"mentions"` and `"all"` do not look at the
+  mode. Rooms set to mentions and keywords only are not muted.
+  `RoomFilter::matches` takes the room summary for its counts and mode.
 - Where the keys' values come from, without a request per room:
-  `mentions` and `unread` read the room's `UnreadCounts`, the counts the
-  badges and `filter = "unread"` use, so optimistic clearing (see "Matrix
-  adapter") moves a room at once; they take the open room as read (see
-  "The open room sorts as read" there). `recent` reads the latest event
-  time, as before. `read` reads `RoomSummary::last_read`: `mxt-matrix`
-  reads, when it reads the room's facts, the user's own receipts from the
-  state store
-  (`Room::load_user_receipt`) for the types `m.read` and `m.read.private`
-  and the threads `Unthreaded` (no `thread_id`) and `Main`, and takes the
-  latest `ts` among the four; receipts without `ts` and a store without
-  any give `None`. A receipt is the user's, whichever device sent it. The
-  time is the homeserver's, set when it took the receipt. Receipts with a
-  thread root as `thread_id` do not count: the store keeps them per root,
-  and finding a room's thread roots would take a request. The facts are
-  read at the start, for every room of each sync response (which lists the
-  rooms whose only news is a receipt) and on room info updates, so `read`
-  follows receipts from any device, mxt's own included once the next sync
-  response brings them back.
+  `mentions` and `unread` read the room's `UnreadCounts` (and `unread` its
+  mode), the counts the badges and `filter = "unread"` use, so optimistic
+  clearing (see "Matrix adapter") moves a room at once; they take the open
+  room as read (see "The open room sorts as read" there). `recent` reads
+  the latest event time, as before. `read` reads `RoomSummary::last_read`:
+  `mxt-matrix` reads, when it reads the room's facts, the user's own
+  receipts from the state store (`Room::load_user_receipt`) for the types
+  `m.read` and `m.read.private` and the threads `Unthreaded` (no
+  `thread_id`) and `Main`, and takes the latest `ts` among the four;
+  receipts without `ts` and a store without any give `None`. A receipt is
+  the user's, whichever device sent it. The time is the homeserver's, set
+  when it took the receipt. Receipts with a thread root as `thread_id` do
+  not count: the store keeps them per root, and finding a room's thread
+  roots would take a request. The facts are read at the start, for every
+  room of each sync response (which lists the rooms whose only news is a
+  receipt) and on room info updates, so `read` follows receipts from any
+  device, mxt's own included once the next sync response brings them
+  back. For an unread room `read` reads `latest_activity` instead: the
+  timestamp of the SDK's latest event (`Room::latest_event_timestamp`,
+  matrix-sdk-base `room/latest_event.rs:30-32`), read with the other
+  facts. The SDK's latest event is the newest message, sticker, poll
+  start, call invite or RTC notification, or a member's join or invite;
+  reactions, redactions and events not yet decrypted do not count
+  (matrix-sdk `latest_events/latest_event/builder.rs:705-767, 769-826`).
+  While a room is unread its newest unread message is newer than your
+  receipt, so the latest event is that message or something newer, such
+  as a join that the counts leave out; an undecryptable newest message is
+  passed over until it decrypts. A room marked unread by hand may have no
+  unread message; its latest activity stands in as the last time it had
+  news. The counts and the latest event come with the same room info
+  update, so nothing else is read.
 - Where the order lives: `mxt-core::rooms::RoomSort` holds the keys,
   `SortKey`s, whose `config_name()` is the one place their names are
   written (`SortKey::ALL` lists them, as `RoomFilter::ALL` does for
   `filter`; the configuration loader in `mxt` parses the list with them).
   `RoomList` keeps its rooms in that order, placing a room again when an
-  update replaces it, when optimistic clearing changes its counts, and
-  when it is opened or stops being the open room.
+  update replaces it, when optimistic clearing changes its counts and
+  `last_read`, and when it is opened or stops being the open room.
 - The room list's cursor stays on its room when the order changes under
   it: a room that moves takes the cursor along when the cursor is on it,
   and otherwise the cursor's index shifts with the rooms that move past
-  it. Before the cursor was first placed it stays on the first room,
-  whichever room that is. `]u`, `[u`, `room.open` and the room picker
-  follow the list's order, as before: `first`, `next` and `prev` are
-  positions in it, and the picker lists rooms in it for an empty query.
-- Opening a room in mxt sends a read receipt once its newest message is on
-  the pane and the terminal has focus (see "Read receipts"). With `read`,
-  the room moves up when its newest message is newer than your last read
-  receipt in it, once the next sync response brings the receipt back.
-  Opening a room with nothing new leaves it in place: homeservers keep a
-  receipt only when it moves forward (Synapse ignores a receipt whose event
-  is at or before the event of the user's receipt of that type and thread,
+  it. One exception (added after 0.1.4): when the open room moves because
+  it was opened or read, a cursor on it stays on its row, now on the room
+  that moved into its place, as in a mail inbox (`<CR>` opens that one
+  next). Opened covers every path that opens the room under the cursor:
+  `<CR>`, `]u`, the picker, `:open`, `:join` and the jump list. Read
+  covers optimistic clearing of the open room (its receipt, or
+  `room.mark_read`) and an update of the open room that leaves its latest
+  activity as it was (a receipt's echo, cleared counts): `RoomList::upsert`
+  tells whether the latest activity changed, and an update of the open
+  room with new activity is another reorder, which the cursor follows. A
+  room opened while the cursor is on another room puts the cursor on the
+  opened room in its new place, as before. The row is the cursor's index,
+  at most the last room's. Before the cursor was first placed it stays on
+  the first room, whichever room that is. `]u`, `[u`, `room.open` and the
+  room picker follow the list's order: `first`, `next` and `prev` are
+  positions in it, `first` skipping the open room (see "Action
+  registry"), and the picker lists rooms in it for an empty query.
+- Opening a room in mxt sends a read receipt once its newest message is
+  on the pane and the terminal has focus (see "Read receipts"). With
+  `read`, the open room counts as read up to its latest activity (see
+  "The open room sorts as read" in "Matrix adapter"), so a room with
+  something new takes its place among the read rooms as it opens, and
+  keeps it when the receipt's echo brings the new `last_read`. Opening a
+  room with nothing new leaves it in place: its `last_read` is already at
+  or after its latest activity, and homeservers keep a receipt only when
+  it moves forward (Synapse ignores a receipt whose event is at or before
+  the event of the user's receipt of that type and thread,
   `_insert_linearized_receipt_txn` in
   `synapse/storage/databases/main/receipts.py`), so no new `ts` comes back
   for a room already read, here or on another device. With `unread` or
@@ -882,10 +1050,15 @@ instead, and it never takes more than half of the width.
   messages show `(deleted)`, and messages of other kinds
   `(unsupported: <kind>)`.
 - Images show `[image: <name> <width>x<height>]` inline, or
-  `[image: <name>]` without dimensions. Images are never drawn inside the
-  scrolling timeline; `message.view` shows them. Files (also video and
-  audio) show `[file: <name> <size>]`, without the size when the event has
-  none, and stickers `[sticker: <body>]`.
+  `[image: <name>]` without dimensions. Files (also video and audio) show
+  `[file: <name> <size>]`, without the size when the event has none, and
+  stickers `[sticker: <body>]`. With `ui.timeline.images = "on"` (added
+  after 0.1.4) an image's or a sticker's preview follows its line, at most
+  `ui.timeline.image_rows` rows tall (see "Images in the timeline");
+  otherwise images are not drawn inside the scrolling timeline, and
+  `message.view` shows them.
+- After a search, the matches of its pattern in the messages on the pane
+  are highlighted until `:noh` (see "Search and jumps").
 - The cursor follows the newest message from the room's opening until `k`,
   `<C-u>`, `gg`, a search, `gd` or the jump list moves it to another
   message; moving down onto the newest message or `G` follows again, and
@@ -939,7 +1112,7 @@ instead, and it never takes more than half of the width.
 | `normal` | `<C-w><C-h>` / `<C-w><C-l>` | `focus.room_list` / `focus.timeline` | the same with ctrl held |
 | `normal` | `<C-w>j`, `<C-w><C-j>` | `{ action = "composer.focus", mode = "keep" }` | window below |
 | `normal` | `<C-w>k`, `<C-w><C-k>` | `focus.timeline` | window above |
-| `normal` | `]u` / `[u` | `{ action = "room.open", filter = "unread", pick = "next" }` / `pick = "prev"` | `]` / `[` motions |
+| `normal` | `]u` / `[u` | `{ action = "room.open", filter = "unread" }`, the topmost unread room other than the open one / `{ action = "room.open", filter = "unread", pick = "prev" }` | `]` / `[` motions |
 | `normal` | `<C-o>` / `<Tab>` | `jump.back` / `jump.forward` (see "Jump list") | `<C-o>` / `<C-i>`, which terminals send as `<Tab>` |
 | `room_list`, `timeline` | `j` / `k` | `cursor.down` / `cursor.up` | same |
 | `room_list`, `timeline` | `gg` / `G` | `cursor.first` / `cursor.last` | same |
@@ -960,6 +1133,8 @@ instead, and it never takes more than half of the width.
 | `thread` | `q` / `<Esc>` | `thread.close` (back to the main timeline) | close window |
 | `composer.insert` | `<CR>` | `composer.send` | |
 | `composer.insert` | `<C-j>` | `composer.newline` | |
+| `composer.insert` | `<C-c>` | `composer.normal`: normal mode | `i_CTRL-C` |
+| `composer.insert` | `<C-w>`, `<A-BS>` | `composer.delete_word_before` | `i_CTRL-W` |
 | `composer.insert`, `composer.normal` | `<C-x><C-e>` | `composer.external_editor` | shell edit-command-line |
 | `composer.normal` | `<Esc>` | `composer.leave`: back to the timeline; a reply or an edit without text ends | |
 | `composer.normal` | `<C-c>` | `composer.cancel` | |
@@ -971,12 +1146,31 @@ instead, and it never takes more than half of the width.
 | `picker` | `<Down>`, `<Tab>` / `<Up>`, `<S-Tab>` | `picker.next` / `picker.prev` | completion menu |
 | `picker` | `<CR>` / `<Esc>` | `picker.accept` / `picker.cancel` | |
 | `command_line` | `<CR>` / `<Esc>` / `<Tab>` | `command_line.execute` / `command_line.cancel` / `command_line.complete` | same |
+| `command_line` | `<Up>` / `<Down>` | `command_line.history_prev` / `command_line.history_next` (see "Line editing") | same, by the text before the cursor |
 | `message_view` | `q` / `<Esc>` | `view.close` | close window |
 
 `<Esc>` in the composer's insert mode is not bound: edtui switches to its
 normal mode and the draft is kept. A user binding of `<Esc>` in
 `composer.normal`, such as `"<Esc>" = "focus.timeline"`, replaces
 `composer.leave` like any other default.
+
+`<C-c>`, `<C-w>` and `<A-BS>` in `composer.insert` were added after 0.1.4.
+They did nothing in the composer's insert mode before: edtui's vim keys
+bind none of them there, and its insert mode inserts only characters
+without ctrl or alt (edtui `src/events/key.rs:139-837, 1098-1158`).
+`composer.insert` falls back to no table, so these defaults hide no user
+binding: a binding of the same keys in `[keymap.composer.insert]`
+replaces them, and `"<C-c>" = "nop"` brings back the old behaviour. The
+mention menu's table falls back to `composer.insert`, so they work there
+too. `<C-w>` as the window prefix (`<C-w>h`, `<C-w>j`, …) is a `normal`
+key, which applies in the composer's normal and visual mode and not in
+insert mode, so the two never meet. `<C-BS>` is no default: terminals
+usually send it as `<C-h>` (byte 0x08) or as `<BS>` (0x7F), which
+crossterm reads as ctrl and `h` and as Backspace (crossterm 0.29
+`src/event/sys/unix/parse.rs:103-109`), so a binding of `<C-BS>` fires
+only where the terminal reports it as a key of its own (the kitty
+keyboard protocol, which mxt does not turn on). `<A-BS>` arrives as ESC
+and 0x7F, which crossterm reads as alt and Backspace (`parse.rs:76-87`).
 
 `t`, `q` and `<Esc>` did nothing in the timeline before threads. `q` and
 `<Esc>` are in the table `thread`, which applies only while a thread is
@@ -992,16 +1186,74 @@ The emoji picker lists, for an empty query, the user's own reactions on the
 message first, then the most common reactions, then every other emoji; a
 query is matched against shortcodes and names.
 
-`]u` and `[u` open the next and previous unread room, wrapping around
-(`filter = "unread"`). `room.mark_read` has no default binding; the
-configuration example binds it to `<leader>x` together with opening the
-next unread room.
+`]u` opens the topmost unread room in the room list's order other than
+the open one (`pick = "first"`, which skips the open room; changed after
+0.1.4 from `pick = "next"`, the next unread room after the open one, which
+in a list sorted by unread state was often far down, while a room with a
+new mention at the top waited). `[u` opens the previous unread room,
+wrapping around (`pick = "prev"`). Muted rooms count only with unread
+mentions or the manual mark (see "Room list"). `room.mark_read` has no
+default binding; the configuration example binds it to `<leader>x`
+together with opening the next unread room.
 
 ### Search and jumps
 
 - `/` searches the loaded items of the focused pane, case-insensitively, by
   substring: display names in the room list, plain-text bodies in the
   timeline. There is no server-side search. `n` and `N` wrap around.
+- Highlighting (added after 0.1.4), as nvim's `hlsearch`: after a search
+  in either pane (`/`, `n` or `N`; the room list and the timeline share
+  the last pattern), every match of the pattern in the timeline's messages
+  on the pane is highlighted, until `:noh` (`:nohlsearch`,
+  `search.clear_highlight`) hides it or another room opens; the next
+  search shows it again. `App::search_highlight()` gives the pattern while
+  it is shown. Entering or leaving a thread keeps it: the thread is in the
+  same room, and the word followed in the timeline is as likely wanted in
+  the thread.
+  - The matches are exactly the search's. `mxt-core::search::Needle`
+    lowercases the pattern and the text with `char::to_lowercase`, as the
+    search does today, and the search's own checks (`find_item`,
+    `find_room`) use it too. `Needle::find_in(text)` gives the matches'
+    byte ranges in the original text, from left to right without
+    overlapping (as `str::match_indices`), each widened to whole grapheme
+    clusters: a pattern that matches part of `👍🏽`, or a letter without
+    its combining accent, highlights the whole cluster, and a lowercase
+    form of another length (`İ`'s is two characters) maps back to the
+    whole character. The text is the item's `plain_text()`, which the
+    search searches. A pattern holds no line break, so no match spans
+    lines, and `search::plain_line_matches(content, needle)` gives each
+    plain line's matches relative to the text after the line's prefix,
+    which only rich text has (`> ` for a quote, `- ` or `1. ` for a list
+    item, as `RichText::to_plain` writes them).
+  - The tui adapter draws them on that text: the timeline writes a
+    message's lines in the order of `to_plain` (one call of `Body::line`
+    per plain line), the name of `[image: …]`, `[file: …]` and
+    `[sticker: …]` after the opening, and leaves an emote's `* <name> `
+    lead and the quote and list prefixes out of every match, since it
+    draws prefixes differently (`│ `); a match on a spoiler highlights its
+    blocks whole. The headers, reply previews, reactions and `💬` rows hold
+    no matches, since the search does not look there, and matches in the
+    cut-off part of a tall message (`[+N lines]`) are not drawn: `<CR>`
+    opens the message.
+  - Matches in other messages are black on yellow, vim's default search
+    colours in a 16-colour terminal, and those in the cursor's message
+    black on bright yellow and bold: the search moves the cursor by
+    message and `n` goes to the next message, so every match in the
+    cursor's message is the current one, and marking only its first would
+    suggest that `n` goes to the second. The colours replace the text's
+    own and keep its bold and italics, so a match in inline code (drawn
+    reversed) stays visible.
+  - The room list's names are not highlighted: its rows cut names with
+    `…` and split them into styled network and room parts in two layouts,
+    and its cursor already shows the matching room.
+  - The message view opened with `<CR>` while the highlight is shown marks
+    the same matches on its text (`plain_text()` too) with edtui's
+    highlights in the other messages' style (`EditorState::set_highlights`,
+    edtui `src/state.rs:197-210`, `src/state/highlight.rs:6-15`), given as
+    byte ranges in `ViewContent::Text { text, matches }` (empty for the
+    help views). edtui's own `/` in the editors stays as it is: it matches
+    case-sensitively and shows only the current match while its pattern is
+    typed (`src/state/search.rs:31-37`, `src/view.rs:281-286`).
 - `gd` jumps to the replied-to message if it is loaded, or to the thread
   that holds it, or from a thread to the main timeline when that holds it
   (see "Threads"). Otherwise the status line says that it is not loaded.
@@ -1467,14 +1719,17 @@ the registry, so a new command needs only its entry.
 | `:help` | `help.commands`: the command list (see "Help views") |
 | `:map` | `help.keymap`: the effective key bindings (see "Help views") |
 | `:messages` | `status.messages`: the status line's message history (see "Help views") |
+| `:noh`, `:nohlsearch` | `search.clear_highlight`: hides the search highlight until the next search (see "Search and jumps"); added after 0.1.4 |
 | `:q` | `app.quit` |
 
-`:mute`, `:unmute`, `:recover`, `:help`, `:map`, `:messages` and `:q`
-reject an argument, and `:open`, `:join` and `:upload` without one show
-their usage (`usage: :open <room>`). `:react` takes an optional argument.
-Command names match exactly: `:q` is the only short name, and `:h` is an
-unknown command. The command line, the `/` search line and picker queries
-are edited with the line editor (see "Line editing").
+`:mute`, `:unmute`, `:recover`, `:help`, `:map`, `:messages`, `:noh`,
+`:nohlsearch` and `:q` reject an argument, and `:open`, `:join` and
+`:upload` without one show their usage (`usage: :open <room>`). `:react`
+takes an optional argument. Command names match exactly: `:q` and `:noh`
+are the only short names (`:noh` and `:nohlsearch` are two registry
+entries for one action, the two spellings vim users type), and `:h` and
+`:nohl` are unknown commands. The command line, the `/` search line and
+picker queries are edited with the line editor (see "Line editing").
 
 `:react` runs `message.react`, with `emoji` when an argument is given, on the
 open room's timeline cursor, whichever pane has focus (unlike `:mute`, which
@@ -1496,7 +1751,8 @@ The `:` command line, the `/` search lines, the pickers' queries and the
 which sits between grapheme clusters, never inside one. A key reaches it
 after the `command_line` or `picker` table, as a key that table does not
 bind (see "Tables and resolution"), or directly in `SECRET` mode, which has
-no table. There is no history.
+no table. The `:` command line and the `/` search lines have a history
+(below); the pickers' queries and the `SECRET` prompt have none.
 
 | Key | Effect |
 |---|---|
@@ -1524,7 +1780,10 @@ of `open foo.bar` it deletes `bar`, then `.`, then `foo`, then `open `.
 nvim's `<S-Left>` and `<S-Right>` on its command line move by
 blank-separated WORDs, which would make a line of Japanese one word; mxt
 uses the same words for all three keys. `mxt-core` keeps its own copy of
-the class table, since it cannot depend on edtui.
+the class table, since it cannot depend on edtui. `line::word_start`, where
+`<C-w>` deletes from, is public: the composer's
+`composer.delete_word_before` deletes back to it too (see "Terminal
+adapter and the composer").
 
 - Typing, deleting and moving the cursor end a `<Tab>` completion cycle,
   so the next `<Tab>` completes the text as it is then.
@@ -1554,6 +1813,64 @@ the class table, since it cannot depend on edtui.
   belongs to the composer's mention menu, which is not a line.
 - The editors' own `/` search (edtui's search mode, in the composer and the
   message view) is edtui's, not this line editor.
+
+The history (added after 0.1.4) of the `:` command line and the `/`
+search lines:
+
+- Two histories, each of at most 100 lines, the oldest dropped first:
+  commands (`:`), and searches (`/`), which the room list's and the
+  timeline's search lines share, as they share the last pattern. The
+  editors' `/` is edtui's search mode, not this line, and has none. A
+  line goes in when `command_line.execute` runs it, as it was typed, also
+  when the command then fails; an empty line does not (an empty search
+  reuses the last pattern). A line equal to one in its history moves to
+  the newest place instead of being added twice. Lines hold no line
+  break: no key types one, and a paste keeps its first line.
+- `command_line.history_prev` (`<Up>`) and `command_line.history_next`
+  (`<Down>`), in the `command_line` table. The first `history_prev` on a
+  line takes the text before the cursor as the filter, keeps the line's
+  text and cursor, and puts the newest line of the line's history that
+  starts with the filter in the line, the cursor at its end (byte-wise and
+  case-sensitive, as vim filters its history); each further one the next
+  older match, and with none left it does nothing. `history_next` goes to
+  the next newer match, and past the newest it brings back the kept text
+  and cursor and ends the browsing; without browsing it does nothing. With
+  nothing before the cursor every line matches. Any other change of the
+  line (typing, deleting, moving the cursor, `<Tab>`, a paste) ends the
+  browsing, so the next `<Up>` filters by the text then, and the history
+  keys end a `<Tab>` completion cycle as other edits do. Recalling uses
+  `LineEditor::set_text`, so the cursor is at the end, as after
+  completion.
+- Kept in `$XDG_STATE_HOME/mxt/history`, mode 0600 (see "Storage"):
+  UTF-8 text whose first line is exactly `mxt history 1`, then one line
+  per entry, `:` and a command line's text or `/` and a search line's
+  text, oldest first, the commands before the searches. The name does not
+  start with `mxt`: tracing-appender's pruning of old logs deletes the
+  files in the state directory whose names start with `mxt` and end with
+  `log` (tracing-appender 0.2.5 `rolling.rs:670-680`). `mxt` reads the
+  file once at the start and gives it to the core with
+  `Msg::HistoryLoaded { commands, searches }` right after `App::new`, as
+  `Msg::ConfigWarnings`; the core keeps the last 100 of each and drops
+  repeats, keeping the newer. A missing file, one that cannot be read or
+  is not UTF-8, a first line other than `mxt history 1`, or any later line
+  that starts with neither `:` nor `/` (an empty one too) gives two empty
+  histories and a warning in the log with the reason (target
+  `mxt::history`), also for the missing file of a first start; the next
+  write replaces the file.
+- Written whenever a line goes into a history: the core returns
+  `Effect::Store(StoreEffect::SaveHistory { commands, searches })` with
+  both histories, and the binary hands it to one writer task, which
+  writes the snapshots in order, a newer one replacing any still waiting,
+  to `history.tmp` with mode 0600, syncs it and renames it over
+  `history`, on a blocking thread so the UI never waits. A failed write is
+  logged at `warn`, and the first failure of a run is also sent as
+  `Msg::EffectFailed { error: "Saving the command line history failed:
+  <reason>" }` through the channel the matrix adapter's messages use, so
+  the status line shows it once; later ones are only logged, so they do
+  not hide each command's own status. On quit, mxt waits up to 1 s for the
+  writer to finish, so `:q` and the lines before it are kept.
+- The `SECRET` prompt never reaches a history: it is neither a command
+  nor a search line, and `:recover` goes in as the command alone.
 
 ### Joining rooms and direct messages
 
@@ -1738,7 +2055,8 @@ first line says what it is.
 
   then an empty line, then one line per registry entry in the order of the
   Commands table above (`:open`, `:join`, `:mute`, `:unmute`, `:upload`,
-  `:react`, `:recover`, `:help`, `:map`, `:messages`, `:q`): the usage,
+  `:react`, `:recover`, `:help`, `:map`, `:messages`, `:noh`,
+  `:nohlsearch`, `:q`): the usage,
   padded with spaces to the longest usage plus two, then the description
   (`:open <room>      Open a room by its name`). No other usage text.
 - `:map` (`help.keymap`): the bindings of each table after the user's
@@ -1835,11 +2153,13 @@ list, so mxt does not offer an event-level mention list.
   upload limit.
 - Image previews use ratatui-image, in sixel, kitty or iTerm2 graphics or
   in half blocks, and inside tmux in sixel that tmux stores. They appear
-  only in the message view (`message.view`), which keeps the timeline's
-  width fixed. The image comes from the thumbnail source when the event
-  has one and from the full file otherwise, up to 10 MiB, scaled down
-  locally. Decoding is limited to 128 MiB of memory, so an image that
-  claims huge dimensions shows an error instead.
+  in the message view (`message.view`), which keeps the timeline's width
+  fixed, and with `ui.timeline.images = "on"` in the timeline (see
+  "Images in the timeline" below). In the view, the image comes from the
+  thumbnail source when the event has one and from the full file
+  otherwise, up to 10 MiB, scaled down locally. Decoding is limited to
+  128 MiB of memory, so an image that claims huge dimensions shows an
+  error instead.
 - The protocol, chosen when the tui adapter sets up the terminal, after
   raw mode and the alternate screen and before the key reader starts:
   - `ui.image_preview = "auto"` inside WSL without SSH (`WSL_DISTRO_NAME`
@@ -1973,10 +2293,176 @@ list, so mxt does not offer an event-level mention list.
     after the view is closed and opened again; WSL without SSH draws half
     blocks in place. Not tried yet: kitty, Ghostty, iTerm2 and Windows
     Terminal, and kitty graphics inside tmux.
+- Images in the timeline (added after 0.1.4). `ui.timeline.images = "on"`
+  (off by default; `ui.image_preview = "off"` turns it off too) shows
+  image messages and stickers with a preview below their `[image: …]` or
+  `[sticker: …]` line, at most `ui.timeline.image_rows` rows tall (8 by
+  default), with the message view's protocol choice:
+  - Layout, in the tui adapter alone. A preview's box is `image_rows` rows
+    by the item's text width in columns, measured in the encoder's cell
+    size in pixels (tmux's cell size for tmux's sixel,
+    `Picker::font_size()` otherwise, 10 by 20 pixels for half blocks).
+    From the event's dimensions (`info.w`, `info.h`), before anything
+    loads, the preview's rows and columns are ratatui-image's
+    `Resize::Fit` of those pixels into the box: in proportion, never
+    larger than the image itself, rounded up to whole cells (ratatui-image
+    `src/lib.rs:440-447, 526-545`). Without dimensions it reserves
+    `image_rows` rows and the text width. The reserved size follows the
+    box alone, never what loads, so the timeline does not jump: a loaded
+    image is scaled to fit it in proportion, up as well as down for an
+    event with dimensions (a thumbnail is often smaller than the image;
+    `Resize::Scale`), only down without them (`Resize::Fit`). Local echoes
+    reserve their rows too, and their preview loads once they are sent,
+    as their `ItemRef` changes. An item whose rows with the preview would
+    not fit the pane, and an item whose preview failed, show the text line
+    alone, as without previews.
+  - Fetching, only what is on or near the pane. After each frame the tui
+    adapter lists the remote image and sticker items among the entries
+    with a row on the pane and as many entries again above and below them
+    (at least 5 each way) that it neither keeps nor is decoding nor has
+    seen fail: the pane's own first, then by distance from the pane, below
+    first. When that list changes it reports `Msg::PreviewsWanted {
+    timeline, items }`. The core keeps the latest list for the shown
+    timeline as its queue and has at most 4 `MatrixEffect::FetchPreview {
+    room, item }` in flight, starting the next wanted item as each answer
+    arrives, so an item scrolled away before its turn is never fetched.
+    The answers, `Msg::PreviewFetched { room, item, bytes }` and
+    `Msg::PreviewFailed { room, item }`, become `UiEffect::ShowPreview {
+    item, bytes }` and `UiEffect::PreviewFailed(item)` while `room` is the
+    open room; opening another room or losing the open one drops the
+    queue, and late answers for it are dropped. The adapter tries, in
+    order: the event's thumbnail (`info.thumbnail_source`, plain or
+    encrypted) unless its size is above 10 MiB; for an unencrypted file,
+    the server's thumbnail, `MediaFormat::Thumbnail(
+    MediaThumbnailSettings::new(640, 480))` (scaled, not animated;
+    matrix-sdk-base `media/mod.rs:86-101`, matrix-sdk `media.rs:859-888`),
+    and the file when that request fails; for an encrypted file without a
+    thumbnail, the file, decrypted, since the SDK ignores the format for
+    encrypted media (`media.rs:827-857`). Files above 10 MiB are not
+    fetched, and one without a size is refused after the download when it
+    is larger, as for the message view. 640 by 480 is one of the sizes
+    Synapse makes ahead of time by default (`DEFAULT_THUMBNAIL_SIZES` in
+    `synapse/config/repository.py`), enough for 8 rows of 40-pixel cells.
+    Every fetch goes through the SDK's media cache (`get_media_content`
+    with the cache, `media.rs:431-484`), so a preview fetched again after
+    it left mxt's memory comes from the disk. A sticker's info and source
+    come from its `StickerEventContent` (ruma-events `sticker.rs:59-97`;
+    matrix-sdk-ui `TimelineItemContent::as_sticker`,
+    `event_item/content/mod.rs:307, 613`), and `MessageContent::Sticker`
+    carries its dimensions. A failure answers `PreviewFailed` and is
+    logged at `debug`: the item shows its text line, without a status
+    message, and is not wanted again until the shown timeline changes
+    (another room or thread).
+  - Decoding, never on the UI thread. `ShowPreview` hands the bytes to one
+    worker thread of the tui adapter, which decodes them with the message
+    view's `decode` (the format sniffed, the 128 MiB limit, the Exif
+    orientation), scales them to the reserved size with a triangle filter
+    and pads them to whole cells (`Resize::resize`, ratatui-image
+    `src/lib.rs:413-437`), encodes them for the protocol, and calls the
+    waker `mxt` gave the tui adapter (`Tui::enable_previews(rows, wake)`):
+    a `tokio::sync::Notify` that is a fourth branch of the event loop's
+    `select!`, so the next frame takes the finished previews. A decoding
+    failure is a failed preview. A preview whose reserved size or cell
+    size changed (the room list was toggled, tmux took another cell size)
+    is encoded again on the worker from the scaled image it keeps, and is
+    not drawn meanwhile.
+  - Memory: the tui adapter keeps the previews last drawn or finished, at
+    most 64 of them and 64 MiB counting each one's scaled image and its
+    encoding, dropping the least recently drawn first; the fetched bytes
+    are dropped once decoded.
+  - Drawing, and what each protocol leaves behind. Previews are drawn with
+    ratatui-image's `SlicedImage` (`src/sliced.rs:15-125`), which draws
+    the rows of an image that are on the pane, so an image at the pane's
+    top or bottom edge shows its visible part. ratatui-image puts an
+    image's escape sequence in the first cell of its area (of each row,
+    for iTerm2) and marks the other cells to be skipped, and ratatui
+    compares a cell's diff option as part of the cell (ratatui-core
+    `buffer/cell.rs:253-278`, `buffer/diff.rs:121-195`). So in the frame
+    where an image moves or leaves, every cell of its old area that does
+    not hold the same image is written again, as text or a blank, and a
+    frame that draws an image where the last one did writes nothing for
+    it. For an 8-row preview about 30 columns wide at 10 by 20 pixels
+    (300 by 160 pixels), a scroll step costs:
+    - half blocks: coloured `▀` text, about 240 cells with two colours
+      each, a few kilobytes; nothing can be left behind.
+    - kitty graphics (kitty and Ghostty, outside tmux and inside):
+      ratatui-image sends the image once, on its first draw (an
+      `AtomicBool` per encoded image, `src/protocol/kitty.rs:44-53`), as a
+      virtual placement (`kitty.rs:211-213, 262`), and draws Unicode
+      placeholders, text with the image's ID as its colour (`render`,
+      `kitty.rs:146`). A step rewrites placeholder text, a few kilobytes;
+      the terminal removes the pieces whose placeholders are overwritten
+      (`kitty.rs:212-213`), and inside tmux, tmux moves and clears the
+      placeholders as text. The image data stays in the terminal's memory
+      until the terminal's own limit evicts it: ratatui-image keeps the ID
+      to itself, so mxt sends no delete, and a preview that left mxt's
+      cache is sent again under a new ID when it comes back.
+    - iTerm2 (WezTerm, iTerm2): ratatui-image slices the image into rows,
+      one PNG per row (`src/sliced.rs:209-219, 245-268`). A step sends
+      every visible row again, the whole visible PNG in base64, tens to a
+      hundred-odd kilobytes per preview: the expensive case, quick
+      locally, possibly slow over SSH while `j` is held. Each row's
+      sequence erases its cells first (`clear_area`, ECH,
+      `src/protocol.rs:286-300`; `encode`, `iterm2.rs:33`), and both
+      terminals keep images in cells that text written over them
+      replaces, so the cells ratatui writes when the image moves or leaves
+      remove it.
+    - sixel outside tmux: ratatui-image keeps the encoded sixel and cuts
+      whole bands for the visible rows at draw time (`src/sliced.rs:276`,
+      `to_sequence`, `sliced.rs:345`), erasing the area first. A step sends
+      the visible bands again, tens of kilobytes per preview. The cells
+      written over an old position remove it in terminals that replace
+      sixel pixels with text, which ratatui-image's own scrolling example
+      relies on (`examples/sliced.rs`).
+    - tmux's sixel: ratatui-image's sliced sixel would be wrapped for
+      tmux's passthrough (its picker takes tmux from `TERM` and has no
+      setter, `src/picker.rs:57-63`; `sliced.rs:189-199`), so previews are
+      encoded with the message view's `tmux_sixel` (whole bands, no
+      wrapper) and drawn only while all their rows are on the pane: an
+      image reaching past the pane's last row would scroll the pane, and
+      one cut at the top cannot be placed above it, so a preview partly
+      off the pane leaves its rows blank. tmux keeps an image until ASCII
+      text or an erase is written over it, but not other characters (see
+      above), so a preview that moved or left could stay over CJK text:
+      whenever a preview drawn in the last frame is not drawn again in
+      the same place, the tui adapter draws the frame a second time on a
+      cleared screen (`repaint`, as after closing an image view), which
+      drops every image and redraws the rest. A step with a preview on the
+      pane then writes the whole screen and its previews.
+    - iTerm2 images, and sixel that tmux does not store, would go through
+      tmux's passthrough, which tmux neither moves nor clears; with a
+      forced `"iterm2"`, or `"sixel"` where tmux does not store sixel,
+      previews inside tmux are half blocks, while the message view keeps
+      the forced protocol.
+  - Overlays: a preview drawn under the room picker, the emoji or link
+    picker or the mention menu would lose cells to it, and a kitty image
+    whose first cell it covered would lose its one transmission. So the
+    frame computes these overlays' areas first, with the geometry
+    `Overlays` draws them with, and leaves out every preview that
+    intersects one; once the overlay closes, the preview's first cell
+    changes and its sequence is sent again, erasing what the overlay left.
+    While the message view is open the timeline is not drawn, so its
+    cells are all written.
+  - Shared with the message view: the protocol choice at startup
+    (`Images::query`, the encoder and its cell size, tmux's cell size
+    after a resize), `decode` and `tmux_sixel`; with the matrix side,
+    `media::fetch`, the 10 MiB limit and the media cache. Separate: the
+    message view still decodes its image on the UI thread when
+    `ShowImage` arrives, scaled to the screen, draws it with
+    `StatefulImage` (or `Image` for tmux's sixel) and keeps its last 4;
+    previews have their own effects, worker, cache and `SlicedImage`
+    drawing.
+  - Half blocks give a cell 1 pixel across and 2 down, so an 8-row preview
+    is 16 pixels tall: enough to recognise a picture, not to read it;
+    `message.view` shows it larger. `auto` chooses them inside WSL,
+    inside tmux without sixel or kitty, and where nothing better is known.
+  - `<CR>` on a sticker shows its image in the message view, as on an
+    image (`ViewContent::Image`, with its body as the name).
 
 ### Clipboard and terminal focus
 
-`message.yank` and edtui copies use OSC 52. Inside tmux, OSC 52 reaches the
+`message.yank` and edtui copies use OSC 52, except a command after `"_`
+(see "Input routing"). Inside tmux, OSC 52 reaches the
 outer terminal only with `set -g set-clipboard on`, and focus events reach mxt
 only with `set -g focus-events on`. Without focus events, mxt treats the
 terminal as always focused. Unless `ui.image_preview = "off"` or images are
@@ -2012,6 +2498,7 @@ timeoutlen = 1000                                 # milliseconds
 room_list = { visible = true, sort = "recent", width = 30, network = "inline" }
 time_format = "%H:%M"                             # strftime, in the local time zone
 image_preview = "auto"                            # "auto" | "off" | "iterm2" | "sixel" | "kitty" | "halfblocks"
+timeline = { images = "off", image_rows = 8 }    # images: "off" | "on"; image_rows: 1 to 50
 read_receipts = "public"                          # "public" | "private"
 
 [files]
@@ -2036,6 +2523,12 @@ Settings:
   `"iterm2"`, `"sixel"`, `"kitty"` and `"halfblocks"`, which force that
   graphics protocol when the choice for the terminal is wrong; see "Files
   and images".
+- `ui.timeline` (added after 0.1.4) is a table: `images = "off"` (the
+  default) or `"on"`, which shows image messages and stickers with a
+  preview in the timeline, and `image_rows`, an integer from 1 to 50 (8 by
+  default), the most rows a preview takes; see "Images in the timeline".
+  `ui.image_preview = "off"` turns previews off too, whatever `images`
+  says. mxt 0.1.4 does not know the table and ignores it with a warning.
 - `ui.read_receipts = "public"` sends `m.read` receipts, which other users
   see. `"private"` sends `m.read.private`, which only the user's own devices
   see.
@@ -2092,15 +2585,20 @@ Actions are named `<target>.<verb>`. The first release has:
 - composer: `composer.focus` (`mode = "insert" | "keep"`, default
   `"insert"`), `composer.send`, `composer.newline`, `composer.cancel`,
   `composer.leave` (added after the first release),
-  `composer.external_editor`, `completion.next`, `completion.prev`,
-  `completion.accept`, `completion.cancel`
+  `composer.external_editor`, `composer.normal`, `composer.clear` and
+  `composer.delete_word_before` (these three added after 0.1.4; see
+  "Terminal adapter and the composer"), `completion.next`,
+  `completion.prev`, `completion.accept`, `completion.cancel`
 - pickers: `picker.rooms`, `picker.next`, `picker.prev`, `picker.accept`,
   `picker.cancel`
 - command line: `command_line.open`, `command_line.execute`,
-  `command_line.cancel`, `command_line.complete`
+  `command_line.cancel`, `command_line.complete`,
+  `command_line.history_prev`, `command_line.history_next` (added after
+  0.1.4; see "Line editing")
 - movement and search: `cursor.down`, `cursor.up`, `cursor.first`,
   `cursor.last`, `cursor.half_page_down`, `cursor.half_page_up`,
-  `search.start`, `search.next`, `search.prev`
+  `search.start`, `search.next`, `search.prev`, `search.clear_highlight`
+  (`:noh`; added after 0.1.4, no default key; see "Search and jumps")
 - jump list: `jump.back`, `jump.forward`, added after the first release
   (see "Jump list")
 - threads: `thread.open`, `thread.close`, added after the first release
@@ -2117,10 +2615,10 @@ Each action declares typed arguments. `room.open` takes a `RoomTarget`:
 | Argument | Values | Meaning |
 |---|---|---|
 | `filter` | `all` (default) | every joined room |
-| | `unread` | any badge: `messages`, `notifications` or `mentions` above zero, or `marked` |
+| | `unread` | any badge: `messages`, `notifications` or `mentions` above zero, or `marked`; a muted room only with `mentions` above zero or `marked` (see "Room list") |
 | | `notify` | `notifications` or `mentions` above zero, or `marked` |
 | | `mentions` | `mentions` above zero |
-| `pick` | `first` (default) | the first matching room in the current room order |
+| `pick` | `first` (default) | the first matching room in the current room order other than the open room (the skip added after 0.1.4: before, `first` could pick the open room, which only moved the focus to its timeline) |
 | | `next` | the first matching room after the current room in the current room order, wrapping around; the first matching room when no room is open |
 | | `prev` | the same, backwards |
 | `query` | string | fuzzy name query; the best match among the rooms that pass `filter` |
@@ -2180,7 +2678,8 @@ action runs (see "Joining rooms and direct messages").
   such as `<C-leader>`); two spellings of one key sequence in a table
   (`<leader>x` and `<Space>x`, `<C-a>` and `<C-A>`); a malformed
   `account.user_id`, an `account.homeserver` that is not an `http(s)` URL,
-  a `ui.room_list.width` outside 12 to 80, an empty `ui.time_format`, a
+  a `ui.room_list.width` outside 12 to 80, a `ui.timeline.image_rows`
+  outside 1 to 50, an empty `ui.time_format`, a
   `files.download_dir` that is neither absolute nor `~/…`, and an empty
   `files.opener`.
 - Names this version does not know are warnings, not errors: dotfiles
@@ -2189,7 +2688,8 @@ action runs (see "Joining rooms and direct messages").
   are unknown keys and tables anywhere (`ui.font`, `[notifications]`,
   `[keymap.foo]`, `[keymap.composer.foo]`), whose contents are then not
   checked; an unknown value of a setting with fixed values
-  (`ui.image_preview`, `ui.read_receipts`, `ui.room_list.network`) and an
+  (`ui.image_preview`, `ui.read_receipts`, `ui.room_list.network`,
+  `ui.timeline.images`) and an
   unknown key in the list of `ui.room_list.sort`; a `ui.time_format` that
   jiff rejects (see the last item); and in a binding an unknown action, an
   unknown argument,
@@ -2303,7 +2803,7 @@ action runs (see "Joining rooms and direct messages").
 |---|---|
 | `$XDG_DATA_HOME/mxt/` | `session.json` (mode 0600, written atomically), the lock file `lock` (mode 0600), and `store/` with the SDK's state and crypto stores |
 | `$XDG_CACHE_HOME/mxt/` | the SDK's event cache and media cache (not user downloads, which go to `files.download_dir`) |
-| `$XDG_STATE_HOME/mxt/` | logs, `mxt.<date>.log` with dates in UTC |
+| `$XDG_STATE_HOME/mxt/` | logs, `mxt.<date>.log` with dates in UTC, and `history`, the command line and search history (mode 0600, written through `history.tmp`; see "Line editing") |
 
 mxt creates the three directories with mode 0700 and tightens existing ones
 to 0700, the cache too, because it holds decrypted events and media.
@@ -2365,6 +2865,12 @@ platforms.
   at that moment, or was sent meanwhile). matrix-sdk-ui 0.19 keeps showing a
   dropped edit's text on its target, when no other edit applies, until the
   timeline is built again.
+- The command line history (added after 0.1.4) never stops mxt: a file
+  that is missing or broken gives empty histories with a warning in the
+  log, and a failed write is logged, the first of a run also shown in
+  the status line (see "Line editing").
+- A timeline preview that cannot be fetched, decoded or encoded shows its
+  text line instead, with no status message (see "Files and images").
 - Redaction asks for confirmation in `CONFIRM` mode because it cannot be
   undone.
 - `M_UNKNOWN_TOKEN` is handled as described in "Startup".
@@ -2378,6 +2884,9 @@ platforms.
 Configuration warnings are logged at `warn` (see "Layers"), and `:join`'s
 direct message lookup logs at `info` which step found a room (see
 "Joining rooms and direct messages").
+Problems with the command line history file are logged at `warn` with
+the target `mxt::history` (see "Line editing"); failed timeline previews
+at `debug`, since a room can hold many and the text line shows them.
 
 ## Testing
 
@@ -2438,6 +2947,29 @@ direct message lookup logs at `info` which step found a room (see
     one, in a room without unread messages or in the thread view), and
     `gd` to a message in the main timeline from a thread and to a message
     in a thread through `FindThread`, with the answers that do not apply
+  - owner work G: the timeline previews' queue (the wanted items fetched
+    at most 4 at a time, a newer list replacing the queue, answers for
+    another room dropped, the queue dropped on a room switch, local echoes
+    and other contents never fetched); `composer.normal` and an array of
+    `composer.send` and `composer.normal`; `composer.clear` and
+    `composer.delete_word_before` as effects on the shown composer; the
+    command line and search histories (the filter by the text before the
+    cursor, newest first, a repeat moved to the newest place, the 100-line
+    limit, `<Down>` past the newest bringing back the typed text and
+    cursor, browsing ended by an edit, executed lines only, the `SECRET`
+    prompt never recorded, `HistoryLoaded` trimmed and without repeats,
+    `SaveHistory` after each new line); muted rooms counting as unread
+    only with mentions or the mark (the filter, the sort key, `]u`, the
+    picker); the `read` key's news time (unread rooms by their latest
+    activity, the open room up to its latest activity, the optimistic
+    `last_read`, an update never lowering it); `pick = "first"` skipping
+    the open room; the room list's cursor staying on its row when the
+    open room moves because it was opened or read, and following its room
+    otherwise; the search matcher (case-insensitive as the search, byte
+    ranges on grapheme cluster boundaries, CJK, emoji with modifiers,
+    lowercase forms of another length), the matches per plain line after
+    the line's prefix, and the highlight turned on by every search and
+    off by `:noh` and by opening another room, kept across threads
 - `mxt-matrix`: tests with constructed inputs for converting SDK values into
   domain types, HTML rendering, download file names, the dimensions of
   uploaded images and the session file. The send queue paths are tested
@@ -2477,12 +3009,45 @@ direct message lookup logs at `info` which step found a room (see
   outside threads and on one the event cache does not have; and the room
   list's read time from the store, with receipts of both types,
   unthreaded and `main`, and threaded ones and other users' left out.
+  For owner work G, the same harness covers previews: `FetchPreview` on
+  an image with a thumbnail fetches the thumbnail (plain and encrypted),
+  on an unencrypted image without one asks for the server's 640 by 480
+  thumbnail (`mock_authed_media_thumbnail`, matrix-sdk
+  `test_utils/mocks/mod.rs:1585-1597`) and falls back to the file when
+  that fails, on an encrypted image without one downloads and decrypts
+  the file, refuses a file above 10 MiB without a request, takes a
+  sticker's source, and answers `PreviewFailed` for every failure.
 - `mxt-tui`: unit tests, for example of key conversion, the editor keys
   `mxt-tui` handles itself, wrapping and the cursor by grapheme cluster, the
   composers' reports to the core, and the layout; some assert rendered rows
   and buffers drawn on ratatui's `TestBackend`. There are no rendering
   snapshots, which would pin incidental layout. The rest is verified by
   running mxt.
+  Owner work G adds tests of: the previews' reserved rows from the
+  event's dimensions (the box, no enlargement, the aspect kept, images
+  limited by the width, `image_rows` without dimensions, local echoes),
+  an item that does not fit the pane or whose preview failed shown with
+  its text line alone, the wanted list (on and near the pane, in order,
+  without kept, decoding or failed items, reported when it changes, the
+  failed marks dropped with another shown timeline), the worker's
+  preparation as a plain function (decode, scale, pad, encode, a decode
+  failure), the cache's limits, half-block previews drawn on `TestBackend`
+  with a partly visible one cut to its visible rows, tmux's sixel drawn
+  only whole and the second frame on a cleared screen when a placement
+  goes, previews under an overlay left out; the composer's normal mode
+  from insert, visual and search mode, `composer.clear` as one undo
+  state without a register write, the word delete (CJK, emoji with a skin
+  tone, blanks, a line join, the start of the text, no register write),
+  `<Up>` and `<Down>` at the composer's edges (a wrapped first line,
+  insert and normal mode, visual mode unchanged), the black hole register
+  (each command of "Input routing" leaving the register and the OSC 52
+  queue untouched, `"_j` ending it, `"a` reporting and doing nothing, a
+  paste or a focus ending it, another editor's copies unaffected); the
+  search highlight on the cells of each content kind (rich text across
+  styles, quotes and lists, spoilers highlighted whole, the name in an
+  image's line, an emote's lead left out), the cursor's message in the
+  stronger style, the matches of a cut-off message left out, and the
+  message view's highlights.
 - `mxt`: configuration loading from strings: each error and each warning
   with its position and text (the `<C-i>` and `<Tab>` duplicate in either
   order among them, and the `ui.room_list.sort` lists: each key alone,
@@ -2492,6 +3057,13 @@ direct message lookup logs at `info` which step found a room (see
   document with every key and every table loading without warnings, and
   the complete example of the user documentation loading without
   warnings.
+  Owner work G adds: `ui.timeline` (each value, an unknown `images` value
+  as a warning that keeps `"off"`, `image_rows` outside 1 to 50 and of the
+  wrong type as errors); the history file (a round trip, mode 0600, the
+  replace through `history.tmp`, a missing, unreadable, wrongly headed or
+  otherwise broken file giving empty histories with a warning, a newer
+  snapshot replacing a waiting one, and the writer reporting only its
+  first failure as a status message).
 - Continuous integration (GitHub Actions, Linux and macOS on Apple Silicon),
   with the flake's toolchain:
   - On every push and pull request, inside `nix develop` with the Cargo cache
@@ -2727,6 +3299,10 @@ asking for the recovery key ("Startup").
   `f<Tab>` finds a tab, operators with `F`, `T`, `;` and `,`, `a` text
   objects and `yi`, a linewise `p` on the last line, `.` repeating `r`, and
   `r` in visual mode.
+  Registers: edtui has one register, which mxt shares with timeline
+  yanks and the terminal clipboard; mxt adds `"_` for one command (see
+  "Input routing"), refuses other register names, and edtui's `x` writes
+  no register (`RemoveChar`, edtui `src/actions/delete.rs:18-44`).
 - **Mentions on the remote network.** mxt relies on bridges turning
   `matrix.to` user links and `m.mentions` into remote mentions. Phase 0
   confirmed it for the Discord bridge in both directions; other bridges are
@@ -2805,6 +3381,28 @@ asking for the recovery key ("Startup").
   which the code shows (the option is read only for the room's count
   filter and thread subscriptions) and mxt's tests against
   `MatrixMockServer` confirm.
+- **Images in the timeline** (owner work G). iTerm2 previews cost the
+  most per scroll step: every visible row's PNG is sent again whenever a
+  preview moves (see "Images in the timeline"), tens to a hundred-odd
+  kilobytes per preview, which a slow SSH link can feel when `j` is held.
+  Sixel outside tmux relies on the terminal replacing an image's pixels
+  with the text written over them, as ratatui-image's own scrolling does;
+  a terminal that keeps the pixels would show stale pieces. kitty keeps
+  every image mxt sent in its memory until its own limit evicts it. Inside
+  tmux, tmux's sixel previews redraw the whole screen on each step that
+  moves one. Checked so far by tests only; the owner checks WezTerm
+  (iTerm2 graphics outside tmux, tmux's sixel inside) after the release,
+  and kitty, Ghostty, iTerm2 and Windows Terminal are untried.
+- **A room's news time** (owner work G). Under `read`, an unread room's
+  time is the SDK's latest event time, which stands for its newest unread
+  message: a member's join that the counts leave out can be newer, and an
+  undecryptable newest message is passed over until it decrypts, so such
+  a room can sit a little higher or lower in its group than its newest
+  unread message would put it.
+- **Registers in the editors** (owner work G). Only the black hole
+  register `"_` exists; other register names are refused. edtui's `x`
+  writes no register, unlike vim's, so `x` and `"_x` are the same, and
+  `"_p` pastes mxt's register where vim's black hole register is empty.
 
 ## Third-party licenses
 
