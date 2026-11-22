@@ -23,12 +23,14 @@ pub(super) enum RoomSwitch {
 }
 
 impl App {
-    /// The cursor stays on its room when the order changes.
+    /// The cursor stays on its room when the order changes, but for the
+    /// open room's first move (see `rooms_moved`), which only an update of
+    /// the open room itself makes.
     pub(super) fn upsert_room(&mut self, summary: RoomSummary) {
+        let open = self.open_room.as_ref() == Some(&summary.id);
         let (old, new) = self.rooms.upsert(summary);
-        if let Some(cursor) = self.room_cursor {
-            self.room_cursor = Some(follow(cursor, old, new));
-        }
+        let open_room_moved = open && old.is_some_and(|old| old != new);
+        self.rooms_moved(open_room_moved, |row| Some(follow(row, old, new)));
     }
 
     /// Optimistic clearing (design, "Matrix adapter"): the room's counts go
@@ -36,30 +38,67 @@ impl App {
     /// to the top of the read rooms (`receipt_at` is the time of the event
     /// the receipt goes on; see `RoomList::clear_unread`), and the room
     /// moves when the sort keys depend on them, the cursor staying on its
-    /// room.
+    /// room but for the open room's first move (see `rooms_moved`).
     pub(super) fn clear_room_unread(&mut self, id: &RoomId, receipt_at: Option<Timestamp>) {
-        if let Some((old, new)) = self.rooms.clear_unread(id, receipt_at)
-            && let Some(cursor) = self.room_cursor
-        {
-            self.room_cursor = Some(follow(cursor, Some(old), new));
+        if let Some((old, new)) = self.rooms.clear_unread(id, receipt_at) {
+            let open_room_moved = old != new && self.open_room.as_ref() == Some(id);
+            self.rooms_moved(open_room_moved, |row| Some(follow(row, Some(old), new)));
         }
     }
 
-    /// A cursor on the removed room moves to the room now at its index.
+    /// The cursor after a change of the list: `row_after` takes a row
+    /// before the change to the row of the same room after it, or, for a
+    /// removed room, of the room now in its place (`None` when the list is
+    /// empty). The cursor stays on its room, except on the open room's
+    /// first move with the cursor that opening put on it (design, "Room
+    /// list"): `open_room_moved` says that the change was one of the open
+    /// room itself (its opening, its clearing, its update) and changed its
+    /// row, so the cursor goes to the room that was next to it before the
+    /// change, the one after it or, when it was the last, the one before
+    /// it. Such a change keeps the list's length. A change of another room
+    /// that shifts the open room is not its move: the cursor follows it,
+    /// and the rule stays. Either way the cursor follows its room from then
+    /// on.
+    fn rooms_moved(&mut self, open_room_moved: bool, row_after: impl Fn(usize) -> Option<usize>) {
+        let Some(cursor) = self.room_cursor else {
+            return;
+        };
+        let after = row_after(cursor);
+        self.room_cursor = if self.cursor_on_unmoved_open_room && open_room_moved {
+            self.cursor_on_unmoved_open_room = false;
+            next_to(cursor, self.rooms.len()).map_or(after, row_after)
+        } else {
+            after
+        };
+    }
+
+    /// Puts the room list cursor on `index` for a cursor action. A cursor
+    /// that leaves its row is off the open room that opening put it on, so
+    /// that room's moves no longer move it to the room next to it.
+    pub(super) fn place_room_cursor(&mut self, index: usize) {
+        if self.room_cursor() != Some(index) {
+            self.cursor_on_unmoved_open_room = false;
+        }
+        self.room_cursor = Some(index);
+    }
+
+    /// A cursor on the removed room moves to the room now at its index. A
+    /// room removed above the open room shifts it without moving it, so the
+    /// cursor follows it (see `rooms_moved`).
     pub(super) fn remove_room(&mut self, id: RoomId, effects: &mut Vec<Effect>) {
-        if let Some((index, _)) = self.rooms.remove(&id)
-            && let Some(cursor) = self.room_cursor
-        {
-            self.room_cursor = match cursor.cmp(&index) {
-                Ordering::Less => Some(cursor),
-                Ordering::Greater => Some(cursor - 1),
-                Ordering::Equal => self.rooms.len().checked_sub(1).map(|last| cursor.min(last)),
-            };
+        if let Some((index, _)) = self.rooms.remove(&id) {
+            let last = self.rooms.len().checked_sub(1);
+            self.rooms_moved(false, |row| match row.cmp(&index) {
+                Ordering::Less => Some(row),
+                Ordering::Greater => Some(row - 1),
+                Ordering::Equal => last.map(|last| row.min(last)),
+            });
         }
         if self.open_room.as_ref() == Some(&id) {
             // Before the room stops being the open one, for its thread.
             self.reset_timeline(effects);
             self.open_room = None;
+            self.cursor_on_unmoved_open_room = false;
             effects.push(Effect::Matrix(MatrixEffect::UnsubscribeTimeline(id)));
         }
     }
@@ -80,7 +119,7 @@ impl App {
             Motion::First => 0,
             Motion::Last => last,
         };
-        self.room_cursor = Some(target.min(last));
+        self.place_room_cursor(target.min(last));
     }
 
     pub(super) fn open_selected(&mut self, effects: &mut Vec<Effect>) {
@@ -105,13 +144,17 @@ impl App {
     }
 
     /// Opens the room at `index` of the room list: unsubscribes the previous
-    /// room, its thread first, subscribes the new one with a new timeline,
-    /// and moves the cursor to it. Both rooms move when the sort keys depend
-    /// on their counts, or under `read` on their `last_read` and latest
-    /// activity, since the open room sorts as read. An open room only gets
+    /// room, its thread first, and subscribes the new one with a new
+    /// timeline. Both rooms move when the sort keys depend on their counts,
+    /// or under `read` on their `last_read` and latest activity, since the
+    /// open room sorts as read. Opening puts the cursor on the room at
+    /// `index`, before the rooms move, so the opened room's own move as it
+    /// opens is its first, while the previously open room going back to
+    /// its place only shifts it (see `rooms_moved`). An open room only gets
     /// the focus. This is the one place where the open room becomes another
     /// room, so a recorded switch puts the position before it into the jump
-    /// list whichever action or answer opens the room (design, "Jump list").
+    /// list whichever action or answer opens the room (design, "Jump
+    /// list").
     pub(super) fn open_at(&mut self, index: usize, switch: RoomSwitch, effects: &mut Vec<Effect>) {
         let id = &self.rooms.rooms()[index].id;
         if self.open_room.as_ref() != Some(id) {
@@ -123,7 +166,14 @@ impl App {
             if let Some(previous) = self.open_room.replace(id.clone()) {
                 effects.push(Effect::Matrix(MatrixEffect::UnsubscribeTimeline(previous)));
             }
-            self.room_cursor = self.rooms.open(&id);
+            let [previous, opened] = self.rooms.open(&id);
+            self.room_cursor = Some(index);
+            self.cursor_on_unmoved_open_room = true;
+            let open_room_moved = opened.is_some_and(|(old, new)| old != new);
+            self.rooms_moved(open_room_moved, |row| {
+                let moved = [previous, opened].into_iter().flatten();
+                Some(moved.fold(row, |row, (old, new)| follow(row, Some(old), new)))
+            });
             effects.push(Effect::Matrix(MatrixEffect::SubscribeTimeline(id)));
         }
         self.focus = Focus::Timeline;
@@ -195,4 +245,14 @@ fn follow(cursor: usize, old: Option<usize>, new: usize) -> usize {
         _ => cursor,
     };
     if new <= without { without + 1 } else { without }
+}
+
+/// The row next to `row` in a list of `len` rooms: the one after it, or the
+/// one before it when it is the last; `None` when it is the only room.
+fn next_to(row: usize, len: usize) -> Option<usize> {
+    if row + 1 < len {
+        Some(row + 1)
+    } else {
+        row.checked_sub(1)
+    }
 }

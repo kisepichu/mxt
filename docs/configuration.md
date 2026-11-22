@@ -246,8 +246,9 @@ a room with nothing new leaves it in place, since homeservers keep a read
 receipt only when it moves forward, when you last read the room in mxt or
 in a client that sends the same kind of read receipt; a room you last read
 in a client that marks only the main timeline read, as Element does, or
-with the other kind of receipt (`read_receipts`) goes to the top of the
-read rooms once the homeserver sends mxt's receipt back. A room whose only
+with the other kind of receipt (`read_receipts`) can go to the top of the
+read rooms once: when your receipt of mxt's kind in it is older, the
+homeserver keeps mxt's receipt and sends it back. A room whose only
 news is an edit of an older message goes to the time of the edit while
 open, and back afterwards.
 

@@ -285,23 +285,24 @@ impl RoomList {
         self.take(id)
     }
 
-    /// Makes `id` the open room and places it and the previously open room
-    /// again. The open room sorts as read (design, "The open room sorts as
-    /// read"): nothing unread for the `mentions`, `notify` and `unread` keys,
-    /// and read up to its latest activity for `read`. Returns `id`'s new
-    /// index.
-    pub fn open(&mut self, id: &RoomId) -> Option<usize> {
-        // Both rooms out first: the others keep their order with either
-        // room open.
-        let room = self.take(id);
-        if let Some((_, previous)) = self
-            .open
-            .replace(id.clone())
-            .and_then(|previous| self.take(&previous))
-        {
-            self.insert(previous);
-        }
-        room.map(|(_, room)| self.insert(room))
+    /// Makes `id` the open room: places the previously open room again with
+    /// no room open, then `id` as the open room. The open room sorts as read
+    /// (design, "The open room sorts as read"): nothing unread for the
+    /// `mentions`, `notify` and `unread` keys, and read up to its latest
+    /// activity for `read`. Only the open room's sort keys depend on which
+    /// room is open, so each step moves one room and leaves the list in
+    /// order. Returns the two moves in that order, the previously open
+    /// room's and `id`'s, each the room's old and new index.
+    pub fn open(&mut self, id: &RoomId) -> [Option<(usize, usize)>; 2] {
+        let previous = self.open.take().and_then(|previous| self.place(&previous));
+        self.open = Some(id.clone());
+        [previous, self.place(id)]
+    }
+
+    /// Places a room of the list again; returns its old and new index.
+    fn place(&mut self, id: &RoomId) -> Option<(usize, usize)> {
+        let (old, room) = self.take(id)?;
+        Some((old, self.insert(room)))
     }
 
     pub fn rooms(&self) -> &[RoomSummary] {
@@ -340,8 +341,9 @@ impl RoomList {
     /// ignores a receipt that does not move forward, so no echo comes, when
     /// the user's newest receipt is the same kind of unthreaded receipt mxt
     /// sends; a room last read with another kind (Element's main-thread
-    /// receipts, the other receipt type) moves once its echo comes (design,
-    /// "Risks"). Returns the room's old and new index.
+    /// receipts, the other receipt type) moves once, when its echo comes,
+    /// if the user's receipt of mxt's kind is older (design, "Risks").
+    /// Returns the room's old and new index.
     pub fn clear_unread(
         &mut self,
         id: &RoomId,
@@ -811,7 +813,7 @@ mod tests {
     fn under_notify_the_open_room_sorts_as_read_until_another_room_opens() {
         let mut l = list(notify_first(), notify_rooms());
         let b = RoomId::new("!b:example.org");
-        assert_eq!(l.open(&b), Some(4));
+        assert_eq!(l.open(&b), [None, Some((2, 4))]);
         assert_eq!(
             ids(&l),
             [
@@ -824,7 +826,11 @@ mod tests {
         );
         // The filters still see its notifications.
         assert!(RoomFilter::Notify.matches(&l.get(&b).unwrap().unread));
-        l.open(&RoomId::new("!e:example.org"));
+        // !b goes back among the rooms that notify, and !e stays in place.
+        assert_eq!(
+            l.open(&RoomId::new("!e:example.org")),
+            [Some((4, 2)), Some((4, 4))]
+        );
         assert_eq!(
             ids(&l),
             [
@@ -1027,7 +1033,7 @@ mod tests {
             ]
         );
         // By its latest activity, later than its last read.
-        assert_eq!(l.open(&RoomId::new("!b:example.org")), Some(0));
+        assert_eq!(l.open(&RoomId::new("!b:example.org")), [None, Some((3, 0))]);
         assert_eq!(
             ids(&l),
             [
@@ -1037,8 +1043,12 @@ mod tests {
                 "!c:example.org"
             ]
         );
-        // By its last read, later than its latest activity; !b goes back.
-        assert_eq!(l.open(&RoomId::new("!c:example.org")), Some(0));
+        // By its last read, later than its latest activity; !b goes back
+        // first.
+        assert_eq!(
+            l.open(&RoomId::new("!c:example.org")),
+            [Some((0, 3)), Some((2, 0))]
+        );
         assert_eq!(
             ids(&l),
             [
@@ -1148,7 +1158,7 @@ mod tests {
         );
         let at = |time| Some(Timestamp::from_millis(time));
         // Open, !d counts as read up to its latest activity.
-        assert_eq!(l.open(&RoomId::new("!d:example.org")), Some(2));
+        assert_eq!(l.open(&RoomId::new("!d:example.org")), [None, Some((3, 2))]);
         assert_eq!(
             ids(&l),
             [
@@ -1342,13 +1352,14 @@ mod tests {
     fn pick_without_a_current_room_in_the_list() {
         let l = three_unread();
         let id = |s: &str| Some(RoomId::new(s));
-        assert_eq!(
-            resolve_room(&l, None, &pick(RoomFilter::Unread, Pick::First)),
-            id("!c:example.org")
-        );
-        // A stale open room, for example after the room was removed.
+        // No open room, or a stale one, for example after the room was
+        // removed.
         let gone = RoomId::new("!gone:example.org");
         for current in [None, Some(&gone)] {
+            assert_eq!(
+                resolve_room(&l, current, &pick(RoomFilter::Unread, Pick::First)),
+                id("!c:example.org")
+            );
             assert_eq!(
                 resolve_room(&l, current, &pick(RoomFilter::Unread, Pick::Next)),
                 id("!c:example.org")

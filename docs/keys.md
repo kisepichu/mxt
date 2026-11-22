@@ -16,8 +16,25 @@ mxt 0.1.2 did nothing. The leader and the longer bindings work as before.
   message's thread in the timeline's place (see [Threads](#threads)).
 - The room list is in the order of `ui.room_list.sort`, by latest activity
   unless it says otherwise (see [Sort keys](configuration.md#sort-keys)).
-  When rooms move, as messages arrive or as you read them, the cursor stays
-  on its room. `]u`, `[u` and the room picker follow the list's order.
+  Opening a room, with `<CR>` or any other way of opening it (`]u`, `[u`,
+  the room picker, `:open`, `:join`, the jump list), puts the cursor on
+  it. The first time that room then moves in the list because of a change
+  to it, while the cursor is still on it (it sorts as read as it opens,
+  you read it, a message arrives in it, it is renamed), the cursor goes
+  to the room that came right after it, or to the room before it if it
+  was the last, as in a mail inbox: with
+  `sort = "mentions, notify, unread, read"`, `<CR>` or `]u` opens the top
+  room, it drops out of its group, and the cursor is on the next one; with
+  `sort = "read"`, `<CR>` on an unread room leaves it in place, reading it
+  lifts it to the top, and the cursor goes to the room that was right
+  below it. Another room passing the open room does not count, nor does a
+  room added or removed above it or the room you left going back above
+  it: the cursor stays on the open room until the open room itself moves.
+  After that the cursor stays on its room as rooms move, and so it does
+  when you moved the cursor off the open room before the room moved, also
+  if you moved it back. A room you left unread (the terminal had no focus)
+  goes back to its place among the unread rooms once you open another.
+  `]u`, `[u` and the room picker follow the list's order.
 - The status line at the bottom shows the mode, a count or keys typed so far,
   the open room, the last message or a question, and on the right the sync
   state: `starting` before the first sync, then `synced`, `offline` (no
@@ -139,10 +156,11 @@ As in nvim, ctrl can stay held for the key after `<C-w>`.
 `filter = "notify"`, they skip the rooms whose only news is a dim count
 (see [Sort keys](configuration.md#sort-keys)). A room you open but have
 not read yet (the terminal has no focus, or you press `]u` again before
-its timeline is drawn) is still unread: `]u` skips it while it is open,
-and once `]u` has opened another room it is among the unread rooms again,
-so `]u` pressed again goes back and forth between the two topmost unread
-rooms.
+its timeline is drawn), or whose only unread messages are replies in
+threads you have not shown, is still unread: `]u` skips it while it is
+open, and once `]u` has opened another room it is among the unread rooms
+again, so `]u` pressed again goes back and forth between the two topmost
+unread rooms.
 
 ### `room_list` and `timeline`
 

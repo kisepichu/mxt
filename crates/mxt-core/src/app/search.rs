@@ -56,7 +56,7 @@ impl App {
             Pane::Timeline => self.find_item(&needle, direction),
         };
         match (found, pane) {
-            (Some(index), Pane::RoomList) => self.room_cursor = Some(index),
+            (Some(index), Pane::RoomList) => self.place_room_cursor(index),
             // A jump in the timeline; the room list's cursor is no position
             // of the jump list (design, "Jump list").
             (Some(index), Pane::Timeline) => {

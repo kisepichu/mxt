@@ -958,7 +958,7 @@ mod tests {
         // `]u` and `[u` are in `normal`, where the composer's normal and
         // visual modes look too. The key after an operator, after a text
         // object's `i` or `a`, or after `g` goes to the editor: it neither
-        // waits for a `u` nor opens the next unread room with it.
+        // waits for a `u` nor opens the topmost unread room with it.
         let markdown = r#"[link](url)<Space>"quoted""#;
         let unchanged = r#"[link](url) "quoted""#;
         for (typed, expected) in [
@@ -996,7 +996,7 @@ mod tests {
         run(&mut app, &mut composers, "0ldi[u");
         assert_eq!(text_of(&composers), unchanged);
 
-        // `]u` itself still opens the next unread room from normal mode.
+        // `]u` itself still opens the topmost unread room from normal mode.
         run(&mut app, &mut composers, "]u");
         assert_eq!(
             (app.focus(), app.open_room()),

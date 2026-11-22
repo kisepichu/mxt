@@ -150,6 +150,12 @@ pub struct App {
     /// the cursor is on the first room, whichever room that is, so rooms that
     /// arrive in any order at startup leave it at the top.
     room_cursor: Option<usize>,
+    /// Whether opening put the cursor on the open room and that room has
+    /// not moved since by a change of its own, with the cursor still on it:
+    /// no cursor action took the cursor to another row. The open room's
+    /// first such move then takes the cursor to the room next to it, and
+    /// ends this; other rooms shifting it do not (design, "Room list").
+    cursor_on_unmoved_open_room: bool,
     open_room: Option<RoomId>,
     /// The shown timeline: the open room's main timeline, or the thread
     /// shown in its place; empty while no room is open.
@@ -221,6 +227,7 @@ impl App {
             editor: None,
             rooms: RoomList::new(settings.room_sort.clone()),
             room_cursor: None,
+            cursor_on_unmoved_open_room: false,
             open_room: None,
             timeline: Timeline::default(),
             thread: None,
