@@ -118,7 +118,7 @@ fn back_and_forward_go_between_rooms_and_load_their_messages() {
 fn every_way_of_opening_another_room_records_a_jump() {
     let mut app = app();
     keys(&mut app, "<CR>");
-    // The next unread room after `!c`.
+    // The topmost unread room other than the open `!c`.
     keys(&mut app, "]u");
     assert_eq!(open_room(&app), A);
     keys(&mut app, ":open b:ex<CR>");

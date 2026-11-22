@@ -17,8 +17,9 @@ user interface around it. It runs on Linux and macOS.
   `Discord / Alice`) and shows one unread badge per room: mentions,
   notifications, unread messages (in muted rooms too) or the manual unread
   mark.
-- A fuzzy room picker, the same picker for rooms with unread mentions, and
-  `]u` and `[u`, which open the next or previous unread room.
+- A fuzzy room picker, the same picker for rooms with unread mentions,
+  `]u`, which opens the topmost unread room, and `[u`, which opens the
+  previous unread room.
 - `:join` for rooms by alias, ID or matrix.to link and for pending invites,
   and for direct messages with a user ID: it opens the existing one, a
   bridged one or a bridge bot's room included, and creates an encrypted

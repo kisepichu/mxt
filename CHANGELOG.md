@@ -32,6 +32,17 @@ marked **Breaking:**.
   to its newest message, and a room you read with something new goes to
   the top of the read rooms at once instead of waiting for the homeserver
   to confirm the receipt.
+- `]u` opens the topmost unread room in the room list's order other than
+  the one you have open, so a room with a new mention at the top comes
+  first; it used to open the next unread room after the open one, which
+  `"]u" = { action = "room.open", filter = "unread", pick = "next" }` in
+  `[keymap.normal]` brings back. A room you opened but have not read yet
+  (the terminal had no focus, or you pressed `]u` again before its
+  timeline was drawn) stays unread, so `]u` pressed again goes back and
+  forth between the two topmost unread rooms. `pick = "first"` of
+  `room.open` now skips the open room (before, it could pick the open
+  room, which only moved the focus to its timeline), and `]u` is
+  `{ action = "room.open", filter = "unread" }`. `[u` is unchanged.
 
 ## [0.1.4] - 2026-11-22
 

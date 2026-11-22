@@ -1,6 +1,7 @@
 use super::threads::at;
 use super::timeline::{event, msg, status};
 use super::*;
+use crate::action::ArgValue;
 use crate::room::Badge;
 use crate::rooms::{Pick, RoomFilter, RoomSort, RoomTarget, SortKey};
 use crate::timeline::TimelineDiff;
@@ -102,6 +103,17 @@ fn order(app: &App) -> Vec<&str> {
 fn read_at(summary: RoomSummary, at: u64) -> RoomSummary {
     RoomSummary {
         last_read: Some(Timestamp::from_millis(at)),
+        ..summary
+    }
+}
+/// `summary` with an unread mention, which notifies.
+fn with_mention(summary: RoomSummary) -> RoomSummary {
+    RoomSummary {
+        unread: UnreadCounts {
+            notifications: 1,
+            mentions: 1,
+            ..summary.unread
+        },
         ..summary
     }
 }
@@ -393,6 +405,60 @@ fn a_u_binding_with_filter_notify_passes_over_the_rooms_whose_only_news_is_a_dim
 }
 
 #[test]
+fn a_u_binding_with_filter_notify_skips_the_open_room_and_takes_a_new_mention() {
+    let notify = Binding::single(
+        Action::from_spec(
+            "room.open",
+            &[
+                ("filter".into(), ArgValue::String("notify".into())),
+                ("pick".into(), ArgValue::String("first".into())),
+            ],
+        )
+        .unwrap(),
+    );
+    let mut app = notify_first(vec![(TableId::Normal, seq("]u"), notify)]);
+    app.update(Msg::RoomUpserted(RoomSummary {
+        unread: UnreadCounts {
+            messages: 1,
+            notifications: 1,
+            ..UnreadCounts::default()
+        },
+        ..room(D, 40, 1)
+    }));
+    assert_eq!(order(&app), [D, C, A, B]);
+    // No timeline is drawn, so no receipt goes out: the room opened last
+    // still notifies, the next `]u` skips it while it is open, and it is
+    // the topmost room that notifies again once another room is open.
+    assert_eq!(no_timers(keys(&mut app, "]u")), vec![subscribe(D)]);
+    assert_eq!(order(&app), [C, A, D, B]);
+    assert_eq!(
+        no_timers(keys(&mut app, "]u")),
+        vec![unsubscribe(D), subscribe(C)]
+    );
+    assert_eq!(order(&app), [D, A, C, B]);
+    assert_eq!(
+        no_timers(keys(&mut app, "]u")),
+        vec![unsubscribe(C), subscribe(D)]
+    );
+    // A mention in the muted !a puts it at the top, and `]u` takes it.
+    app.update(Msg::RoomUpserted(with_mention(with_mode(
+        room(A, 50, 1),
+        NotificationMode::Mute,
+    ))));
+    assert_eq!(order(&app), [A, C, D, B]);
+    assert_eq!(
+        no_timers(keys(&mut app, "]u")),
+        vec![unsubscribe(D), subscribe(A)]
+    );
+    // !c and !d read elsewhere: only the open room notifies.
+    app.update(Msg::RoomUpserted(room(C, 30, 0)));
+    app.update(Msg::RoomUpserted(room(D, 40, 0)));
+    assert_eq!(no_timers(keys(&mut app, "]u")), vec![]);
+    assert_eq!(status(&app), Some("No matching room"));
+    assert_eq!(app.open_room(), Some(&id(A)));
+}
+
+#[test]
 fn under_recent_the_open_room_sorts_as_any_other() {
     let mut app = app();
     keys(&mut app, "j<CR>"); // open !b
@@ -408,7 +474,7 @@ fn under_recent_the_open_room_sorts_as_any_other() {
 }
 
 #[test]
-fn the_open_room_moves_among_the_read_rooms_with_the_cursor_and_u_follows() {
+fn the_open_room_moves_among_the_read_rooms_with_the_cursor() {
     let mark = Binding::single(Action::RoomMarkRead);
     let mut app = unread_first(vec![(TableId::Normal, seq("<Space>r"), mark)]);
     app.update(Msg::RoomUpserted(room(D, 40, 1)));
@@ -422,8 +488,7 @@ fn the_open_room_moves_among_the_read_rooms_with_the_cursor_and_u_follows() {
     );
     assert_eq!(order(&app), [A, D, B, C]);
     assert_eq!((cursor_id(&app), app.room_cursor()), (C, Some(3)));
-    // The next unread room after !c's new place, wrapping around; from its
-    // old place it would have been !d.
+    // The topmost unread room.
     assert_eq!(
         no_timers(keys(&mut app, "]u")),
         vec![unsubscribe(C), subscribe(A)]
@@ -547,4 +612,93 @@ fn under_read_a_room_whose_only_news_is_an_edit_goes_back_to_its_place() {
         vec![unsubscribe(B), subscribe(A)]
     );
     assert_eq!(order(&app), [C, A, D, B]);
+}
+
+#[test]
+fn the_default_u_opens_the_topmost_unread_room_other_than_the_open_one() {
+    // Under "recent", the open room keeps its place among the others.
+    let mut app = app();
+    keys(&mut app, "j<CR>"); // open !b
+    app.update(Msg::RoomUpserted(with_mention(room(D, 40, 1))));
+    assert_eq!(order(&app), [D, C, B, A]);
+    // The room with the new mention at the top, not !a after the open !b.
+    assert_eq!(
+        no_timers(keys(&mut app, "]u")),
+        vec![unsubscribe(B), subscribe(D)]
+    );
+    // The open room at the top is skipped.
+    assert_eq!(
+        no_timers(keys(&mut app, "]u")),
+        vec![unsubscribe(D), subscribe(C)]
+    );
+}
+
+#[test]
+fn under_read_the_default_u_opens_a_room_that_just_got_a_mention() {
+    // Only !a is unread.
+    let mut app = read_last(
+        vec![],
+        vec![
+            read_at(room(A, 50, 1), 5),
+            read_at(room(B, 20, 0), 20),
+            read_at(room(C, 30, 0), 25),
+            read_at(room(D, 40, 0), 60),
+        ],
+    );
+    assert_eq!(order(&app), [A, D, C, B]);
+    assert_eq!(no_timers(keys(&mut app, "]u")), vec![subscribe(A)]);
+    assert_eq!(order(&app), [D, A, C, B]);
+    // The open room is the only unread room.
+    assert_eq!(no_timers(keys(&mut app, "]u")), vec![]);
+    assert_eq!(status(&app), Some("No matching room"));
+    // A mention in !b puts it above the open room under the cursor.
+    app.update(Msg::RoomUpserted(with_mention(read_at(room(B, 70, 1), 20))));
+    assert_eq!(order(&app), [B, D, A, C]);
+    assert_eq!(cursor_id(&app), A);
+    assert_eq!(
+        no_timers(keys(&mut app, "]u")),
+        vec![unsubscribe(A), subscribe(B)]
+    );
+}
+
+#[test]
+fn the_default_u_alternates_between_the_two_topmost_unread_rooms_while_unfocused() {
+    let mut app = read_last(
+        vec![],
+        vec![
+            read_at(room(A, 50, 1), 5),
+            read_at(room(B, 20, 0), 20),
+            read_at(room(C, 30, 2), 25),
+            read_at(room(D, 15, 1), 10),
+        ],
+    );
+    assert_eq!(order(&app), [A, C, D, B]);
+    assert_eq!(app.update(Msg::TerminalFocus(false)), vec![]);
+    assert_eq!(no_timers(keys(&mut app, "]u")), vec![subscribe(A)]);
+    // Without focus no receipt goes out, so !a stays unread; the next `]u`
+    // skips it while it is open.
+    assert_eq!(shown(&mut app, A, 1, 50), vec![]);
+    assert_eq!(order(&app), [C, D, A, B]);
+    assert_eq!(
+        no_timers(keys(&mut app, "]u")),
+        vec![unsubscribe(A), subscribe(C)]
+    );
+    // Once !c is open, !a is the topmost unread room again; !d never comes.
+    assert_eq!(shown(&mut app, C, 2, 30), vec![]);
+    assert_eq!(order(&app), [A, D, C, B]);
+    assert_eq!(
+        no_timers(keys(&mut app, "]u")),
+        vec![unsubscribe(C), subscribe(A)]
+    );
+}
+
+#[test]
+fn the_default_u_backwards_opens_the_previous_unread_room_wrapping_around() {
+    let mut app = app();
+    app.update(Msg::RoomUpserted(room(D, 40, 1)));
+    assert_eq!(order(&app), [D, C, B, A]);
+    for expected in [A, C, D, A] {
+        keys(&mut app, "[u");
+        assert_eq!(app.open_room(), Some(&id(expected)), "{expected}");
+    }
 }

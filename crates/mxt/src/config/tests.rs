@@ -474,7 +474,7 @@ fn a_binding_identical_to_a_default_is_accepted() {
 "<C-w><C-j>" = { action = "composer.focus", mode = "keep" }
 "<C-w>k" = "focus.timeline"
 "<C-w><C-k>" = "focus.timeline"
-"]u" = { action = "room.open", filter = "unread", pick = "next" }
+"]u" = { action = "room.open", filter = "unread" }
 "[u" = { action = "room.open", filter = "unread", pick = "prev" }
 
 [keymap.picker]

@@ -194,10 +194,11 @@ impl RoomFilter {
 }
 
 /// Which of the rooms that pass a filter a `Pick` target chooses, in room
-/// list order.
+/// list order. None of them chooses the current (open) room.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Pick {
-    /// The first room.
+    /// The first room other than the current one: the topmost one, which
+    /// `]u` opens (design, "Action registry").
     #[default]
     First,
     /// The first room after the current one, wrapping around.
@@ -361,10 +362,10 @@ impl RoomList {
 
 /// The room `target` refers to, given the open room `current`.
 ///
-/// `Next` and `Prev` never return `current` itself, so they return `None`
-/// when no other room passes the filter. When `current` is `None` or not in
-/// the list, `Next` behaves like `First` and `Prev` returns the last room
-/// that passes the filter.
+/// No `Pick` returns `current` itself, so each returns `None` when no other
+/// room passes the filter. When `current` is `None` or not in the list,
+/// `First` and `Next` return the first room that passes the filter and
+/// `Prev` the last.
 pub fn resolve_room(
     rooms: &RoomList,
     current: Option<&RoomId>,
@@ -374,14 +375,16 @@ pub fn resolve_room(
     let found = match target {
         RoomTarget::Pick { filter, pick } => {
             let passes = |room: &&RoomSummary| filter.matches(&room.unread);
-            let current = || current.and_then(|id| rooms.position(id));
+            let index = || current.and_then(|id| rooms.position(id));
             match pick {
-                Pick::First => all.iter().find(passes),
-                Pick::Next => match current() {
+                Pick::First => all
+                    .iter()
+                    .find(|room| Some(&room.id) != current && passes(room)),
+                Pick::Next => match index() {
                     Some(i) => all[i + 1..].iter().chain(&all[..i]).find(passes),
                     None => all.iter().find(passes),
                 },
-                Pick::Prev => match current() {
+                Pick::Prev => match index() {
                     Some(i) => all[..i]
                         .iter()
                         .rev()
@@ -1383,7 +1386,20 @@ mod tests {
     }
 
     #[test]
-    fn pick_next_returns_none_when_only_current_matches() {
+    fn pick_first_skips_the_current_room() {
+        let l = three_unread();
+        let a = RoomId::new("!a:example.org");
+        let b = RoomId::new("!b:example.org");
+        let c = RoomId::new("!c:example.org");
+        let first = pick(RoomFilter::Unread, Pick::First);
+        // The second match when the first is current, the first otherwise.
+        assert_eq!(resolve_room(&l, Some(&c), &first), Some(a.clone()));
+        assert_eq!(resolve_room(&l, Some(&a), &first), Some(c.clone()));
+        assert_eq!(resolve_room(&l, Some(&b), &first), Some(c));
+    }
+
+    #[test]
+    fn picks_return_none_when_only_current_matches() {
         let l = list(
             recent(),
             vec![
@@ -1392,10 +1408,13 @@ mod tests {
             ],
         );
         let a = RoomId::new("!a:example.org");
-        assert_eq!(
-            resolve_room(&l, Some(&a), &pick(RoomFilter::Unread, Pick::Next)),
-            None
-        );
+        for p in Pick::ALL {
+            assert_eq!(
+                resolve_room(&l, Some(&a), &pick(RoomFilter::Unread, p)),
+                None,
+                "{p:?}"
+            );
+        }
     }
 
     #[test]

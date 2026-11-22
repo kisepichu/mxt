@@ -375,8 +375,9 @@ and many terminals send Shift+Enter as `<CR>`. Bind the key that arrives.
 
 ### Examples
 
-`]u` and `[u` open the next and previous unread room by default. Open the
-next room that notifies you with `]n`, and the previous one with `[n`:
+`]u` opens the topmost unread room other than the open one by default, and
+`[u` the previous unread room. Open the next room that notifies you after
+the open one with `]n`, and the previous one with `[n`:
 
 ```toml
 [account]
@@ -502,7 +503,7 @@ the room list's order:
 | | `"unread"` | rooms with any badge: unread messages, notifications or mentions, or the manual unread mark |
 | | `"notify"` | rooms with notifications or mentions, or the manual unread mark |
 | | `"mentions"` | rooms with unread mentions |
-| `pick` | `"first"` (default) | the first such room |
+| `pick` | `"first"` (default) | the first such room other than the open room |
 | | `"next"` | the first one after the open room, wrapping around, never the open room itself; the first one when no room is open |
 | | `"prev"` | the same, backwards; the last one when no room is open |
 | `query` | a non-empty string | the best fuzzy match for the query among their names |

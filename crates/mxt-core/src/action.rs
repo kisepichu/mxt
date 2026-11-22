@@ -124,8 +124,9 @@ impl Action {
     /// action takes no arguments except:
     ///
     /// - `room.open`: `filter` (`all`, `unread`, `notify` or `mentions`;
-    ///   default `all`), and either `pick` (`first`, `next` or `prev`; default
-    ///   `first`) or `query` (a fuzzy room name query, non-empty)
+    ///   default `all`), and either `pick` (`first`, `next` or `prev`, see
+    ///   [`Pick`]: none picks the open room; default `first`) or `query` (a
+    ///   fuzzy room name query, non-empty)
     /// - `picker.rooms`: `filter`, as for `room.open`
     /// - `composer.focus`: `mode` (`insert` or `keep`; default `insert`)
     /// - `file.upload`: `path` (non-empty), required
