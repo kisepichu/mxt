@@ -1265,8 +1265,9 @@ pub(crate) mod tests {
     #[test]
     fn visual_mode_k_j_and_a_waiting_key_leave_up_and_down_to_edtui() {
         // edtui's visual `<Up>` and `<Down>` stop at the first and the last
-        // line.
-        let mut editor = holding("ab\ncd");
+        // line. The last line is longer, so normal mode's `<Down>` would go
+        // to `(1, 2)`.
+        let mut editor = holding("ab\ncde");
         feed(&mut editor, "lv<Up>");
         assert_eq!(editor.state.cursor, Index2::new(0, 1));
         feed(&mut editor, "j<Down>");

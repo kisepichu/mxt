@@ -550,6 +550,9 @@ supported: `"a`, `"+` and the like do nothing, and the status line says so.
   hiragana and katakana are separate words, full-width punctuation is
   punctuation, and the ideographic space is a space. Emoji count as
   punctuation, where vim gives them a class of their own.
+- In insert and normal mode, `<Up>` on the first line and `<Down>` on the
+  last go to the start and the end of the text, as in a text field, where
+  vim stays on the line (see [The editors](#the-editors)).
 - Registers: the editors share one register (see above), and `"_` is the
   only register name. `x` writes no register, so `x` and `"_x` are the
   same, and `"_p` pastes the register, where vim's black hole register is
