@@ -18,11 +18,13 @@ mxt 0.1.2 did nothing. The leader and the longer bindings work as before.
   unless it says otherwise (see [Sort keys](configuration.md#sort-keys)).
   Opening a room, with `<CR>` or any other way of opening it (`]u`, `[u`,
   the room picker, `:open`, `:join`, the jump list), puts the cursor on
-  it. The first time that room then moves in the list because of a change
-  to it, while the cursor is still on it (it sorts as read as it opens,
-  you read it, a message arrives in it, it is renamed), the cursor goes
-  to the room that came right after it, or to the room before it if it
-  was the last, as in a mail inbox: with
+  it; opening the room that is already open only moves the focus to its
+  timeline, and the cursor stays where it is. The first time the opened
+  room then moves in the list because of a change to it, while the cursor
+  is still on it (it sorts as read as it opens, you read it, a message
+  arrives in it, it is renamed), the cursor goes to the room that came
+  right after it, or to the room before it if it was the last, as in a
+  mail inbox: with
   `sort = "mentions, notify, unread, read"`, `<CR>` or `]u` opens the top
   room, it drops out of its group, and the cursor is on the next one; with
   `sort = "read"`, `<CR>` on an unread room leaves it in place, reading it
@@ -106,9 +108,10 @@ only continues a count that has started.
 ### Line editing
 
 The command line, the `/` search lines, picker queries and the recovery key
-prompt have a cursor and these keys, without history. In `COMMAND` and
-`PICKER` mode the `command_line` and `picker` tables come first: a key bound
-there (`"<C-e>" = "picker.cancel"`) never reaches the line.
+prompt have a cursor and these keys. The command line and the `/` search
+lines also have a [history](#history). In `COMMAND` and `PICKER` mode the
+`command_line` and `picker` tables come first: a key bound there
+(`"<C-e>" = "picker.cancel"`) never reaches the line.
 
 | Key | Effect |
 |---|---|
@@ -127,6 +130,28 @@ included), of kanji, of hiragana, of katakana or of hangul, and blanks (the
 ideographic space too) separate words. `<C-w>` at the end of
 `open foo.bar` deletes `bar`, then `.`, then `foo`, then `open `, and at the
 end of `日本語のテキスト` it deletes `テキスト`, then `の`, then `日本語`.
+
+#### History
+
+`<Up>` and `<Down>` on the command line and the `/` search lines recall
+the lines you ran there. The first `<Up>` takes the text before the cursor
+and puts the newest line that starts with it in the line, the cursor at its
+end; each further `<Up>` goes to the next older such line, and `<Down>`
+back to the newer ones. `<Down>` past the newest brings back what you
+typed, with the cursor where it was. The match is case-sensitive, and with
+nothing before the cursor every line matches. Typing, deleting, moving the
+cursor, `<Tab>` or a paste ends the browsing, so the next `<Up>` looks for
+the text then.
+
+Commands and searches have separate histories of 100 lines each, and the
+room list's and the timeline's searches share one. A line goes in when you
+run it with `<CR>`, also when the command fails; a line you cancel with
+`<Esc>`, an empty line and a command line of blanks only do not (a search
+of blanks is a pattern and goes in), and a line you ran before moves to the
+newest place. mxt keeps both in `$XDG_STATE_HOME/mxt/history` (mode 0600)
+across starts. Picker queries and the recovery key have no history: after
+`:recover`, only `recover` goes in, and a `:recover` line with an argument,
+which may be the key itself, does not go in at all.
 
 ## Default keymap
 
@@ -260,6 +285,7 @@ nothing in insert mode; `"<C-w>" = "nop"` and `"<A-BS>" = "nop"` in
 | `picker` | `<C-n>`, `<Down>`, `<Tab>` / `<C-p>`, `<Up>`, `<S-Tab>` | `picker.next` / `picker.prev` |
 | `picker` | `<CR>` / `<Esc>` | `picker.accept` / `picker.cancel` |
 | `command_line` | `<CR>` / `<Esc>` / `<Tab>` | `command_line.execute` / `command_line.cancel` / `command_line.complete` |
+| `command_line` | `<Up>` / `<Down>` | `command_line.history_prev` / `command_line.history_next` (see [History](#history)) |
 | `message_view` | `q`, `<Esc>` | `view.close` |
 
 ### Actions without a default key

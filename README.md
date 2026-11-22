@@ -189,12 +189,14 @@ never share the encryption store. A second one exits with
 |---|---|---|
 | data, `$XDG_DATA_HOME/mxt` | `~/.local/share/mxt` | `session.json` (the homeserver, user ID, device ID and access token), `lock`, and `store/`, the SDK's state and encryption stores |
 | cache, `$XDG_CACHE_HOME/mxt` | `~/.cache/mxt` | the SDK's event cache and media cache, which hold decrypted messages and media |
-| state, `$XDG_STATE_HOME/mxt` | `~/.local/state/mxt` | the logs |
+| state, `$XDG_STATE_HOME/mxt` | `~/.local/state/mxt` | the logs, and `history`, the history of the `:` command line and the `/` search lines |
 
 The defaults apply on macOS too, and also when a variable is empty or a
 relative path. `HOME` must be an absolute path. mxt creates the directories
-with mode 0700 and tightens existing ones to 0700; `session.json` and `lock`
-have mode 0600. The stores have no passphrase: the permissions protect them.
+with mode 0700 and tightens existing ones to 0700; `session.json`, `lock` and
+`history` have mode 0600. The stores have no passphrase: the permissions
+protect them. Instances that share the state directory share one `history`
+(the lock is per data directory), and the last to save wins.
 The cache directory must not contain the data or state directory, because
 mxt deletes the cache directory when it sets data aside (below). Downloads
 go to `files.download_dir`, not to the cache.

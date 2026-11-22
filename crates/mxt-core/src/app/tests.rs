@@ -10,6 +10,7 @@ use crate::settings::Settings;
 
 mod composer;
 mod files;
+mod history;
 mod join;
 mod jumps;
 mod room_actions;
@@ -70,7 +71,15 @@ fn app() -> App {
 fn keys(app: &mut App, text: &str) -> Vec<Effect> {
     keys_in(app, text, None)
 }
+/// Without `Effect::Store`: an executed `:` or `/` line saves the
+/// histories, which the tests of `history.rs` check with
+/// `keys_and_store`.
 fn keys_in(app: &mut App, text: &str, editor: Option<EditorMode>) -> Vec<Effect> {
+    let mut effects = keys_and_store(app, text, editor);
+    effects.retain(|effect| !matches!(effect, Effect::Store(_)));
+    effects
+}
+fn keys_and_store(app: &mut App, text: &str, editor: Option<EditorMode>) -> Vec<Effect> {
     seq(text)
         .keys()
         .iter()

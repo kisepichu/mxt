@@ -332,6 +332,16 @@ const DEFAULTS: &[(&[TableId], &str, Action)] = &[
         "<Tab>",
         Action::CommandLineComplete,
     ),
+    (
+        &[TableId::CommandLine],
+        "<Up>",
+        Action::CommandLineHistoryPrev,
+    ),
+    (
+        &[TableId::CommandLine],
+        "<Down>",
+        Action::CommandLineHistoryNext,
+    ),
     (&[TableId::MessageView], "q", Action::ViewClose),
     (&[TableId::MessageView], "<Esc>", Action::ViewClose),
 ];

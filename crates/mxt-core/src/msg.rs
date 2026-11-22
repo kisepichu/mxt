@@ -171,6 +171,14 @@ pub enum Msg {
     ConfigWarnings {
         warnings: Vec<String>,
     },
+    /// The histories of the `:` command line and the `/` search lines from
+    /// the history file, each oldest first, sent once right after
+    /// `App::new`; the newest 100 of each are kept, a repeated line at its
+    /// newest place (design, "Line editing").
+    HistoryLoaded {
+        commands: Vec<String>,
+        searches: Vec<String>,
+    },
     /// The pending invites, sorted by name; replaces the ones before.
     Invites(Vec<Invite>),
     /// The room of `MatrixEffect::Join` or `MatrixEffect::CreateDm` with

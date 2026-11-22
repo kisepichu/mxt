@@ -507,8 +507,8 @@ covered by unit tests.
   open room (`RoomList::open`): opening a room places the previously open
   room and then the opened one again; opening puts the room list's cursor
   on the opened room, and that room's first move of its own (not a shift
-  by another room) takes the cursor to the room after it (see "Room
-  list").
+  by another room) while the cursor is still on it takes the cursor to the
+  room next to it (see "Room list").
 - Room keys are shared with the SDK's default recipient strategy
   (`CollectStrategy::AllDevices`), which does not refuse to send when another
   user's identity changes.
@@ -1042,12 +1042,14 @@ group, and moved the cursor with the room it opened.
   it. One exception (added after 0.1.4), so that the cursor goes to "the
   next one after where it was", as in a mail inbox: opening a room by any
   path (`<CR>`, `]u`, `[u`, any `room.open` binding, the room picker,
-  `:open`, `:join`, the jump list) puts the cursor on it, and the first
-  time the open room then moves in the list while the cursor is still on
-  it, the cursor goes to the room that came right after it in the order
-  before the move, or to the room before it when it was the last (the
-  rule's "the cursor stays when the list has only that room" needs no
-  case: a room alone in the list never moves by a change of its own).
+  `:open`, `:join`, the jump list) puts the cursor on it (opening the room
+  that is already open only moves the focus to its timeline, and the
+  cursor stays where it is), and the first time the open room then moves
+  in the list while the cursor is still on it, the cursor goes to the
+  room that came right after it in the order before the move, or to the
+  room before it when it was the last (the rule's "the cursor stays when
+  the list has only that room" needs no case: a room alone in the list
+  never moves by a change of its own).
   From then on the cursor is on another room and follows that room, as
   every cursor does, so later moves of the open room never take the
   cursor along. A move is a change of the room's index caused by a
@@ -1962,9 +1964,14 @@ search lines:
   editors' `/` is edtui's search mode, not this line, and has none. A
   line goes in when `command_line.execute` runs it, as it was typed, also
   when the command then fails; an empty line does not (an empty search
-  reuses the last pattern). A line equal to one in its history moves to
-  the newest place instead of being added twice. Lines hold no line
-  break: no key types one, and a paste keeps its first line.
+  reuses the last pattern), and neither does a `:` line of blanks only,
+  which runs nothing (a search of blanks is a pattern and goes in). A line
+  equal to one in its history moves to the newest place instead of being
+  added twice. No key types a line break, and a paste keeps its first
+  line, but `<Tab>` completion can put a room or invite name that holds
+  one in the line (the matrix adapter passes names on as the server sends
+  them); such a line is not recorded, and `Msg::HistoryLoaded` drops any
+  such line, so a history holds single lines only, as its file needs.
 - `command_line.history_prev` (`<Up>`) and `command_line.history_next`
   (`<Down>`), in the `command_line` table. The first `history_prev` on a
   line takes the text before the cursor as the filter, keeps the line's
@@ -2021,7 +2028,11 @@ search lines:
   waits up to 1 s for the writer to finish, so `:q` and the lines before
   it are kept.
 - The `SECRET` prompt never reaches a history: it is neither a command
-  nor a search line, and `:recover` goes in as the command alone.
+  nor a search line, and `:recover` goes in as the command alone. A
+  `:recover` line with an argument, which may be the key itself, is not
+  recorded (the core parses the line first and leaves it out when the
+  parser rejects it as `:recover` with an argument, however it is
+  spaced).
 
 ### Joining rooms and direct messages
 

@@ -44,6 +44,13 @@ marked **Breaking:**.
   status line says so. `composer.clear` empties the composer as one
   change that `u` undoes and keeps a reply or an edit; it has no
   default key.
+- History in the `:` command line and the `/` search lines: `<Up>` and
+  `<Down>` (`command_line.history_prev` and `command_line.history_next`)
+  recall earlier lines that start with the text before the cursor, newest
+  first, and `<Down>` past the newest brings back what you typed. Commands
+  and searches keep separate histories of 100 lines each in
+  `$XDG_STATE_HOME/mxt/history` (mode 0600), across starts. `<Up>` and
+  `<Down>` did nothing on these lines before.
 
 ### Changed
 
@@ -68,17 +75,19 @@ marked **Breaking:**.
   room, which only moved the focus to its timeline), and `]u` is
   `{ action = "room.open", filter = "unread" }`. `[u` is unchanged.
 - Opening a room, with `<CR>`, `]u`, `[u`, the picker, `:open`, `:join` or
-  the jump list, puts the room list's cursor on it, and the first time
-  that room then moves in the list because of a change to it, while the
-  cursor is still on it (it sorts as read as it opens, you read it, a
-  message arrives in it), the cursor goes to the room that came right
-  after it, or to the room before it if it was the last, as in a mail
-  inbox: with `sort = "mentions, notify, unread, read"`, `<CR>` or `]u`
-  opens the top room, it drops out of its group, and the cursor is on the
-  next one. Another room passing the open room does not count: the cursor
-  stays on the open room. After that the cursor stays on its room as rooms
-  move, and so it does when you moved the cursor off the room before it
-  moved. Before, the cursor went along with the room you opened.
+  the jump list, puts the room list's cursor on it (opening the room that
+  is already open only moves the focus to its timeline, and the cursor
+  stays where it is), and the first time that room then moves in the list
+  because of a change to it, while the cursor is still on it (it sorts
+  as read as it opens, you read it, a message arrives in it), the cursor
+  goes to the room that came right after it, or to the room before it if
+  it was the last, as in a mail inbox: with
+  `sort = "mentions, notify, unread, read"`, `<CR>` or `]u` opens the top
+  room, it drops out of its group, and the cursor is on the next one.
+  Another room passing the open room does not count: the cursor stays on
+  the open room. After that the cursor stays on its room as rooms move,
+  and so it does when you moved the cursor off the room before it moved.
+  Before, the cursor went along with the room you opened.
 - In the composer's insert and normal mode, `<Up>` on the first line moves
   to the start of the text and `<Down>` on the last line to its end, as in
   a text field; `k` and `j` are unchanged, and the mention menu keeps its

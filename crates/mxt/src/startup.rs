@@ -21,6 +21,7 @@ use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::event_loop;
+use crate::history::{self, Histories, Writer};
 use crate::invalidate::{set_aside_orphaned_store, unix_seconds};
 use crate::paths::{Paths, with_path};
 use crate::prompt::prompt_secret;
@@ -28,6 +29,9 @@ use crate::prompt::prompt_secret;
 /// How long a first login waits for its device keys to reach the server
 /// before it asks for the recovery key anyway.
 const DEVICE_KEYS_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// How long the exit waits for the command line history writer.
+const HISTORY_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// How a run ended.
 #[derive(Debug)]
@@ -59,7 +63,10 @@ pub enum Invalid {
 pub async fn run(config: Config, paths: &Paths, home: PathBuf) -> Outcome {
     let connected = connect(&config.user_id, config.homeserver.as_deref(), paths).await;
     match connected {
-        Ok((client, sync, mut session)) => run_ui(client, sync, &mut session, config, home).await,
+        Ok((client, sync, mut session)) => {
+            let history_file = paths.history_file();
+            run_ui(client, sync, &mut session, config, home, history_file).await
+        }
         Err(outcome) => outcome,
     }
 }
@@ -220,14 +227,16 @@ async fn recover(client: &Client) -> Result<(), Outcome> {
 }
 
 /// The matrix adapter and the terminal UI until `:q`, an `M_UNKNOWN_TOKEN`
-/// or a panic in one of the adapter's tasks. The terminal is restored and
-/// the adapter stopped before this returns.
+/// or a panic in one of the adapter's tasks, with the command line history
+/// read from `history_file` and written back to it. The terminal is
+/// restored and the adapter stopped before this returns.
 async fn run_ui(
     client: Client,
     sync: SyncLoop,
     session: &mut SessionWatch,
     config: Config,
     home: PathBuf,
+    history_file: PathBuf,
 ) -> Outcome {
     let Config {
         user_id,
@@ -252,8 +261,15 @@ async fn run_ui(
         warning_effects.is_empty(),
         "Msg::ConfigWarnings has no effects"
     );
+    let Histories { commands, searches } = history::load(&history_file);
+    let history_effects = app.update(Msg::HistoryLoaded { commands, searches });
+    debug_assert!(
+        history_effects.is_empty(),
+        "Msg::HistoryLoaded has no effects"
+    );
     let (to_core, from_matrix) = mpsc::unbounded_channel();
     let (to_matrix, effects) = mpsc::unbounded_channel();
+    let history_writer = Writer::spawn(history_file, to_core.clone());
     let mut matrix =
         Matrix::start(client, sync, receipts, download_dir, home, to_core, effects).await;
     mxt_tui::install_panic_hook();
@@ -274,13 +290,30 @@ async fn run_ui(
             error!("a task of the matrix adapter panicked");
             Outcome::Failed(format!("the matrix adapter stopped: {panic}"))
         }
-        ended = event_loop::run(&mut app, &mut tui, from_matrix, to_matrix) => match ended {
+        ended = event_loop::run(
+            &mut app,
+            &mut tui,
+            from_matrix,
+            to_matrix,
+            history_writer.sender(),
+        ) => match ended {
             Ok(()) => Outcome::Quit,
             Err(error) => Outcome::Failed(format!("terminal: {error}")),
         },
         () = session.unknown_token() => Outcome::Invalid(Invalid::UnknownToken),
     };
     let restored = tui.restore();
+    // So `:q` and the lines before it are kept, without holding up the
+    // exit for long.
+    if tokio::time::timeout(HISTORY_TIMEOUT, history_writer.finish())
+        .await
+        .is_err()
+    {
+        warn!(
+            target: "mxt::history",
+            "the command line history was still being written at exit"
+        );
+    }
     matrix.stop().await;
     match (outcome, restored) {
         (Outcome::Quit, Err(error)) => Outcome::Failed(format!("terminal: {error}")),
