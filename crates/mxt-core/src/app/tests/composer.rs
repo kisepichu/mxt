@@ -380,6 +380,28 @@ fn composer_clear_empties_the_shown_composer_and_keeps_the_reply_and_its_mention
 }
 
 #[test]
+fn keys_resolved_after_composer_clear_in_visual_mode_use_normal_mode() {
+    // The tui drops the selection. `<Esc>` ends the `<C-g>` waiting for
+    // `<C-g><C-x>` and is resolved afresh: in `composer.normal` it is
+    // `composer.leave`, where `composer.visual` would pass it to the editor.
+    let clear_text = Binding::single(Action::ComposerClear);
+    let mut app = app_with(vec![
+        (TableId::ComposerVisual, seq("<C-g>"), clear_text),
+        (
+            TableId::ComposerVisual,
+            seq("<C-g><C-x>"),
+            Binding::single(Action::Nop),
+        ),
+    ]);
+    keys(&mut app, "<CR>i");
+    assert_eq!(
+        no_timers(keys_in(&mut app, "<C-g><Esc>", Some(EditorMode::Visual))),
+        vec![ui(UiEffect::EmptyComposer(main_of(C)))]
+    );
+    assert_eq!(app.focus(), Focus::Timeline);
+}
+
+#[test]
 fn a_refused_register_is_an_error_in_the_status_line() {
     let mut app = opened();
     let error = "Only the black hole register \"_ is supported";

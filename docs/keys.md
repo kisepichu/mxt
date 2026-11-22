@@ -584,5 +584,8 @@ supported: `"a`, `"+` and the like do nothing, and the status line says so.
   leaves the skin tone); `df<Tab>` cancels, where `f<Tab>` finds a tab;
   operators with `F`, `T`, `;` and `,`; a linewise `p` on the last line
   pastes above it; `.` does not repeat `r`, and after an insert it repeats
-  the typed characters but not what `<BS>`, `<C-w>` or `<A-BS>` deleted;
-  `r` in visual mode.
+  the typed characters but not what `<BS>`, `<C-w>`, `<A-BS>` or
+  `composer.clear` deleted; `u` after `composer.clear`, or after `<BS>`,
+  `<C-w>` or `<A-BS>` at the end of a line, puts the normal-mode cursor one
+  column past the line's last character, so `h` then goes to the
+  second-to-last; `r` in visual mode.

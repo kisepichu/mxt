@@ -133,10 +133,15 @@ impl App {
     /// one undo state, wherever the focus is. The draft and its mentions
     /// stay, so a reply or an edit goes on, and `u` brings back the text
     /// with its mentions; ending the draft is `composer.cancel`'s job. The
-    /// mention menu closes.
+    /// mention menu closes, and while the composer has focus, keys resolved
+    /// again after it in visual mode are resolved in normal mode, as the tui
+    /// drops the selection.
     pub(super) fn composer_clear(&mut self, effects: &mut Vec<Effect>) {
         self.composer_effect(UiEffect::EmptyComposer, effects);
         self.cancel_completion();
+        if self.focus == Focus::Composer && self.editor == Some(EditorMode::Visual) {
+            self.editor = Some(EditorMode::Normal);
+        }
     }
 
     /// `Msg::Submit`: a blank body does nothing; otherwise the body is sent
