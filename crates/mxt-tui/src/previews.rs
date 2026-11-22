@@ -63,10 +63,10 @@ impl ImageRows {
     }
 }
 
-/// 8 rows.
+/// 16 rows (8 up to mxt 0.1.5).
 impl Default for ImageRows {
     fn default() -> ImageRows {
-        ImageRows(8)
+        ImageRows(16)
     }
 }
 

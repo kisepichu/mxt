@@ -192,18 +192,18 @@ fn any_sixel(screen: &Screen) -> bool {
 }
 
 #[test]
-fn image_rows_are_from_1_to_50_and_8_by_default() {
+fn image_rows_are_from_1_to_50_and_16_by_default() {
     assert_eq!(ImageRows::new(0), None);
     assert_eq!(ImageRows::new(1).map(ImageRows::get), Some(1));
     assert_eq!(ImageRows::new(50).map(ImageRows::get), Some(50));
     assert_eq!(ImageRows::new(51), None);
     assert_eq!(ImageRows::new(-8), None);
-    assert_eq!(ImageRows::default().get(), 8);
+    assert_eq!(ImageRows::default().get(), 16);
 }
 
 #[test]
 fn a_preview_reserves_the_fit_of_the_image_into_its_box_in_whole_cells() {
-    let rows = ImageRows::default();
+    let rows = ImageRows::new(8).unwrap();
     // A box of 600 by 160 pixels, into which 4000 by 3000 fits as 213 by
     // 160 pixels: 22 columns, 8 rows.
     assert_eq!(
@@ -223,7 +223,7 @@ fn a_preview_reserves_the_fit_of_the_image_into_its_box_in_whole_cells() {
 fn the_worker_scales_an_image_to_its_reserved_size_and_encodes_it() {
     let encoder = halfblocks();
     // 64 by 32 pixels fit a box of 60 by 8 cells as 7 by 2 cells.
-    let size = reserve(Some((64, 32)), 60, ImageRows::default(), CELL);
+    let size = reserve(Some((64, 32)), 60, ImageRows::new(8).unwrap(), CELL);
     assert_eq!(size, Size::new(7, 2));
     let job = Job {
         item: item(1),

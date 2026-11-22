@@ -48,7 +48,8 @@ const PREVIEW_LIMIT: u64 = 10 * 1024 * 1024;
 
 /// The size of the server's thumbnail a timeline preview asks for: one
 /// that Synapse makes ahead of time (`DEFAULT_THUMBNAIL_SIZES`), enough for
-/// 8 rows of 40-pixel cells (design, "Images in the timeline").
+/// the default 16 rows of cells up to 30 pixels tall (design, "Images in the
+/// timeline").
 const THUMBNAIL_SIZE: (u32, u32) = (640, 480);
 
 /// `Msg::ImageUnavailable`'s reason for an image above `PREVIEW_LIMIT`.

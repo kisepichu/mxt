@@ -2002,7 +2002,7 @@ mod tests {
             photo(ItemRef::Local(TxnId::new("echo"))),
         ];
         let mut previews = Previews::new(
-            ImageRows::default(),
+            ImageRows::new(8).unwrap(),
             PreviewEncoder::TmuxSixel(FontSize::new(10, 20)),
             Limits::DEFAULT,
             Box::new(|| {}),
@@ -2051,7 +2051,7 @@ mod tests {
         }
         let entries = [entry];
         let previews = Previews::new(
-            ImageRows::default(),
+            ImageRows::new(8).unwrap(),
             PreviewEncoder::TmuxSixel(FontSize::new(10, 20)),
             Limits::DEFAULT,
             Box::new(|| {}),

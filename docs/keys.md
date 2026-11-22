@@ -64,7 +64,8 @@ reactions follow the message as `👍 2` (yours in bold). Images show as
 `[sticker: …]`, `(deleted)`, `(unable to decrypt)` (the key may still
 arrive) and `(unsupported: …)`. With `ui.timeline.images = "on"` (see
 [Configuration](configuration.md#uitimeline)), an image's or a sticker's
-preview follows its line, at most `ui.timeline.image_rows` rows tall.
+preview follows its line, at most `ui.timeline.image_rows` rows tall (16
+by default).
 A message taller than the pane is cut with `[+N lines]`; `<CR>` shows it in
 full. Date dividers and a `new messages` line, where you stopped reading,
 come between messages.
