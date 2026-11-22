@@ -1149,7 +1149,7 @@ pub(crate) mod tests {
 
     /// Types `text` in the open message view as the terminal does: each key
     /// goes to the core with the view editor's key mode, and `ReplayKeys`
-    /// to the editor. Whether the core closed the view.
+    /// and `ViewNormal` to the editor. Whether the core closed the view.
     fn type_in_view(app: &mut App, view: &mut View, text: &str) -> bool {
         let mut closed = false;
         for key in keys(text) {
@@ -1160,6 +1160,7 @@ pub(crate) mod tests {
                         keys.into_iter()
                             .for_each(|key| view.editor.feed(key, &mut Vec::new()));
                     }
+                    Effect::Ui(UiEffect::ViewNormal) => view.editor.enter_normal_mode(),
                     Effect::Ui(UiEffect::CloseView) => closed = true,
                     _ => {}
                 }
@@ -1182,6 +1183,36 @@ pub(crate) mod tests {
             assert!(type_in_view(&mut app, &mut view, "q"), "{typed}");
             assert!(!app.view_open(), "{typed}");
         }
+    }
+
+    #[test]
+    fn escape_in_the_message_views_visual_mode_goes_back_to_normal_mode() {
+        let mut app = app();
+        press(&mut app, "<CR>");
+        app.update(reset("!a:example.org", 1..4));
+        press(&mut app, "<CR>");
+        let mut view = View::new(message_3(), SharedRegister::default());
+        // `V`, then characters after all: `<Esc>v`. The cursor stays where
+        // `h` moved it in visual mode, not at the selection's start.
+        assert!(!type_in_view(&mut app, &mut view, "wVh<Esc>"));
+        assert!(app.view_open());
+        assert_eq!(view.editor.mode(), EditorMode::Normal);
+        assert_eq!(view.editor.state.cursor, Index2::new(0, 7));
+        assert_eq!(view.editor.state.selection, None);
+        assert!(!type_in_view(&mut app, &mut view, "v"));
+        assert_eq!(view.editor.mode(), EditorMode::Visual);
+        let selection = view.editor.state.selection.as_ref();
+        assert!(selection.is_some_and(|selection| !selection.line_mode));
+        // `<Esc>` in normal mode closes the view.
+        assert!(!type_in_view(&mut app, &mut view, "<Esc>"));
+        assert!(type_in_view(&mut app, &mut view, "<Esc>"));
+        assert!(!app.view_open());
+
+        // `q` closes it in visual mode too.
+        press(&mut app, "<CR>");
+        let mut view = View::new(message_3(), SharedRegister::default());
+        assert!(type_in_view(&mut app, &mut view, "Vq"));
+        assert!(!app.view_open());
     }
 
     #[test]

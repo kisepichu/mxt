@@ -8,7 +8,7 @@ use super::jumps::AfterGone;
 use super::{App, Confirm, Focus, Motion, StatusKind, View};
 use crate::effect::{Effect, MatrixEffect, UiEffect, ViewContent};
 use crate::ids::{EventId, RoomId, TimelineId, Timestamp};
-use crate::msg::Pane;
+use crate::msg::{EditorMode, Pane};
 use crate::rich::is_web_url;
 use crate::settings::ImagePreview;
 use crate::timeline::{
@@ -417,7 +417,9 @@ impl App {
     /// image is fetched unless previews are off; other items show their
     /// text, with the search's matches on it while the highlight is shown.
     /// An image or a sticker that is still a local echo is refused:
-    /// the adapter fetches media by remote event.
+    /// the adapter fetches media by remote event. Keys resolved again after
+    /// it are resolved in normal mode, the mode the tui opens the view's
+    /// editor in.
     pub(super) fn view_message(&mut self, effects: &mut Vec<Effect>) {
         let (Some(room), Some(item)) = (&self.open_room, self.timeline.cursor_item()) else {
             return;
@@ -463,10 +465,12 @@ impl App {
             }));
         }
         self.view = Some(View::Message(item.id.clone()));
+        self.editor = Some(EditorMode::Normal);
     }
 
     /// `help.commands`, `help.keymap` and `status.messages`: `text` in the
-    /// full-screen view, in place of an open view.
+    /// full-screen view, in place of an open view. Keys resolved again
+    /// after it are resolved in normal mode, as after `message.view`.
     pub(super) fn view_help(&mut self, text: String, effects: &mut Vec<Effect>) {
         let content = ViewContent::Text {
             text,
@@ -474,12 +478,26 @@ impl App {
         };
         effects.push(Effect::Ui(UiEffect::OpenView(content)));
         self.view = Some(View::Help);
+        self.editor = Some(EditorMode::Normal);
     }
 
     /// `view.close`.
     pub(super) fn close_view(&mut self, effects: &mut Vec<Effect>) {
         if self.view.take().is_some() {
             effects.push(Effect::Ui(UiEffect::CloseView));
+        }
+    }
+
+    /// `view.leave`: in the view editor's visual mode, the tui puts the
+    /// editor in normal mode with the cursor where it is, as vim's `<Esc>`
+    /// does, and keys resolved again after it are resolved in normal mode;
+    /// otherwise `view.close`.
+    pub(super) fn leave_view(&mut self, effects: &mut Vec<Effect>) {
+        if self.view.is_some() && self.editor == Some(EditorMode::Visual) {
+            effects.push(Effect::Ui(UiEffect::ViewNormal));
+            self.editor = Some(EditorMode::Normal);
+        } else {
+            self.close_view(effects);
         }
     }
 

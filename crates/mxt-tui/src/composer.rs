@@ -1067,6 +1067,29 @@ mod tests {
     }
 
     #[test]
+    fn escape_in_visual_mode_goes_back_to_normal_mode_and_keeps_the_focus() {
+        // `composer.visual` and `normal` bind no `<Esc>`: the editor gets it.
+        // The cursor stays where `h` moved it in visual mode, not at the
+        // selection's start.
+        let (mut app, mut composers) = composing("hello");
+        let main = main_of("!a:example.org");
+        run(&mut app, &mut composers, "hVh<Esc>");
+        let composer = composers.get(&main).unwrap();
+        assert_eq!(composer.mode(), EditorMode::Normal);
+        assert_eq!(composer.editor.state.cursor, Index2::new(0, 2));
+        assert_eq!(composer.editor.state.selection, None);
+        assert_eq!(app.focus(), Focus::Composer);
+        run(&mut app, &mut composers, "v");
+        let composer = composers.get(&main).unwrap();
+        assert_eq!(composer.mode(), EditorMode::Visual);
+        let selection = composer.editor.state.selection.as_ref();
+        assert!(selection.is_some_and(|selection| !selection.line_mode));
+        // From normal mode, `<Esc>` is `composer.leave`.
+        run(&mut app, &mut composers, "<Esc><Esc>");
+        assert_eq!(app.focus(), Focus::Timeline);
+    }
+
+    #[test]
     fn operators_and_text_objects_never_run_the_default_unread_keys() {
         // `]u` and `[u` are in `normal`, where the composer's normal and
         // visual modes look too. The key after an operator, after a text

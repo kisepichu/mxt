@@ -115,6 +115,12 @@ marked **Breaking:**.
   to the start of the text and `<Down>` on the last line to its end, as in
   a text field; `k` and `j` are unchanged, and the mention menu keeps its
   `<Up>` and `<Down>`. The message view's editor does the same.
+- `<Esc>` in the message view's visual mode goes back to normal mode
+  instead of closing the view; `q` still closes it. The cursor stays where
+  it is, so after `V`, `<Esc>v` selects characters. `<Esc>` there runs the
+  new action `view.leave`, which closes the view in normal mode as before;
+  `"<Esc>" = "view.close"` in `[keymap.message_view]` brings back the old
+  behaviour, and your own binding of `<Esc>` there still wins.
 
 ### Security
 

@@ -263,6 +263,10 @@ pub enum UiEffect {
     OpenView(ViewContent),
     /// Close the message view; edits in its editor are discarded.
     CloseView,
+    /// Put the message view's editor in normal mode as edtui's `<Esc>`
+    /// does; nothing in normal mode. A key waiting for the next one is
+    /// cancelled.
+    ViewNormal,
     /// The image of `item` for the open message view, which shows that item.
     ShowImage {
         item: ItemRef,

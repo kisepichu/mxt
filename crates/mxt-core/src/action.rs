@@ -120,6 +120,9 @@ pub enum Action {
     /// Back from the thread to the main timeline.
     ThreadClose,
     ViewClose,
+    /// In the view editor's visual mode, back to normal mode, as vim's
+    /// `<Esc>`; otherwise [`Action::ViewClose`].
+    ViewLeave,
     /// `:help`: the command list.
     HelpCommands,
     /// `:map`: the key bindings of each table.
@@ -228,6 +231,7 @@ impl Action {
             "thread.open" => Action::ThreadOpen,
             "thread.close" => Action::ThreadClose,
             "view.close" => Action::ViewClose,
+            "view.leave" => Action::ViewLeave,
             "help.commands" => Action::HelpCommands,
             "help.keymap" => Action::HelpKeymap,
             "status.messages" => Action::StatusMessages,
@@ -304,6 +308,7 @@ impl Action {
             Action::ThreadOpen => "thread.open",
             Action::ThreadClose => "thread.close",
             Action::ViewClose => "view.close",
+            Action::ViewLeave => "view.leave",
             Action::HelpCommands => "help.commands",
             Action::HelpKeymap => "help.keymap",
             Action::StatusMessages => "status.messages",
@@ -701,6 +706,7 @@ mod tests {
             "thread.open",
             "thread.close",
             "view.close",
+            "view.leave",
             "help.commands",
             "help.keymap",
             "status.messages",

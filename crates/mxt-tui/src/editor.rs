@@ -138,11 +138,11 @@ impl Editor {
         self.keys = key_handler();
     }
 
-    /// `composer.normal`: normal mode as edtui's own `<Esc>` gives it, so
-    /// from insert mode the cursor moves one column left and `.` repeats
-    /// the insert, a visual selection is dropped and a search stopped.
-    /// Normal mode stays as it is. A key waiting for the next one is
-    /// cancelled.
+    /// `composer.normal`, and `view.leave` in visual mode: normal mode as
+    /// edtui's own `<Esc>` gives it, so from insert mode the cursor moves
+    /// one column left and `.` repeats the insert, a visual selection is
+    /// dropped with the cursor where it is, and a search stopped. Normal
+    /// mode stays as it is. A key waiting for the next one is cancelled.
     pub(crate) fn enter_normal_mode(&mut self) {
         self.cancel_pending();
         if self.state.mode != edtui::EditorMode::Normal {
