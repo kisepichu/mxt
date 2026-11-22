@@ -148,6 +148,8 @@ pub struct TimelineItem {
     pub timestamp: Timestamp,
     pub content: MessageContent,
     pub reply: Option<ReplyPreview>,
+    /// In the SDK's order, which is the order the timeline draws them in
+    /// under the message and `message.react`'s `index` counts in.
     pub reactions: Vec<ReactionGroup>,
     pub edited: bool,
     /// `Some` for local echoes.

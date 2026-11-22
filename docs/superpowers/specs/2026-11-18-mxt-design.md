@@ -242,9 +242,10 @@ The main types in `mxt-core`:
 - `RoomTarget`, `RoomFilter` and `Pick` (see "Action registry").
 - `TimelineItem`: `id: ItemRef`, sender, timestamp, `MessageContent`,
   optional reply preview, reaction groups (key, count, whether the user
-  reacted), an edited flag, the local send state (sending, sent, failed),
-  and for a thread root its `ThreadSummary` (the number of replies, above
-  zero, and the latest reply's time; see "Threads").
+  reacted; in the SDK's order, which the timeline shows), an edited flag,
+  the local send state (sending, sent, failed), and for a thread root its
+  `ThreadSummary` (the number of replies, above zero, and the latest
+  reply's time; see "Threads").
   The timeline also contains date dividers and the read marker, which the SDK
   provides as virtual items.
 - `TimelineId { room: RoomId, thread: Option<EventId> }`: a room's main
@@ -1149,7 +1150,8 @@ instead, and it never takes more than half of the width.
   `(edited)`, `sending…` or `failed` when they apply. A reply has a one-row
   preview of the replied-to message under it, `> name: body` (dim, the first
   line of the body). Reactions follow the body on a line of `key count`
-  chips, the user's own in bold.
+  chips, the user's own in bold, in the order of the item's reaction groups
+  (the order `message.react`'s `index` counts in; see "Action registry").
 - Messages the SDK cannot decrypt yet show `(unable to decrypt)`. Redacted
   messages show `(deleted)`, and messages of other kinds
   `(unsupported: <kind>)`.
@@ -2267,9 +2269,9 @@ first line says what it is.
   arguments at their default are left out (`room.open` with `filter = "all"`
   and `pick = "first"` is `room.open`; `composer.focus` with
   `mode = "insert"` is `composer.focus`), the others follow in the order
-  `filter`, `pick`, `query`, `mode`, `path`, `emoji`, `target`, as
-  `name = value` with TOML strings (quoted, with escapes), separated by
-  `, `; `emoji` shows the
+  `filter`, `pick`, `query`, `mode`, `path`, `emoji`, `index`, `target`, as
+  `name = value` with TOML strings (quoted, with escapes) and TOML integers
+  (`index = 1`), separated by `, `; `emoji` shows the
   emoji itself (`emoji = "👍"`). An array of actions is written with `; `
   between them; a `nop` binding is listed as `nop`, since it hides a
   default. A table without bindings is listed with its header only.
@@ -2914,6 +2916,27 @@ second `:react heart` removes the reaction rather than adding a second one.
 A binding such as `{ action = "message.react", emoji = "thumbsup" }` reacts
 with one key.
 
+`message.react` also takes `index` (added after 0.1.5), a positive
+integer: it toggles the reaction shown at that place under the message,
+counted from 1 in the order the timeline draws the chips (`👍 2  ❤️ 1`:
+`index = 1` is 👍). That order is `TimelineItem::reactions`, the SDK's
+order, which the tui draws as it is, so the core and the pane cannot
+disagree. After the same checks of the cursor's message, the key sent is
+the group's key when the user is among its senders, which removes their
+reaction; otherwise, as for `emoji`, the key of the user's own reaction
+with the same emoji when there is one, and else the group's key, so the
+user's reaction joins the group shown (`❤ 2` becomes `❤ 3` rather than
+`❤ 2  ❤️ 1`) and a second press removes it. A key `emojis` does not know
+(a reaction with text) is sent as it is. Without a reaction at that place
+the status line says `The message has no reaction <N>` and nothing is
+sent. `index` and `emoji` are exclusive: a binding with both is rejected
+when the configuration is loaded, as `pick` with `query` is; an `index`
+that is not a positive integer (`index = 0`, `index = "1"`) is an error of
+the wrong type. `:react` takes no index. There is no default key; no
+default binding starts with `g` and a digit, which are kept for bindings
+such as `"g1" = { action = "message.react", index = 1 }` in
+`[keymap.timeline]`.
+
 `room.join` (added after the first release) takes `target`, a non-empty
 string, required: a room alias, a room ID, a user ID, a matrix.to link or
 the name of a pending invite, read as `:join` reads its argument when the
@@ -2937,10 +2960,11 @@ action runs (see "Joining rooms and direct messages").
   errors; a value of the wrong type for a known key or for a known
   argument of a known action (a binding that is not a string, a table or
   an array, a binding table without `action`, `filter = 1`,
-  `filter = 3.5`); a missing `account.user_id`; conflicting arguments
-  (`pick` with `query`); a missing required argument (`file.upload`
-  without `path`); an empty string where a value is required (`query`,
-  `path`, `emoji`, `target`); an empty array as a binding; malformed key
+  `filter = 3.5`, `index = 0`); a missing `account.user_id`; conflicting
+  arguments (`pick` with `query`, `emoji` with `index`); a missing
+  required argument (`file.upload` without `path`); an empty string where
+  a value is required (`query`, `path`, `emoji`, `target`); an empty array
+  as a binding; malformed key
   notation (an empty key sequence, a `<` without `>`, `S-` on a key it
   does not change, `<leader>` in `ui.leader`, `<leader>` with modifiers
   such as `<C-leader>`); two spellings of one key sequence in a table

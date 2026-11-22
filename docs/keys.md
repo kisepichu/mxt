@@ -320,6 +320,7 @@ use the commands below:
 | `room.mute`, `room.unmute` | `:mute`, `:unmute` |
 | `room.join`, with a `target` | `:join <target>` |
 | `message.react` with an `emoji`, for example `emoji = "thumbsup"` | `:react <emoji>` |
+| `message.react` with an `index`, for example `index = 1`, which toggles the first reaction shown under the message | |
 | `composer.clear`, which empties the composer as one change that `u` undoes and keeps a reply or an edit | |
 | `file.upload` | `:upload <path>` |
 | `account.recover`, which asks for the recovery key | `:recover` |
@@ -351,8 +352,9 @@ user_id = "@alice:example.org"
 "<leader>x" = "room.mark_read"
 ```
 
-Show the bindings with `<leader>sk`, and react with 👍 on the message under
-the cursor with `<leader>+`:
+Show the bindings with `<leader>sk`, react with 👍 on the message under
+the cursor with `<leader>+`, and toggle the first and second reactions
+shown under it with `g1` and `g2`:
 
 ```toml
 [account]
@@ -363,7 +365,15 @@ user_id = "@alice:example.org"
 
 [keymap.timeline]
 "<leader>+" = { action = "message.react", emoji = "thumbsup" }
+"g1" = { action = "message.react", index = 1 }
+"g2" = { action = "message.react", index = 2 }
 ```
+
+`index` counts the reactions in the order they are shown under the
+message: under `👍 2  ❤️ 1`, `g1` toggles 👍. It adds yours with that
+emoji, or removes yours if you already reacted with it, so a second `g1`
+takes yours back. On a message with fewer reactions, the status line says
+so and nothing is sent. No default key starts with `g` and a digit.
 
 ## Threads
 

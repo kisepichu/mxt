@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::ops::Bound;
 
-use crate::action::{Action, Binding, FocusMode};
+use crate::action::{Action, ArgRef, Binding, FocusMode, ReactWith};
 use crate::keys::{Key, KeySeq};
 use crate::rooms::{Pick, RoomFilter, RoomTarget};
 
@@ -243,7 +243,11 @@ const DEFAULTS: &[(&[TableId], &str, Action)] = &[
     (&[TableId::Timeline], "e", Action::MessageEdit),
     (&[TableId::Timeline], "dd", Action::MessageDelete),
     (&[TableId::Timeline], "yy", Action::MessageYank),
-    (&[TableId::Timeline], "+", Action::MessageReact(None)),
+    (
+        &[TableId::Timeline],
+        "+",
+        Action::MessageReact(ReactWith::Picker),
+    ),
     (&[TableId::Timeline], "gx", Action::MessageOpen),
     (&[TableId::Timeline], "gd", Action::MessageGotoReply),
     (&[TableId::Timeline], "R", Action::MessageResend),
@@ -409,9 +413,9 @@ impl Keymap {
 /// The text of `:map` (design, "Help views"): `leader = "<key>"`, then per
 /// table, in [`TableId::ALL`] order, an empty line, its header
 /// (`[keymap.timeline]`) and its own bindings as `keys -> action` or
-/// `keys -> action (name = "value", ...)`, the actions of an array joined
+/// `keys -> action (name = value, ...)`, the actions of an array joined
 /// with `; `. Keys are in the configuration's notation with the leader
-/// expanded; values are TOML strings.
+/// expanded; values are TOML values: strings quoted, integers bare.
 pub fn keymap_text(keymap: &Keymap) -> String {
     let mut text = String::from("leader = ");
     toml_string(&keymap.leader.to_string(), &mut text);
@@ -429,7 +433,10 @@ pub fn keymap_text(keymap: &Keymap) -> String {
                     text.push_str(if index == 0 { " (" } else { ", " });
                     text.push_str(name);
                     text.push_str(" = ");
-                    toml_string(value, &mut text);
+                    match *value {
+                        ArgRef::String(value) => toml_string(value, &mut text),
+                        ArgRef::Integer(value) => _ = write!(text, "{value}"),
+                    }
                 }
                 if !arguments.is_empty() {
                     text.push(')');
@@ -713,7 +720,7 @@ mod tests {
                     let args: Vec<(String, ArgValue)> = action
                         .arguments()
                         .into_iter()
-                        .map(|(name, value)| (name.to_owned(), ArgValue::String(value.to_owned())))
+                        .map(|(name, value)| (name.to_owned(), value.to_value()))
                         .collect();
                     assert_eq!(
                         Action::from_spec(action.name(), &args).as_ref(),
@@ -723,6 +730,51 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `g` and a digit are kept for the user's `message.react` bindings
+    /// with `index` (`"g1" = { action = "message.react", index = 1 }`).
+    #[test]
+    fn no_default_binding_starts_with_g_and_a_digit() {
+        let km = Keymap::new(&space(), []);
+        for id in TableId::ALL {
+            for (keys, _) in km.table(id) {
+                let reserved = matches!(keys.keys(), [g, digit, ..]
+                    if g.text() == Some('g') && digit.text().is_some_and(|c| c.is_ascii_digit()));
+                assert!(!reserved, "{id:?}: {keys}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_user_binding_of_g_and_a_digit_reacts_by_index_and_g_still_waits() {
+        let index = |n: i64| [("index".to_owned(), ArgValue::Integer(n))];
+        let react = |n: i64| one(Action::from_spec("message.react", &index(n)).unwrap());
+        let km = Keymap::new(
+            &space(),
+            [
+                (TableId::Timeline, seq("g1"), react(1)),
+                (TableId::Timeline, seq("g2"), react(2)),
+            ],
+        );
+        let first = std::num::NonZeroUsize::MIN;
+        for context in [InputContext::Timeline, InputContext::Thread] {
+            let map = km.effective(context);
+            assert_eq!(
+                map.lookup(seq("g1").keys()).binding,
+                Some(&one(Action::MessageReact(ReactWith::Index(first))))
+            );
+            assert_eq!(map.get(seq("g2").keys()), Some(&react(2)));
+            assert_eq!(map.get(seq("gg").keys()), Some(&one(Action::CursorFirst)));
+            let g = map.lookup(seq("g").keys());
+            assert_eq!((g.binding, g.is_prefix), (None, true));
+        }
+        let text = keymap_text(&km);
+        let timeline = section(&text, "timeline");
+        assert!(
+            timeline.contains(&"g1 -> message.react (index = 1)"),
+            "{timeline:#?}"
+        );
     }
 
     /// The lines under `[keymap.<table>]` up to the next empty line.

@@ -866,7 +866,9 @@ fn reply_line(reply: &ReplyPreview, width: usize) -> Line<'_> {
     Line::from(fit(&segments, width).0)
 }
 
-/// `key count` chips; the user's own reactions are bold.
+/// `key count` chips in [`TimelineItem::reactions`] order, which
+/// `message.react`'s `index` counts in, so they must not be reordered here;
+/// the user's own reactions are bold.
 fn reactions(groups: &[ReactionGroup]) -> Vec<Part<'_>> {
     let mut parts = Vec::with_capacity(groups.len() * 3);
     for (index, group) in groups.iter().enumerate() {

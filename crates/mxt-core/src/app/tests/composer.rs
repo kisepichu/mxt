@@ -1247,6 +1247,67 @@ fn react_acts_on_the_open_rooms_timeline_cursor_from_the_room_list_too() {
     );
 }
 
+/// `!c` open, with `g1` to `g5` bound to `message.react` with `index = 1`
+/// to `5`.
+fn indexed() -> App {
+    let bindings = (1..=5)
+        .map(|n| (TableId::Timeline, seq(&format!("g{n}")), react_at(n)))
+        .collect();
+    let mut app = app_with(bindings);
+    keys(&mut app, "<CR>");
+    app
+}
+
+#[test]
+fn react_with_an_index_toggles_the_reaction_shown_there() {
+    let group = |key: &str, count: u32, mine: bool| ReactionGroup {
+        key: key.into(),
+        count,
+        mine,
+    };
+    let mut app = indexed();
+    let shown = |thumbs_mine: bool| {
+        vec![
+            group("👍", 2, thumbs_mine),
+            // The user's heart, without the variation selector.
+            group("\u{2764}", 1, true),
+            // Another user's heart, with it.
+            group("\u{2764}\u{fe0f}", 1, false),
+            // Not an emoji `emojis` knows.
+            group("lgtm", 4, false),
+        ]
+    };
+    reset(
+        &mut app,
+        vec![with(msg(1), |item| item.reactions = shown(false))],
+    );
+    // Another user's reaction: the user's joins it with its key.
+    assert_eq!(no_timers(keys(&mut app, "g1")), vec![toggle(1, "👍")]);
+    // The user's own reaction: its key, which removes it.
+    assert_eq!(no_timers(keys(&mut app, "g2")), vec![toggle(1, "\u{2764}")]);
+    // Another user's reaction with the emoji the user reacted with: the
+    // user's key, so their reaction goes, as with `:react heart`.
+    assert_eq!(no_timers(keys(&mut app, "g3")), vec![toggle(1, "\u{2764}")]);
+    assert_eq!(no_timers(keys(&mut app, "g4")), vec![toggle(1, "lgtm")]);
+    // Past the last reaction: a status, and nothing is sent.
+    assert_eq!(no_timers(keys(&mut app, "g5")), vec![]);
+    assert_eq!(status(&app), Some("The message has no reaction 5"));
+    assert_eq!(app.status().unwrap().kind, StatusKind::Error);
+
+    // The SDK shows the user's 👍 after the first `g1`: the second removes
+    // it with its key.
+    reset(
+        &mut app,
+        vec![with(msg(1), |item| item.reactions = shown(true))],
+    );
+    assert_eq!(no_timers(keys(&mut app, "g1")), vec![toggle(1, "👍")]);
+
+    // A message without reactions has none to toggle.
+    reset(&mut app, vec![msg(2)]);
+    assert_eq!(no_timers(keys(&mut app, "g1")), vec![]);
+    assert_eq!(status(&app), Some("The message has no reaction 1"));
+}
+
 #[test]
 fn react_and_plus_say_why_they_do_nothing() {
     let react = |app: &mut App| {
@@ -1256,9 +1317,12 @@ fn react_and_plus_say_why_they_do_nothing() {
         assert!(app.picker().is_none());
         assert_eq!(app.status().unwrap().kind, StatusKind::Error);
         assert_eq!(status(app).map(str::to_owned), said);
+        // `index` checks the message first too.
+        assert_eq!(no_timers(keys(app, "g1")), vec![]);
+        assert_eq!(status(app).map(str::to_owned), said);
         said
     };
-    let mut app = app();
+    let mut app = app_with(vec![(TableId::Timeline, seq("g1"), react_at(1))]);
     // `+` is bound in the timeline, which has focus without an open room.
     keys(&mut app, "<C-w>l");
     assert_eq!(react(&mut app).as_deref(), Some("No room is open"));

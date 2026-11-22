@@ -8,6 +8,12 @@ marked **Breaking:**.
 
 ## [Unreleased]
 
+### Added
+
+- `message.react` takes `index = N` and toggles the N-th reaction shown
+  under the message (yours added or removed); for example
+  `"g1" = { action = "message.react", index = 1 }` in `[keymap.timeline]`.
+
 ## [0.1.5] - 2026-11-23
 
 ### Added
