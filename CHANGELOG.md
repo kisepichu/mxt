@@ -50,15 +50,18 @@ marked **Breaking:**.
   `room.open` now skips the open room (before, it could pick the open
   room, which only moved the focus to its timeline), and `]u` is
   `{ action = "room.open", filter = "unread" }`. `[u` is unchanged.
-- When you open the room under the room list's cursor and it moves in the
-  list (it sorts as read while open), the cursor stays on its row, on the
-  room that took its place, as in a mail inbox, whether `<CR>`, `]u`,
-  `[u`, the picker, `:open`, `:join` or the jump list opens it; while the
-  cursor stays on that room, it also keeps its row when the room moves
-  because you read it. A room opened away from the cursor takes the
-  cursor along, also when you read it, and once the cursor moves or
-  another room opens, reading the open room takes the cursor along too.
-  Other moves keep the cursor on its room.
+- Opening a room, with `<CR>`, `]u`, `[u`, the picker, `:open`, `:join` or
+  the jump list, puts the room list's cursor on it, and the first time
+  that room then moves in the list while the cursor is still on it, for
+  any reason (it sorts as read as it opens, you read it, a message arrives
+  in it, other rooms move past it), the cursor goes to the room that came
+  right after it, or to the room before it if it was the last (it stays
+  when the list has no other room), as in a mail inbox: with
+  `sort = "mentions, notify, unread, read"`, `<CR>` or `]u` opens the top
+  room, it drops out of its group, and the cursor is on the next one.
+  After that the cursor stays on its room as rooms move, and so it does
+  when you moved the cursor off the room before it moved. Before, the
+  cursor went along with the room you opened.
 
 ### Security
 

@@ -16,22 +16,23 @@ mxt 0.1.2 did nothing. The leader and the longer bindings work as before.
   message's thread in the timeline's place (see [Threads](#threads)).
 - The room list is in the order of `ui.room_list.sort`, by latest activity
   unless it says otherwise (see [Sort keys](configuration.md#sort-keys)).
-  After you open the room under the cursor, with `<CR>` or any other way of
-  opening it (`]u`, `[u`, the room picker, `:open`, `:join`, the jump
-  list), the cursor stays where that room was, on the room that took its
-  place, as in a mail inbox: the open room sorts as read, so it can move
-  among the read rooms, and `<CR>` then opens the next one. While the
-  cursor stays on the room you opened this way, it also keeps its row when
-  the room moves because you read it: under `read` alone, the room goes
-  to the top as you read it, and `j<CR>` opens the room that was below it.
-  A room opened away from the cursor takes the cursor along, and the
-  cursor keeps following it when you read it, to the top of the read
-  rooms. Once the cursor moves or another room opens, reading the open
-  room takes the cursor along too. When rooms move for any other reason,
-  as messages arrive, the cursor stays on its room. A room you left unread
-  (the terminal had no focus) goes back to its place among the unread
-  rooms once you open another, and can be the one under the cursor again.
-  `]u`, `[u` and the room picker follow the list's order.
+  Opening a room, with `<CR>` or any other way of opening it (`]u`, `[u`,
+  the room picker, `:open`, `:join`, the jump list), puts the cursor on
+  it. The first time that room then moves in the list while the cursor is
+  still on it, for any reason (it sorts as read as it opens, you read it,
+  a message arrives in it, other rooms move past it), the cursor goes to
+  the room that came right after it, or to the room before it if it was
+  the last (it stays when the list has no other room), as in a mail
+  inbox: with
+  `sort = "mentions, notify, unread, read"`, `<CR>` or `]u` opens the top
+  room, it drops out of its group, and the cursor is on the next one; with
+  `sort = "read"`, `<CR>` on an unread room leaves it in place, reading it
+  lifts it to the top, and the cursor goes to the room that was right
+  below it. After that the cursor stays on its room as rooms move, and so
+  it does when you moved the cursor off the open room before the room
+  moved, also if you moved it back. A room you left unread (the terminal
+  had no focus) goes back to its place among the unread rooms once you
+  open another. `]u`, `[u` and the room picker follow the list's order.
 - The status line at the bottom shows the mode, a count or keys typed so far,
   the open room, the last message or a question, and on the right the sync
   state: `starting` before the first sync, then `synced`, `offline` (no

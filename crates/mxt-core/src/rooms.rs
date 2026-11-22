@@ -229,19 +229,6 @@ pub enum RoomTarget {
     Fuzzy { filter: RoomFilter, query: String },
 }
 
-/// Where `RoomList::upsert` placed a room.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Upserted {
-    /// The room's index before the update; `None` for a new room.
-    pub old: Option<usize>,
-    /// The room's index now.
-    pub new: usize,
-    /// Whether the update changed nothing but the room's `unread` counts
-    /// and `last_read`, as a receipt's echo or cleared counts do: the room
-    /// was read, here or elsewhere. `false` for a new room.
-    pub read_only: bool,
-}
-
 /// Joined rooms in display order.
 #[derive(Clone, Debug, Default)]
 pub struct RoomList {
@@ -265,24 +252,14 @@ impl RoomList {
     /// A replaced room keeps the later of its stored and its updated
     /// `last_read`: receipts only move forward, so facts read before a
     /// receipt's echo do not move the room back (design, "Optimistic
-    /// clearing"). Whether the update changed only the unread state is the
-    /// comparison of the two summaries with `unread` and `last_read` set
-    /// equal, so a field added to `RoomSummary` counts as another change.
-    pub fn upsert(&mut self, mut summary: RoomSummary) -> Upserted {
-        let stored = self.take(&summary.id).map(|(index, stored)| {
+    /// clearing"). Returns the room's old index (`None` for a new room) and
+    /// its new index.
+    pub fn upsert(&mut self, mut summary: RoomSummary) -> (Option<usize>, usize) {
+        let old = self.take(&summary.id).map(|(index, stored)| {
             summary.last_read = summary.last_read.max(stored.last_read);
-            let read_only = RoomSummary {
-                unread: summary.unread,
-                last_read: summary.last_read,
-                ..stored
-            } == summary;
-            (index, read_only)
+            index
         });
-        Upserted {
-            old: stored.map(|(index, _)| index),
-            new: self.insert(summary),
-            read_only: stored.is_some_and(|(_, read_only)| read_only),
-        }
+        (old, self.insert(summary))
     }
 
     /// Places a room that is not in the list; returns its index.
@@ -308,23 +285,24 @@ impl RoomList {
         self.take(id)
     }
 
-    /// Makes `id` the open room and places it and the previously open room
-    /// again. The open room sorts as read (design, "The open room sorts as
-    /// read"): nothing unread for the `mentions`, `notify` and `unread` keys,
-    /// and read up to its latest activity for `read`. Returns `id`'s new
-    /// index.
-    pub fn open(&mut self, id: &RoomId) -> Option<usize> {
-        // Both rooms out first: the others keep their order with either
-        // room open.
-        let room = self.take(id);
-        if let Some((_, previous)) = self
-            .open
-            .replace(id.clone())
-            .and_then(|previous| self.take(&previous))
-        {
-            self.insert(previous);
-        }
-        room.map(|(_, room)| self.insert(room))
+    /// Makes `id` the open room: places the previously open room again with
+    /// no room open, then `id` as the open room. The open room sorts as read
+    /// (design, "The open room sorts as read"): nothing unread for the
+    /// `mentions`, `notify` and `unread` keys, and read up to its latest
+    /// activity for `read`. Only the open room's sort keys depend on which
+    /// room is open, so each step moves one room and leaves the list in
+    /// order. Returns the two moves in that order, the previously open
+    /// room's and `id`'s, each the room's old and new index.
+    pub fn open(&mut self, id: &RoomId) -> [Option<(usize, usize)>; 2] {
+        let previous = self.open.take().and_then(|previous| self.place(&previous));
+        self.open = Some(id.clone());
+        [previous, self.place(id)]
+    }
+
+    /// Places a room of the list again; returns its old and new index.
+    fn place(&mut self, id: &RoomId) -> Option<(usize, usize)> {
+        let (old, room) = self.take(id)?;
+        Some((old, self.insert(room)))
     }
 
     pub fn rooms(&self) -> &[RoomSummary] {
@@ -486,26 +464,6 @@ mod tests {
         RoomSummary {
             last_read: at.map(Timestamp::from_millis),
             ..summary
-        }
-    }
-
-    /// An update that moved a stored room from `old` to `new` and changed
-    /// more than its counts and `last_read`.
-    fn moved(old: usize, new: usize) -> Upserted {
-        Upserted {
-            old: Some(old),
-            new,
-            read_only: false,
-        }
-    }
-
-    /// An update that moved a stored room from `old` to `new` and changed
-    /// nothing but its counts and `last_read`.
-    fn read(old: usize, new: usize) -> Upserted {
-        Upserted {
-            old: Some(old),
-            new,
-            read_only: true,
         }
     }
 
@@ -838,7 +796,7 @@ mod tests {
             latest_activity: Some(Timestamp::from_millis(70)),
             ..muted
         };
-        assert_eq!(l.upsert(notifying), moved(3, 1));
+        assert_eq!(l.upsert(notifying), (Some(3), 1));
         assert_eq!(
             ids(&l),
             [
@@ -855,7 +813,7 @@ mod tests {
     fn under_notify_the_open_room_sorts_as_read_until_another_room_opens() {
         let mut l = list(notify_first(), notify_rooms());
         let b = RoomId::new("!b:example.org");
-        assert_eq!(l.open(&b), Some(4));
+        assert_eq!(l.open(&b), [None, Some((2, 4))]);
         assert_eq!(
             ids(&l),
             [
@@ -868,7 +826,11 @@ mod tests {
         );
         // The filters still see its notifications.
         assert!(RoomFilter::Notify.matches(&l.get(&b).unwrap().unread));
-        l.open(&RoomId::new("!e:example.org"));
+        // !b goes back among the rooms that notify, and !e stays in place.
+        assert_eq!(
+            l.open(&RoomId::new("!e:example.org")),
+            [Some((4, 2)), Some((4, 4))]
+        );
         assert_eq!(
             ids(&l),
             [
@@ -963,7 +925,7 @@ mod tests {
             room("!f:example.org", None, "f", Some(60), unread(1)),
             Some(15),
         );
-        assert_eq!(l.upsert(news), moved(5, 1));
+        assert_eq!(l.upsert(news), (Some(5), 1));
         assert_eq!(
             ids(&l),
             [
@@ -1011,13 +973,13 @@ mod tests {
             room("!f:example.org", None, "f", Some(70), notifying),
             Some(5),
         );
-        assert_eq!(l.upsert(news), moved(6, 1));
+        assert_eq!(l.upsert(news), (Some(6), 1));
         // A message with a dim count: the top of the rooms with only one.
         let news = read_at(
             room("!g:example.org", None, "g", Some(80), unread(1)),
             Some(8),
         );
-        assert_eq!(l.upsert(news), moved(6, 4));
+        assert_eq!(l.upsert(news), (Some(6), 4));
         assert_eq!(
             ids(&l),
             [
@@ -1071,7 +1033,7 @@ mod tests {
             ]
         );
         // By its latest activity, later than its last read.
-        assert_eq!(l.open(&RoomId::new("!b:example.org")), Some(0));
+        assert_eq!(l.open(&RoomId::new("!b:example.org")), [None, Some((3, 0))]);
         assert_eq!(
             ids(&l),
             [
@@ -1081,8 +1043,12 @@ mod tests {
                 "!c:example.org"
             ]
         );
-        // By its last read, later than its latest activity; !b goes back.
-        assert_eq!(l.open(&RoomId::new("!c:example.org")), Some(0));
+        // By its last read, later than its latest activity; !b goes back
+        // first.
+        assert_eq!(
+            l.open(&RoomId::new("!c:example.org")),
+            [Some((0, 3)), Some((2, 0))]
+        );
         assert_eq!(
             ids(&l),
             [
@@ -1192,7 +1158,7 @@ mod tests {
         );
         let at = |time| Some(Timestamp::from_millis(time));
         // Open, !d counts as read up to its latest activity.
-        assert_eq!(l.open(&RoomId::new("!d:example.org")), Some(2));
+        assert_eq!(l.open(&RoomId::new("!d:example.org")), [None, Some((3, 2))]);
         assert_eq!(
             ids(&l),
             [
@@ -1270,19 +1236,12 @@ mod tests {
             ],
         );
         // !a moves from below !b to the top.
-        let update = room("!a:example.org", None, "a", Some(30), unread(1));
-        assert_eq!(l.upsert(update), moved(1, 0));
+        let moved = l.upsert(room("!a:example.org", None, "a", Some(30), unread(1)));
+        assert_eq!(moved, (Some(1), 0));
         assert_eq!(ids(&l), ["!a:example.org", "!b:example.org"]);
         assert_eq!(l.len(), 2);
         let added = l.upsert(room("!c:example.org", None, "c", Some(25), unread(0)));
-        assert_eq!(
-            added,
-            Upserted {
-                old: None,
-                new: 1,
-                read_only: false
-            }
-        );
+        assert_eq!(added, (None, 1));
         assert_eq!(
             ids(&l),
             ["!a:example.org", "!c:example.org", "!b:example.org"]
@@ -1311,7 +1270,7 @@ mod tests {
                 room("!a:example.org", None, "a", Some(10), unread(0)),
                 stale,
             );
-            assert_eq!(l.upsert(update), read(0, 0));
+            assert_eq!(l.upsert(update), (Some(0), 0));
             assert_eq!(
                 l.get(&a).unwrap().last_read,
                 Some(Timestamp::from_millis(30))
@@ -1322,82 +1281,12 @@ mod tests {
             room("!b:example.org", None, "b", Some(20), unread(0)),
             Some(40),
         );
-        assert_eq!(l.upsert(update), read(1, 0));
+        assert_eq!(l.upsert(update), (Some(1), 0));
         assert_eq!(
             l.get(&RoomId::new("!b:example.org")).unwrap().last_read,
             Some(Timestamp::from_millis(40))
         );
         assert_eq!(ids(&l), ["!b:example.org", "!a:example.org"]);
-    }
-
-    #[test]
-    fn upsert_tells_whether_only_the_counts_and_the_last_read_changed() {
-        let mut l = list(
-            RoomSort::one(SortKey::Read),
-            vec![
-                read_at(
-                    room("!a:example.org", None, "a", Some(30), unread(2)),
-                    Some(10),
-                ),
-                read_at(
-                    room("!b:example.org", None, "b", Some(20), unread(0)),
-                    Some(40),
-                ),
-            ],
-        );
-        let at = |time| Some(Timestamp::from_millis(time));
-        let a = RoomId::new("!a:example.org");
-        // Read in mxt: the optimistic raise to 41 puts it above !b.
-        assert_eq!(l.clear_unread(&a, at(30)), Some((1, 0)));
-        let stored = l.get(&a).unwrap().clone();
-        assert_eq!(stored.last_read, at(41));
-        // The receipt's echo, stamped after or before the raised time (the
-        // later one stays), and counts saved before the receipt went out,
-        // with the old receipt.
-        for (last_read, counts) in [
-            (at(60), unread(0)),
-            (at(35), unread(0)),
-            (at(10), unread(2)),
-        ] {
-            let update = RoomSummary {
-                unread: counts,
-                last_read,
-                ..stored.clone()
-            };
-            assert!(l.upsert(update).read_only, "{last_read:?}");
-        }
-        // Any other change, with a newer receipt or without one.
-        let renamed = RoomName {
-            network: None,
-            room: "renamed".into(),
-        };
-        for update in [
-            RoomSummary {
-                latest_activity: at(70),
-                unread: unread(1),
-                ..stored.clone()
-            },
-            RoomSummary {
-                name: renamed,
-                last_read: at(80),
-                ..stored.clone()
-            },
-            RoomSummary {
-                mode: NotificationMode::Mute,
-                last_read: at(80),
-                ..stored.clone()
-            },
-            RoomSummary {
-                kind: RoomKind::Direct,
-                ..stored.clone()
-            },
-        ] {
-            assert!(!l.upsert(update.clone()).read_only, "{update:?}");
-            l.upsert(stored.clone());
-        }
-        // A new room.
-        let added = l.upsert(room("!c:example.org", None, "c", Some(5), unread(0)));
-        assert!(!added.read_only);
     }
 
     #[test]
