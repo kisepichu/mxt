@@ -139,11 +139,13 @@ impl App {
     /// Closes what belongs to the pane when it shows another timeline of
     /// the room, as opening another room does: its viewport, which must not
     /// count for the other timeline's entries before that is drawn, the
-    /// wait for a jump's message, a message view (a help view stays), the
-    /// mention menu and the composer's focus; the timeline gets the focus.
+    /// wait for a jump's message, the previews it wants (those in flight are
+    /// still answered), a message view (a help view stays), the mention
+    /// menu and the composer's focus; the timeline gets the focus.
     fn replace_pane(&mut self, effects: &mut Vec<Effect>) {
         self.timeline_viewport = None;
         self.jump_wait = None;
+        self.drop_wanted_previews();
         if matches!(self.view, Some(View::Message(_))) {
             self.close_view(effects);
         }

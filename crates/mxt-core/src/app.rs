@@ -6,6 +6,7 @@ mod composer;
 mod join;
 mod jumps;
 mod picker;
+mod previews;
 mod recovery;
 mod rooms;
 mod search;
@@ -42,6 +43,7 @@ use composer::{Composer, MentionMenu, PendingSend};
 use join::JoinWait;
 use jumps::{JumpDirection, JumpList, JumpWait};
 use picker::OpenPicker;
+use previews::PreviewQueue;
 use search::Direction;
 use thread::OpenThread;
 use timeline::Timeline;
@@ -215,6 +217,9 @@ pub struct App {
     /// paste, another room or the room's removal; an answer for anything
     /// else is ignored.
     reply_lookup: Option<(RoomId, EventId)>,
+    /// The open room's timeline previews being fetched, once the tui
+    /// adapter reported a wanted list; dropped with the open room.
+    previews: Option<PreviewQueue>,
 }
 
 impl App {
@@ -261,6 +266,7 @@ impl App {
             jumps: JumpList::default(),
             jump_wait: None,
             reply_lookup: None,
+            previews: None,
             settings,
         }
     }
@@ -311,9 +317,15 @@ impl App {
             Msg::Downloaded { path } => self.downloaded(path, &mut effects),
             Msg::ImageFetched { item, bytes } => self.image_fetched(item, bytes, &mut effects),
             Msg::ImageUnavailable { item, reason } => self.image_unavailable(&item, &reason),
-            // Nothing fetches previews yet, so the tui adapter's list has no
-            // queue to go to (design, "Images in the timeline").
-            Msg::PreviewsWanted { .. } => {}
+            Msg::PreviewsWanted { timeline, items } => {
+                self.previews_wanted(&timeline, items, &mut effects);
+            }
+            Msg::PreviewFetched { room, item, bytes } => {
+                self.preview_answered(&room, item, Some(bytes), &mut effects);
+            }
+            Msg::PreviewFailed { room, item } => {
+                self.preview_answered(&room, item, None, &mut effects);
+            }
             Msg::Recovered => self.recovered(),
             Msg::ConfigWarnings { warnings } => self.config_warnings(warnings),
             Msg::HistoryLoaded { commands, searches } => self.history_loaded(commands, searches),

@@ -1,7 +1,7 @@
-//! The send queue paths and `:join` against a mock homeserver (matrix-sdk's
-//! `MatrixMockServer` on 127.0.0.1): the effects run as `Matrix::start` runs
-//! them, without the sync loop and the room list, and the tests read what
-//! reaches the core.
+//! The send queue paths, `:join` and the timeline previews against a mock
+//! homeserver (matrix-sdk's `MatrixMockServer` on 127.0.0.1): the effects
+//! run as `Matrix::start` runs them, without the sync loop and the room
+//! list, and the tests read what reaches the core.
 
 use std::{
     collections::{HashSet, VecDeque},
@@ -32,11 +32,13 @@ use mxt_core::{
     },
 };
 use tokio::time::timeout;
+use wiremock::Request;
 
 use super::*;
 use crate::test_dir::TestDir;
 
 mod join;
+mod previews;
 mod threads;
 
 const ROOM: &str = "!room:example.org";
@@ -139,6 +141,15 @@ impl Adapter {
         let room = ruma::RoomId::parse(ROOM).unwrap();
         queues.remove(&room).unwrap_or_default()
     }
+
+    /// The requests the server received whose path starts with `prefix`.
+    async fn requests(&self, prefix: &str) -> Vec<Request> {
+        let requests = self.server.server().received_requests().await.unwrap();
+        requests
+            .into_iter()
+            .filter(|request| request.url.path().starts_with(prefix))
+            .collect()
+    }
 }
 
 /// What the adapter sends to the core: the open room's entries and its
@@ -197,10 +208,11 @@ impl Core {
     }
 
     /// The next answer of a send, of a pagination, of a recovery, of a
-    /// `:join` or of `FindThread`, or report of a failure (`SendQueued`,
-    /// `SendFailed`, `PaginationDone`, `PaginationFailed`, `Recovered`,
-    /// `Joined`, `NoDirectMessage`, `ThreadFound`, `EffectFailed`); other
-    /// messages are skipped.
+    /// `:join`, of `FindThread` or of `FetchPreview`, or report of a
+    /// failure (`SendQueued`, `SendFailed`, `PaginationDone`,
+    /// `PaginationFailed`, `Recovered`, `Joined`, `NoDirectMessage`,
+    /// `ThreadFound`, `PreviewFetched`, `PreviewFailed`, `EffectFailed`);
+    /// other messages are skipped.
     async fn report(&mut self) -> Msg {
         loop {
             if let Some(report) = self.reports.pop_front() {
@@ -227,6 +239,8 @@ impl Core {
                 | Msg::Joined { .. }
                 | Msg::NoDirectMessage { .. }
                 | Msg::ThreadFound { .. }
+                | Msg::PreviewFetched { .. }
+                | Msg::PreviewFailed { .. }
                 | Msg::EffectFailed { .. }),
             )) => self.reports.push_back(report),
             Ok(Some(_)) => {}

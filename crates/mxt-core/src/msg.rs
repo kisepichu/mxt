@@ -153,14 +153,27 @@ pub enum Msg {
         reason: String,
     },
     /// The tui adapter's list of the previews it wants for the shown
-    /// timeline (design, "Images in the timeline"): the remote image items
-    /// on or near the timeline pane whose previews it neither keeps nor is
-    /// decoding nor has seen fail, those on the pane first, then the others
-    /// by their distance from it. Sent when the list changes; it replaces
-    /// the one before.
+    /// timeline (design, "Images in the timeline"): the remote image and
+    /// sticker items on or near the timeline pane whose previews it neither
+    /// keeps nor is decoding nor has seen fail, those on the pane first,
+    /// then the others by their distance from it. Sent when the list
+    /// changes; it replaces the one before.
     PreviewsWanted {
         timeline: TimelineId,
         items: Vec<ItemRef>,
+    },
+    /// The image of `item` in `room` for its preview in the timeline,
+    /// answering `MatrixEffect::FetchPreview`.
+    PreviewFetched {
+        room: RoomId,
+        item: ItemRef,
+        bytes: MediaBytes,
+    },
+    /// `MatrixEffect::FetchPreview` for `item` in `room` brought no image,
+    /// for any reason; the matrix adapter has logged why at `debug`.
+    PreviewFailed {
+        room: RoomId,
+        item: ItemRef,
     },
     /// `MatrixEffect::Recover` imported the secrets.
     Recovered,

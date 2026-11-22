@@ -84,11 +84,13 @@ go out even while you look at another window.
 
 ## Images
 
-Images appear only in the message view (`<CR>` on an image), never in the
-timeline. mxt draws them with
-[ratatui-image](https://github.com/benjajaja/ratatui-image) in sixel, kitty
-or iTerm2 graphics, or in half blocks: colored half-block characters, which
-every terminal shows.
+Images appear in the message view (`<CR>` on an image or a sticker) and,
+with `ui.timeline.images = "on"` (see
+[Configuration](configuration.md#uitimeline)), as previews under their
+line in the timeline ([below](#previews-in-the-timeline)). mxt draws them
+with [ratatui-image](https://github.com/benjajaja/ratatui-image) in sixel,
+kitty or iTerm2 graphics, or in half blocks: colored half-block
+characters, which every terminal shows.
 
 With `ui.image_preview = "auto"` (the default), mxt chooses the protocol
 when it starts:
@@ -185,6 +187,8 @@ WSL, any of these values, `"halfblocks"` too, brings back the query that
 2 seconds later, and ratatui-image's reader stays waiting on the terminal,
 where it may take your first key press.
 
+In the message view:
+
 - mxt fetches the event's thumbnail when it has one, and the full file
   otherwise (encrypted rooms usually have no thumbnail). Files larger than
   10 MiB are not fetched; the status line says "No image preview: too large
@@ -194,6 +198,46 @@ where it may take your first key press.
   dimensions shows an error instead.
 - With `ui.image_preview = "off"`, the view shows the image's name and size,
   and mxt never queries the terminal or changes tmux's `allow-passthrough`.
+
+### Previews in the timeline
+
+With `ui.timeline.images = "on"`, image messages and stickers show a
+preview under their `[image: …]` or `[sticker: …]` line, at most
+`ui.timeline.image_rows` rows tall (8 by default):
+
+- The protocol is the message view's, except where iTerm2 graphics or
+  sixel would pass through tmux, which neither moves nor removes them when
+  the timeline scrolls: with `"iterm2"` inside tmux, with `"sixel"` inside
+  a tmux that does not store sixel, and with `"auto"` over SSH from a
+  local tmux, previews are half blocks. The message view keeps the
+  protocol.
+- mxt reserves a preview's rows from the image's size in the event before
+  anything loads, so the timeline does not jump when the preview comes. An
+  event without the image's size reserves `image_rows` rows.
+- Only the images on the screen and near it are fetched: the event's
+  thumbnail first; for an unencrypted image without one, a thumbnail the
+  homeserver makes, and the file when it makes none; for an encrypted
+  image without one, the file, decrypted. Files larger than 10 MiB are not
+  fetched. What mxt fetched stays in its media cache on disk.
+- Previews are decoded and scaled in the background, so typing and
+  scrolling never wait for them. mxt keeps at most 64 of them, and 64 MiB,
+  in memory, dropping the one shown least recently first, but never one on
+  or near the screen.
+- A preview that cannot be fetched or decoded leaves its line alone,
+  without a message in the status line, until you open another room or
+  thread. A message that would not fit the pane with its preview shows its
+  line alone too.
+- What a scroll step costs depends on the protocol. Half blocks and kitty
+  graphics redraw text, a few kilobytes per preview. Sixel outside tmux
+  sends each preview's visible part again, tens of kilobytes. iTerm2
+  graphics (WezTerm, iTerm2) send every visible row of each preview again
+  as a PNG, tens to a hundred-odd kilobytes: quick locally, but a slow SSH
+  link can feel it while `j` is held.
+- Inside tmux, sixel previews are drawn only while all their rows are on
+  the pane. When one moves or leaves, mxt redraws the whole screen once,
+  since tmux would keep the old image over text that is not ASCII.
+- kitty keeps every image mxt sends in its memory until its own limit
+  removes it.
 
 ## Input methods
 

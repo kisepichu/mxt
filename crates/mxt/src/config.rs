@@ -22,7 +22,7 @@ use mxt_core::keymap::{Keymap, TableId};
 use mxt_core::keys::{Key, KeyCode, KeyParseError, KeySeq, Modifiers};
 use mxt_core::rooms::{RoomSort, RoomSortError, SortKey};
 use mxt_core::settings::{ReceiptKind, Settings};
-use mxt_tui::{RoomListLayout, RoomListWidth, TimeFormat};
+use mxt_tui::{ImageRows, RoomListLayout, RoomListWidth, TimeFormat};
 use serde::Deserialize as _;
 use toml::Spanned;
 use toml::de::{DeTable, DeValue};
@@ -42,6 +42,9 @@ pub struct Config {
     pub time_format: TimeFormat,
     /// `ui.room_list.width` and `ui.room_list.network`, for `mxt-tui`.
     pub room_list_layout: RoomListLayout,
+    /// `ui.timeline.image_rows` while `ui.timeline.images` is `"on"`, for
+    /// `mxt-tui`; `None` while it is off.
+    pub timeline_images: Option<ImageRows>,
     /// Absolute.
     pub download_dir: PathBuf,
     pub opener: Vec<String>,
@@ -216,6 +219,25 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Config, ConfigError
         )
         .unwrap_or_default(),
     };
+    let image_rows = match ui.timeline.image_rows {
+        Some(rows) => ImageRows::new(*rows.get_ref()).ok_or_else(|| {
+            let (min, max) = ImageRows::RANGE.into_inner();
+            source.invalid(
+                &rows,
+                format!("ui.timeline.image_rows: must be from {min} to {max}"),
+            )
+        })?,
+        None => ImageRows::default(),
+    };
+    let timeline_images = choice(
+        &source,
+        "ui.timeline.images",
+        ui.timeline.images,
+        dto::TIMELINE_IMAGES,
+        &mut warnings,
+    )
+    .unwrap_or(false)
+    .then_some(image_rows);
 
     let download_dir = match files.download_dir {
         Some(dir) => {
@@ -256,6 +278,7 @@ pub fn parse(text: &str, path: &Path, home: &Path) -> Result<Config, ConfigError
         settings,
         time_format,
         room_list_layout,
+        timeline_images,
         download_dir,
         opener,
         warnings,
@@ -791,6 +814,7 @@ enum Node {
     Account,
     Ui,
     RoomList,
+    Timeline,
     Files,
     /// `keymap` (`""`), or a table inside it that holds keymap tables, by
     /// its dotted name below `keymap` (`"composer"`).
@@ -812,12 +836,14 @@ impl Node {
             (Node::Root, "files") => Some(Node::Files),
             (Node::Root, "keymap") => Some(Node::Keymap("")),
             (Node::Ui, "room_list") => Some(Node::RoomList),
+            (Node::Ui, "timeline") => Some(Node::Timeline),
             (Node::Account, "user_id" | "homeserver")
             | (
                 Node::Ui,
                 "leader" | "timeoutlen" | "time_format" | "image_preview" | "read_receipts",
             )
             | (Node::RoomList, "visible" | "sort" | "width" | "network")
+            | (Node::Timeline, "images" | "image_rows")
             | (Node::Files, "download_dir" | "opener") => Some(Node::Setting),
             (Node::Keymap(prefix), key) => TableId::ALL.iter().find_map(|id| {
                 let name = id.config_name();

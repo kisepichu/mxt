@@ -343,6 +343,11 @@ async fn run_effects(
                     };
                     running.spawn(answered(&to_core, "Loading the image failed", fetched));
                 }
+                Some(MatrixEffect::FetchPreview { room, item }) => {
+                    let open = ItemTimelines::of(&main, &thread, &room);
+                    let to_core = to_core.clone();
+                    running.spawn(fetch_preview(client.clone(), open, room, item, to_core));
+                }
                 Some(MatrixEffect::FindThread { room, event }) => {
                     running.spawn(find_thread(client.clone(), room, event, to_core.clone()));
                 }
@@ -407,6 +412,32 @@ where
             Err(error) => report(&to_core, what, &error),
         }
     }
+}
+
+/// `MatrixEffect::FetchPreview`: answers `Msg::PreviewFetched` with the
+/// item's image from the timeline that holds it (see `ItemTimelines`), or
+/// `Msg::PreviewFailed` for any failure, which only `debug` logs: a room
+/// can hold many, and the item shows its text line instead (design,
+/// "Logging").
+async fn fetch_preview(
+    client: Client,
+    open: Result<ItemTimelines, Error>,
+    room: RoomId,
+    item: ItemRef,
+    to_core: UnboundedSender<Msg>,
+) {
+    let fetched = async {
+        let timeline = open?.holding(&item).await;
+        media::fetch_preview(&client, &timeline, &item).await
+    };
+    let answer = match fetched.await {
+        Ok(bytes) => Msg::PreviewFetched { room, item, bytes },
+        Err(error) => {
+            debug!(?item, "a timeline preview could not be fetched: {error}");
+            Msg::PreviewFailed { room, item }
+        }
+    };
+    let _ = to_core.send(answer);
 }
 
 /// Queues the messages and uploads one at a time, in the order they were

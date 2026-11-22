@@ -29,6 +29,7 @@ timeoutlen = 1000                                 # milliseconds
 room_list = { visible = true, sort = "recent", width = 30, network = "inline" }
 time_format = "%H:%M"                             # strftime, in the local time zone
 image_preview = "auto"                            # "auto" | "off" | "iterm2" | "sixel" | "kitty" | "halfblocks"
+timeline = { images = "off", image_rows = 8 }    # images: "off" | "on"; image_rows: 1 to 50
 read_receipts = "public"                          # "public" | "private"
 
 [files]
@@ -73,7 +74,8 @@ These are errors:
   in a binding;
 - an `account.user_id` that is missing or not `@localpart:server`, and an
   `account.homeserver` that is not an `https://` or `http://` URL;
-- a `ui.room_list.width` outside 12 to 80, and an empty `ui.time_format`;
+- a `ui.room_list.width` outside 12 to 80, a `ui.timeline.image_rows`
+  outside 1 to 50, and an empty `ui.time_format`;
 - a `files.download_dir` that is neither absolute nor starts with `~/`, and a
   `files.opener` without a program;
 - malformed key notation, such as `"<C-x"`, `"<C-x<CR>"`, `"<>"`, `"<S-1>"`
@@ -194,8 +196,9 @@ error about `pick` with `query`.
 | `leader` | `"<Space>"` | [key notation](#key-notation), without `<leader>` | What `<leader>` stands for in the default keymap and in your bindings. A key name that mxt does not know, such as `"<F13>"`, is ignored with a warning, and `<Space>` applies. |
 | `timeoutlen` | `1000` | milliseconds, a non-negative integer | How long a key sequence that starts a longer binding waits for the next key, like nvim's `timeoutlen`. |
 | `room_list` | see below | a table | The room list. |
+| `timeline` | see below | a table | Images in the timeline. |
 | `time_format` | `"%H:%M"` | a [strftime format](https://docs.rs/jiff/latest/jiff/fmt/strtime/index.html), not empty | The time in each message header, in the local time zone. A format that mxt cannot read is ignored with a warning, and `"%H:%M"` applies; an empty one is an error. |
-| `image_preview` | `"auto"` | `"auto"`, `"off"`, `"iterm2"`, `"sixel"`, `"kitty"`, `"halfblocks"` | `"auto"` shows images in the message view in the graphics protocol mxt chooses for the terminal (see [Terminal setup](terminal.md#images)). `"iterm2"`, `"sixel"`, `"kitty"` and `"halfblocks"` use that protocol instead, for a terminal where the choice is wrong. `"off"` shows only the file name and size there, and mxt never asks the terminal for its graphics protocol. |
+| `image_preview` | `"auto"` | `"auto"`, `"off"`, `"iterm2"`, `"sixel"`, `"kitty"`, `"halfblocks"` | `"auto"` shows images in the message view, and with `timeline.images = "on"` in the timeline, in the graphics protocol mxt chooses for the terminal (see [Terminal setup](terminal.md#images)). `"iterm2"`, `"sixel"`, `"kitty"` and `"halfblocks"` use that protocol instead, for a terminal where the choice is wrong. `"off"` shows only the file name and size in the view and no previews in the timeline, and mxt never asks the terminal for its graphics protocol. |
 | `read_receipts` | `"public"` | `"public"`, `"private"` | `"public"` sends `m.read` receipts, which other users see. `"private"` sends `m.read.private`, which only your own devices see. An unknown value, such as one a newer mxt knows, sends private receipts, not the default public ones, with a warning that says so: receipts go out as soon as a room opens, before you may have seen the warning. |
 
 `room_list` is a table; write it inline as in the example, or as a section:
@@ -270,6 +273,28 @@ room_list = { sort = "mentions, notify, unread, read" }
 "]u" = { action = "room.open", filter = "notify" }
 "[u" = { action = "room.open", filter = "notify", pick = "prev" }
 ```
+
+### `[ui.timeline]`
+
+`timeline` is a table too, inline as in the example or as a section:
+
+```toml
+[account]
+user_id = "@alice:example.org"
+
+[ui.timeline]
+images = "on"
+image_rows = 12
+```
+
+| Key | Default | Values | Meaning |
+|---|---|---|---|
+| `images` | `"off"` | `"off"`, `"on"` | `"on"` shows image messages and stickers with a preview under their `[image: …]` or `[sticker: …]` line, in the graphics protocol of the message view (see [Terminal setup](terminal.md#previews-in-the-timeline)). `ui.image_preview = "off"` turns previews off too. |
+| `image_rows` | `8` | an integer from 1 to 50 | The most rows a preview takes. A preview keeps the image's proportions within that many rows and the timeline's width, and is never larger than the image. |
+
+mxt 0.1.4 does not know `ui.timeline`: it ignores the table with a
+warning, so a configuration shared with machines that run 0.1.4 can carry
+it.
 
 ## `[files]`
 
@@ -462,7 +487,7 @@ arguments; any other argument ignores the binding with a warning. Actions on
 | `message.open` | | Downloads an attachment to `files.download_dir` and opens it with `files.opener`, or opens the message's web link with `files.opener`, or offers a link picker when there are several. Only `http://` and `https://` links. |
 | `message.goto_reply` | | Moves the cursor to the message this one replies to, if the shown timeline holds it. In a thread, it goes to a message of the timeline, closing the thread; a message that is a reply in another thread opens that thread with the cursor on it (see [Threads](keys.md#threads)). Otherwise it says the message is not loaded. |
 | `message.resend` | | Sends a failed message again. |
-| `message.view` | | Opens the message in a full-screen view: text in an editor where vim motions, search, visual selection and yanks work (changes are discarded), or an image. |
+| `message.view` | | Opens the message in a full-screen view: text in an editor where vim motions, search, visual selection and yanks work (changes are discarded), or the image of an image message or a sticker. |
 | `composer.focus` | `mode` | Moves the focus to the composer of the shown timeline, the open room's or its thread's. `mode = "insert"` (default) starts insert mode after the character under the cursor; `mode = "keep"` keeps the editor's last mode. |
 | `composer.send` | | Sends the composer's text as Markdown. A blank text does nothing. |
 | `composer.newline` | | Inserts a line break. |

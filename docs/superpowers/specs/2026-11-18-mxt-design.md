@@ -2492,12 +2492,20 @@ list, so mxt does not offer an event-level mention list.
     for its encoding. The pane's
     own items always count, so a pane full of previews is shown however
     much it takes; it cannot take more than about 8 bytes per pixel of the
-    pane. The wanted list is the targets that the adapter neither keeps
+    pane, or about 9.3 with kitty graphics, whose previews hold 4 bytes
+    per pixel for the scaled image and 5.3 for the base64 of its RGBA (see
+    "Memory"). The wanted list is the targets that the adapter neither keeps
     nor is decoding nor has seen fail, in that order, and when it changes
     the adapter reports it as `Msg::PreviewsWanted { timeline, items }`.
     When the shown timeline changes, also through no room open, the
     adapter forgets its last report, so a room opened again after it was
-    gone reports its list, which the core dropped with the room.
+    gone reports its list, which the core dropped with the room. This
+    relies on a frame drawn while no room is open, between
+    `Msg::RoomRemoved` and the room's opening again: the event loop draws
+    once per batch of messages, and only `open_joined` (the room of an
+    answered `:join` arriving in the room list) could open the room again
+    within the batch that removed it, which would leave its previews
+    unfetched until the wanted list changes.
     The cache never drops a target (see "Memory"), so a window that holds
     more previews than the cache keeps does not fetch, decode and drop the
     same previews in turn: once every target is kept or failed, the list is
@@ -2505,7 +2513,8 @@ list, so mxt does not offer an event-level mention list.
     list for the shown timeline as its queue and has at most 4
     `MatrixEffect::FetchPreview { room, item }` in flight, starting the
     next wanted item as each answer arrives, so an item scrolled away
-    before its turn is never fetched.
+    before its turn is never fetched. A newer list leaves out the items in
+    flight, which the adapter does not know, so none is fetched twice.
     The answers, `Msg::PreviewFetched { room, item, bytes }` and
     `Msg::PreviewFailed { room, item }`, become `UiEffect::ShowPreview {
     item, bytes }` and `UiEffect::PreviewFailed(item)` while `room` is the
@@ -2539,7 +2548,9 @@ list, so mxt does not offer an event-level mention list.
     and, after each frame's targets, drops the queued jobs whose item is
     no target any more: an item scrolled away is not decoded, and fetched
     files wait only for targets (a dropped item is wanted again once it
-    is a target). The worker decodes the bytes with the message
+    is a target). When the shown timeline changes it drops them all, since
+    a frame without the pane lays out no targets. The worker decodes the
+    bytes with the message
     view's `decode` (the format sniffed, the 128 MiB limit, the Exif
     orientation), scales them to the reserved size with a triangle filter
     and pads them to whole cells (`Resize::resize`, ratatui-image
@@ -2553,9 +2564,10 @@ list, so mxt does not offer an event-level mention list.
     `select!`, so the next frame takes the finished previews. A decoding
     or encoding failure is a failed preview, logged at `debug`. So is a
     panic while decoding or encoding, an image anyone in the room sent
-    being the input: the worker catches it (`catch_unwind`), and the panic
-    hook leaves the terminal alone for the worker's thread, `mxt-previews`,
-    and logs the panic at `warn` (see "Error handling"). A preview whose
+    being the input: the worker catches it (`catch_unwind`) and logs its
+    item at `debug`, and the panic hook leaves the terminal alone for the
+    worker's thread, `mxt-previews`, and logs the panic at `warn` (see
+    "Error handling"). A preview whose
     reserved size or cell
     size changed (the room list was toggled, tmux took another cell size)
     is encoded again on the worker from the scaled image it keeps, and is
@@ -3114,7 +3126,8 @@ error at `debug`, since the event loop logs its status text at `warn`.
 Failed timeline previews are logged at `debug`, since a room can hold
 many and the text line shows them: fetch failures by the matrix
 adapter, decoding and encoding failures by the tui adapter's worker. A
-panic on that worker is logged at `warn` (see "Error handling").
+panic on that worker is logged at `warn` by the panic hook, and its item
+at `debug` by the worker (see "Error handling").
 
 ## Testing
 
@@ -3648,7 +3661,11 @@ asking for the recovery key ("Startup").
   Sixel outside tmux relies on the terminal replacing an image's pixels
   with the text written over them, as ratatui-image's own scrolling does;
   a terminal that keeps the pixels would show stale pieces. kitty keeps
-  every image mxt sent in its memory until its own limit evicts it. Inside
+  every image mxt sent in its memory until its own limit evicts it, and it
+  may free them when mxt enters the alternate screen again after the
+  external editor: ratatui-image sends each image once, so such previews
+  stay blank until they leave the cache and are sent again, as the message
+  view's images already do. Inside
   tmux, tmux's sixel previews redraw the whole screen on each step that
   moves one. Checked so far by tests only; the owner checks WezTerm
   (iTerm2 graphics outside tmux, tmux's sixel inside) after the release,

@@ -62,6 +62,12 @@ pub enum Error {
     NotificationSettings(NotificationSettingsError),
     /// A download asks for a message that has no attachment.
     NoAttachment,
+    /// A timeline preview asks for a message that is neither an image nor
+    /// a sticker.
+    NoImage,
+    /// A timeline preview's image is larger than 10 MiB, by its event's
+    /// info or by its bytes.
+    TooLargeToPreview,
     /// An upload names something that is not a regular file: a directory,
     /// or a device or a FIFO, which could be read forever.
     NotAFile,
@@ -262,6 +268,8 @@ impl fmt::Display for Error {
             Error::TimelineNotOpen => f.write_str("the timeline is not open"),
             Error::NotificationSettings(error) => error.fmt(f),
             Error::NoAttachment => f.write_str("the message has no attachment"),
+            Error::NoImage => f.write_str("the message is not an image or a sticker"),
+            Error::TooLargeToPreview => f.write_str("the image is too large to preview"),
             Error::NotAFile => f.write_str("the path is not a regular file"),
             Error::UploadTooLarge { limit } => {
                 const MIB: u64 = 1024 * 1024;
@@ -299,6 +307,8 @@ impl std::error::Error for Error {
             | Error::InvalidEventId
             | Error::TimelineNotOpen
             | Error::NoAttachment
+            | Error::NoImage
+            | Error::TooLargeToPreview
             | Error::NotAFile
             | Error::UploadTooLarge { .. }
             | Error::NotAJoinTarget

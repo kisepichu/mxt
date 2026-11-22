@@ -79,6 +79,7 @@ fn minimal_file_uses_defaults() {
             network: NetworkPlacement::Inline,
         }
     );
+    assert_eq!(c.timeline_images, None);
     assert_eq!(c.download_dir, PathBuf::from("/home/alice/Downloads"));
     assert!(!c.opener.is_empty());
     assert_eq!(
@@ -100,6 +101,7 @@ timeoutlen = 1000
 room_list = { visible = true, sort = "recent", width = 30, network = "inline" }
 time_format = "%H:%M"
 image_preview = "auto"
+timeline = { images = "off", image_rows = 8 }
 read_receipts = "public"
 
 [files]
@@ -258,6 +260,66 @@ fn the_room_list_width_is_from_12_to_80() {
             "{width}"
         );
     }
+}
+
+#[test]
+fn timeline_images_are_off_by_default_and_on_with_their_rows() {
+    let rows = |text: &str| ok(&format!("{MINIMAL}{text}")).timeline_images;
+    assert_eq!(
+        rows("[ui]\ntimeline = { images = \"on\", image_rows = 12 }\n"),
+        ImageRows::new(12)
+    );
+    assert_eq!(
+        rows("[ui.timeline]\nimages = \"on\"\n"),
+        Some(ImageRows::default())
+    );
+    assert_eq!(
+        rows("[ui.timeline]\nimages = \"off\"\nimage_rows = 12\n"),
+        None
+    );
+    assert_eq!(rows("[ui.timeline]\nimage_rows = 12\n"), None);
+}
+
+#[test]
+fn an_unknown_timeline_images_value_is_ignored_and_previews_stay_off() {
+    let text = format!("{MINIMAL}[ui.timeline]\nimages = \"yes\"\nimage_rows = 12\n");
+    let (c, warnings) = warned(&text);
+    assert_eq!(c.timeline_images, None);
+    assert_eq!(
+        warnings,
+        expected(&[(
+            4,
+            10,
+            "ui.timeline.images: unknown value \"yes\"; expected one of \"off\", \"on\" (ignored)"
+        )])
+    );
+}
+
+#[test]
+fn the_timeline_s_image_rows_are_an_integer_from_1_to_50() {
+    for rows in [1, 50] {
+        let text = format!("{MINIMAL}[ui.timeline]\nimages = \"on\"\nimage_rows = {rows}\n");
+        assert_eq!(ok(&text).timeline_images, ImageRows::new(rows));
+    }
+    for rows in ["0", "51", "-8"] {
+        // An error also while previews are off.
+        let text = format!("{MINIMAL}[ui.timeline]\nimage_rows = {rows}\n");
+        assert_eq!(
+            err_at(&text),
+            (
+                4,
+                14,
+                "ui.timeline.image_rows: must be from 1 to 50".to_owned()
+            ),
+            "{rows}"
+        );
+    }
+    let (line, column, message) = err_at(&format!("{MINIMAL}[ui.timeline]\nimage_rows = \"8\"\n"));
+    assert_eq!((line, column), (4, 14));
+    assert!(
+        message.starts_with("ui.timeline.image_rows: invalid type"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -1107,6 +1169,7 @@ timeoutlen = 300
 room_list = { visible = false, sort = "mentions, read", width = 40, network = "below" }
 time_format = "%Y-%m-%d %H:%M"
 image_preview = "kitty"
+timeline = { images = "on", image_rows = 12 }
 read_receipts = "private"
 
 [files]
@@ -1151,6 +1214,7 @@ opener = ["wslview"]
         c.settings.image_preview,
         ImagePreview::Forced(ImageProtocol::Kitty)
     );
+    assert_eq!(c.timeline_images, ImageRows::new(12));
     assert_eq!(c.settings.read_receipts, ReceiptKind::Private);
     assert_eq!(c.download_dir, PathBuf::from("/tmp/dl"));
     assert_eq!(c.opener, vec!["wslview".to_owned()]);

@@ -62,7 +62,9 @@ followed by a row `> name: text` of the message it replies to, and
 reactions follow the message as `👍 2` (yours in bold). Images show as
 `[image: name 800x600]`, files as `[file: name 1.2 MiB]`, and also
 `[sticker: …]`, `(deleted)`, `(unable to decrypt)` (the key may still
-arrive) and `(unsupported: …)`.
+arrive) and `(unsupported: …)`. With `ui.timeline.images = "on"` (see
+[Configuration](configuration.md#uitimeline)), an image's or a sticker's
+preview follows its line, at most `ui.timeline.image_rows` rows tall.
 A message taller than the pane is cut with `[+N lines]`; `<CR>` shows it in
 full. Date dividers and a `new messages` line, where you stopped reading,
 come between messages.
@@ -214,7 +216,7 @@ one. There is no search on the server.
 | Key | Action | |
 |---|---|---|
 | `i`, `a` | `composer.focus` | write in insert mode |
-| `<CR>` | `message.view` | show the message in full, or the image |
+| `<CR>` | `message.view` | show the message in full, or the image (of a sticker too) |
 | `r` | `message.reply` | reply |
 | `e` | `message.edit` | edit your own text message (the composer must be empty) |
 | `dd` | `message.delete` | delete your own message, after `y` |

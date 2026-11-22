@@ -612,8 +612,9 @@ Core:
   for a picker, `Halfblocks::new(image, size)` for half blocks (which
   fills the size exactly), or `tmux_sixel(..)` for tmux's sixel; a
   decoding or encoding error is `Done::Failed(item)`, logged at `debug`
-  with `tracing`, and so is a panic, caught with `catch_unwind`. After
-  each result the worker
+  with `tracing`, and so is a panic, caught with `catch_unwind`, whose
+  item the worker logs at `debug` while the panic hook logs the panic
+  itself at `warn`. After each result the worker
   calls the waker. `show(item, bytes)` drops bytes of an item without a
   target, else queues a job; `fail(item)`; `take_done()` moves results
   into the cache and marks failures; a kept preview whose size or cell

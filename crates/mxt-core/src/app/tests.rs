@@ -13,6 +13,7 @@ mod files;
 mod history;
 mod join;
 mod jumps;
+mod previews;
 mod room_actions;
 mod threads;
 mod timeline;
