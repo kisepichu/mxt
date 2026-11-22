@@ -1,3 +1,4 @@
+use super::threads::at;
 use super::timeline::{event, msg, status};
 use super::*;
 use crate::room::Badge;
@@ -96,6 +97,44 @@ fn order(app: &App) -> Vec<&str> {
         .iter()
         .map(|room| room.id.as_str())
         .collect()
+}
+/// `summary` with the user's own latest read receipt at `at`.
+fn read_at(summary: RoomSummary, at: u64) -> RoomSummary {
+    RoomSummary {
+        last_read: Some(Timestamp::from_millis(at)),
+        ..summary
+    }
+}
+/// Under `sort = "mentions, unread, read"`: `rooms` over those of `app()`.
+fn read_last(user: Vec<(TableId, KeySeq, Binding)>, rooms: Vec<RoomSummary>) -> App {
+    let settings = Settings {
+        room_sort: RoomSort::new(vec![SortKey::Mentions, SortKey::Unread, SortKey::Read]).unwrap(),
+        ..Settings::default()
+    };
+    let mut app = app_in(settings, user);
+    for summary in rooms {
+        app.update(Msg::RoomUpserted(summary));
+    }
+    app
+}
+/// Shows the open `room`'s timeline, message `n` sent at `ms`, whole on the
+/// pane; returns the effects of the viewport: the receipt, if any.
+fn shown(app: &mut App, room: &str, n: u32, ms: u64) -> Vec<Effect> {
+    app.update(Msg::Timeline {
+        timeline: main_of(room),
+        diffs: vec![TimelineDiff::Reset(vec![at(ms, msg(n))])],
+    });
+    app.update(Msg::Viewport {
+        pane: Pane::Timeline,
+        first: 0,
+        last: 0,
+    })
+}
+fn receipt(room: &str, n: u32) -> Effect {
+    Effect::Matrix(MatrixEffect::SendReceipt {
+        room: id(room),
+        event: event(n),
+    })
 }
 
 #[test]
@@ -413,4 +452,99 @@ fn the_open_room_moves_among_the_read_rooms_with_the_cursor_and_u_follows() {
         no_timers(keys(&mut app, "]u")),
         vec![unsubscribe(A), subscribe(D)]
     );
+}
+
+#[test]
+fn under_read_a_room_marked_read_goes_to_the_top_of_the_read_rooms_at_once() {
+    let mark = Binding::single(Action::RoomMarkRead);
+    // !a got a message after a long silence; !d was read since, !b before.
+    let mut app = read_last(
+        vec![(TableId::Normal, seq("<Space>r"), mark)],
+        vec![
+            read_at(room(A, 50, 1), 5),
+            read_at(room(B, 20, 0), 20),
+            read_at(room(C, 30, 2), 25),
+            read_at(room(D, 40, 0), 60),
+        ],
+    );
+    assert_eq!(order(&app), [A, C, D, B]);
+    // From the room list, its cursor on !a.
+    assert_eq!(
+        no_timers(keys(&mut app, "<Space>r")),
+        vec![Effect::Matrix(MatrixEffect::MarkRoomRead(id(A)))]
+    );
+    // Above !d too: the receipt's echo brings the time the homeserver took
+    // it, later than !d's.
+    assert_eq!(order(&app), [C, A, D, B]);
+    // Facts read before the echo, with the old receipt, leave it there, and
+    // so does the echo.
+    for read in [5, 90] {
+        app.update(Msg::RoomUpserted(read_at(room(A, 50, 0), read)));
+        assert_eq!(order(&app), [C, A, D, B]);
+    }
+}
+
+#[test]
+fn under_read_rooms_read_one_after_another_each_go_to_the_top_of_the_read_rooms() {
+    // !d and !b were read after the newest messages of !a and !c.
+    let mut app = read_last(
+        vec![],
+        vec![
+            read_at(room(A, 50, 1), 5),
+            read_at(room(B, 20, 0), 60),
+            read_at(room(C, 30, 2), 25),
+            read_at(room(D, 40, 0), 70),
+        ],
+    );
+    assert_eq!(order(&app), [A, C, D, B]);
+    assert_eq!(no_timers(keys(&mut app, "]u")), vec![subscribe(A)]);
+    // Open, !a counts as read up to its newest message; its receipt then
+    // puts it above the rooms read since.
+    assert_eq!(order(&app), [C, D, B, A]);
+    assert_eq!(shown(&mut app, A, 1, 50), vec![receipt(A, 1)]);
+    assert_eq!(order(&app), [C, A, D, B]);
+    // Facts read before the echo leave it there, and so does the echo.
+    for read in [5, 100] {
+        app.update(Msg::RoomUpserted(read_at(room(A, 50, 0), read)));
+        assert_eq!(order(&app), [C, A, D, B]);
+    }
+    assert_eq!(
+        no_timers(keys(&mut app, "]u")),
+        vec![unsubscribe(A), subscribe(C)]
+    );
+    assert_eq!(order(&app), [A, D, B, C]);
+    assert_eq!(shown(&mut app, C, 2, 30), vec![receipt(C, 2)]);
+    assert_eq!(order(&app), [C, A, D, B]);
+    for read in [25, 120] {
+        app.update(Msg::RoomUpserted(read_at(room(C, 30, 0), read)));
+        assert_eq!(order(&app), [C, A, D, B]);
+    }
+}
+
+#[test]
+fn under_read_a_room_whose_only_news_is_an_edit_goes_back_to_its_place() {
+    // !b's only news since its receipt at 10 is an edit, at 45, of its
+    // message sent at 8.
+    let mut app = read_last(
+        vec![],
+        vec![
+            read_at(room(A, 50, 1), 5),
+            read_at(room(B, 45, 0), 10),
+            read_at(room(C, 30, 2), 25),
+            read_at(room(D, 40, 0), 40),
+        ],
+    );
+    assert_eq!(order(&app), [A, C, D, B]);
+    keys(&mut app, "G<CR>"); // open !b
+    // Open, it counts as read up to the edit.
+    assert_eq!(order(&app), [A, C, B, D]);
+    // Its receipt goes on the edited message, which the homeserver
+    // ignores: no echo will come.
+    assert_eq!(shown(&mut app, B, 1, 8), vec![receipt(B, 1)]);
+    assert_eq!(order(&app), [A, C, B, D]);
+    assert_eq!(
+        no_timers(keys(&mut app, "]u")),
+        vec![unsubscribe(B), subscribe(A)]
+    );
+    assert_eq!(order(&app), [C, A, D, B]);
 }

@@ -28,7 +28,7 @@ fn thread_of(room: &str, root: u32) -> TimelineId {
     }
 }
 /// `entry`, an item, sent at `ms`.
-fn at(ms: u64, mut entry: TimelineEntry) -> TimelineEntry {
+pub(super) fn at(ms: u64, mut entry: TimelineEntry) -> TimelineEntry {
     if let TimelineEntry::Item(item) = &mut entry {
         item.timestamp = Timestamp::from_millis(ms);
     }

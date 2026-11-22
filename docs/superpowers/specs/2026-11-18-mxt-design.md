@@ -454,29 +454,47 @@ covered by unit tests.
   main timeline's, or the one a thread sends when the main timeline is
   read; see "Threads") or runs `room.mark_read`, it sets that room's
   `UnreadCounts` to zero immediately and, added after 0.1.4, raises its
-  `last_read` to its latest activity: the receipt goes to the room's
-  newest event, and the homeserver's time for it is no earlier. A room
-  other than the open one moves in the room list when the sort keys
-  depend on the counts or on `last_read` (the open room already sorts as
-  read; next item). The next SDK update overwrites the counts, with the
-  replies in threads after the receipt counted again, but never lowers
-  `last_read`: the room list keeps the later of the stored and the
-  updated time, since homeservers keep a receipt only when it moves
-  forward (see "Room list"), so facts read from the store before the
-  receipt's echo do not move the room back. This makes action sequences
-  such as `["room.mark_read", <open the next unread room>]`
-  deterministic.
+  `last_read` when the room has something to read: a badge (the rule of
+  `unread`), or the event the receipt goes on (the timeline's newest
+  remote item, or for `room.mark_read` the room's latest event) newer than
+  its `last_read`. The receipt's echo brings the homeserver's time of
+  taking it (see "Room list"), not the event's, and that is no earlier
+  than any receipt it took before or any event time the room list holds
+  (remote clocks ahead of it aside; see "Risks"). So `last_read` goes up
+  to the later of the room's latest activity and 1 ms after the newest
+  news time (the `read` key's time; see "Room list") of any other room:
+  the room tops the read rooms at once, and the echo keeps it there. The
+  1 ms keeps it off a tie with the room read last, which the name order
+  would settle either way until the echo. A room with nothing to read
+  keeps its `last_read` and its place: its receipt goes on the event of
+  the user's receipt or an older one, which the homeserver ignores (see
+  "Room list"), so no echo comes. A room whose only news is an edit is
+  such a room when it is opened, since the timeline shows the edit in the
+  edited message's place, but not for `room.mark_read`, whose receipt goes
+  on the edit. Raising `last_read` to the latest activity alone, as first
+  designed, placed the room below the rooms read since its newest message
+  until the echo moved it to the top. A room other than the open one
+  moves in the room list when the sort keys depend on the counts or on
+  `last_read` (the open room already sorts as read; next item). The next
+  SDK update overwrites the counts, with the replies in threads after the
+  receipt counted again, but never lowers `last_read`: the room list
+  keeps the later of the stored and the updated time, since homeservers
+  keep a receipt only when it moves forward (see "Room list"), so facts
+  read from the store before the receipt's echo do not move the room
+  back. This makes action sequences such as
+  `["room.mark_read", <open the next unread room>]` deterministic.
 - The open room sorts as read: under the `mentions`, `notify` and `unread`
   sort keys the core places the open room as if it had no unread messages,
   notifications or mentions, so it never moves into or within those groups
   while it is open, and under `read` it counts as read up to its latest
   activity: its time is the later of its `last_read` and its latest
-  activity (added after 0.1.4), where its receipt's echo will put it. Once
-  another room is opened, or no room is open, it sorts by its counts and
-  `last_read`
-  again. Its badge and the `filter`s use its real counts, and `recent`
-  and `name` do not change. The reason: the SDK's counts can arrive after
-  the receipt went out (matrix-sdk 0.19.1 saves a room's counts before it
+  activity (added after 0.1.4), so it takes its place among the read rooms
+  as it opens, and its receipt, when it has something to read, lifts it to
+  their top (previous item). Once another room is opened, or no room is
+  open, it sorts by its counts and `last_read` again. Its badge and the
+  `filter`s use its real counts, and `recent` and `name` do not change.
+  The reason: the SDK's counts can arrive after the receipt went out
+  (matrix-sdk 0.19.1 saves a room's counts before it
   sends the timeline the same events, and the room list reads them on a
   task of its own), and until the next sync brings the receipt back they
   still count the events up to it, so the room being read would sit among
@@ -1042,12 +1060,14 @@ group, and moved the cursor with the room it opened.
   on the pane and the terminal has focus (see "Read receipts"). With
   `read`, the open room counts as read up to its latest activity (see
   "The open room sorts as read" in "Matrix adapter"), so a room with
-  something new takes its place among the read rooms as it opens, and
-  keeps it when the receipt's echo brings the new `last_read`. Opening a
-  room with nothing new leaves it in place: its `last_read` is already at
-  or after its latest activity, and homeservers keep a receipt only when
-  it moves forward (Synapse ignores a receipt whose event is at or before
-  the event of the user's receipt of that type and thread,
+  something new takes its place among the read rooms as it opens, goes to
+  their top as its receipt goes out (optimistic clearing), and keeps it
+  when the receipt's echo brings the new `last_read`, the homeserver's
+  time of taking the receipt, later than the receipts it took before.
+  Opening a room with nothing new leaves it in place: its `last_read` is
+  already at or after its latest activity, and homeservers keep a receipt
+  only when it moves forward (Synapse ignores a receipt whose event is at
+  or before the event of the user's receipt of that type and thread,
   `_insert_linearized_receipt_txn` in
   `synapse/storage/databases/main/receipts.py`), so no new `ts` comes back
   for a room already read, here or on another device. With `unread` or
@@ -3085,7 +3105,10 @@ many and the text line shows them.
     counting dim counts, a `filter = "notify"` binding skipping them); the
     `read` key's news time (unread rooms by their
     latest activity, the open room up to its latest activity, the
-    optimistic `last_read`, an update never lowering it); `pick =
+    optimistic `last_read` at the top of the read rooms for a room with
+    something to read, a badge or a receipt on a newer event, and
+    unchanged for one without, such as a room whose only news is an edit,
+    an update never lowering it); `pick =
     "first"` skipping the open room; the room list's cursor staying on its
     row when the open room moves because it was opened or read (an update
     that changes only its counts and `last_read`), and following its room
@@ -3537,7 +3560,19 @@ asking for the recovery key ("Startup").
   newer and moves the room to the edit's time, and an undecryptable
   newest message is passed over until it decrypts, so such a room can sit
   a little higher or lower in its group than its newest unread message
-  would put it.
+  would put it. Nothing lowers a `last_read` within a session, so an
+  optimistic raise (see "Optimistic clearing" in "Matrix adapter") that
+  no echo confirms keeps a room higher until mxt starts again: a room
+  marked unread with nothing new and read in mxt (the mark counts as
+  something to read, but the homeserver ignores the receipt), and the
+  rooms read in mxt while a remote event with an `origin_server_ts` ahead
+  of the homeserver's clock is some room's news time (they go past it, so
+  above the rooms read elsewhere until the clock passes it). A room whose
+  only news is an edit keeps its `last_read` and sits at the edit's time
+  only while open. Two rooms read in mxt before the first one's echo
+  comes can swap once: that echo, stamped by the homeserver's clock,
+  passes the second room's optimistic time until the second room's echo
+  comes.
 - **Registers in the editors** (owner work G). Only the black hole
   register `"_` exists; other register names are refused. edtui's `x`
   writes no register, unlike vim's, so `x` and `"_x` are the same,

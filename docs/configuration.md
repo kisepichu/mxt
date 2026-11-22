@@ -224,26 +224,34 @@ network = "below"
 | `"notify"` | rooms that notify you: unread mentions, bold counts and the manual unread mark, the rooms that `filter = "notify"` takes; not the rooms whose only news is a dim count, such as muted rooms and rooms set to mentions and keywords only |
 | `"unread"` | rooms with unread messages, the rooms that `filter = "unread"` takes: any badge |
 | `"recent"` | the latest activity, newest first; rooms without any last |
-| `"read"` | the rooms you read most recently, by your own latest read receipt in the room outside threads, sent from any device; rooms you never read last |
+| `"read"` | the latest news for you, newest first: a room with unread messages (any badge, as for `"unread"`) by the time of its newest message, any other room by your own latest read receipt in it outside threads, sent from any device; the room you have open counts as read up to its newest message; rooms you never read and with nothing unread last |
 | `"name"` | by the displayed name (`network / room`), ignoring case, which groups rooms by network |
 
 `sort = "mentions, unread, read"` lists the rooms with unread mentions
-first, then the other unread rooms, then the rest, each group by when you
-last read its rooms. With `"read"`, a room you open moves up when its newest
-message is newer than your last read receipt in it, once the homeserver
-sends the receipt back; opening a room with nothing new leaves it in place,
-since homeservers keep a read receipt only when it moves forward. With
-`"unread"`, `"notify"` or `"mentions"`, a room you read moves at once, and
-the room you have open sorts as read: it does not move into or within the
-unread rooms while it is open, though its badge counts new messages, and
-takes its place by its counts again once you open another room.
+first, then the other unread rooms, then the rest. In the two unread groups
+the room with the newest message comes first, so a room that gets a new
+message goes to the top of its group, and the read rooms are in the order
+you last read them. `"read"` alone orders the rooms by when each last had
+news for you or you last read it.
+
+The room you have open sorts as read. With `"unread"`, `"notify"` or
+`"mentions"` it does not move into or within the unread rooms while it is
+open, though its badge counts new messages. With `"read"` it counts as read
+up to its newest message, so a room with something new takes its place
+among the read rooms as you open it. Once you open another room, it sorts
+as any other room again. When you read a room with something new (its read
+receipt goes out, or `room.mark_read`), it goes to the top of the read rooms
+at once and stays there when the homeserver sends the receipt back. Opening
+a room with nothing new leaves it in place, since homeservers keep a read
+receipt only when it moves forward; a room whose only news is an edit of an
+older message goes to the time of the edit while open, and back afterwards.
 
 `sort = "mentions, notify, unread, read"` puts the rooms that notify you
 after the rooms with mentions and before the rooms whose only news is a dim
 count, such as busy bridged channels that are muted or set to mentions and
-keywords only. `"unread"`, `filter = "unread"` and the default `]u` and
-`[u` still count dim counts; with these bindings, `]u` and `[u` skip those
-rooms too:
+keywords only, each group newest message first. `"unread"`,
+`filter = "unread"` and the default `]u` and `[u` still count dim counts;
+with these bindings, `]u` and `[u` skip those rooms too:
 
 ```toml
 [account]

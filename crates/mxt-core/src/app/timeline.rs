@@ -390,7 +390,7 @@ impl App {
         self.timeline.receipt = Some(event.clone());
         let Some(open) = &mut self.thread else {
             self.timeline.read_up_to_at_least(time);
-            self.clear_room_unread(&room);
+            self.clear_room_unread(&room, Some(time));
             return effects.push(Effect::Matrix(MatrixEffect::SendReceipt { room, event }));
         };
         if open.main.unthreaded_thread_receipts.contains(&event) {
@@ -408,7 +408,7 @@ impl App {
             unthreaded,
         }));
         if unthreaded {
-            self.clear_room_unread(&room);
+            self.clear_room_unread(&room, Some(time));
         }
     }
 

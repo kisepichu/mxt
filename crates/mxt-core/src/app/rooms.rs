@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 
 use super::{App, Focus, Motion, StatusKind};
 use crate::effect::{Effect, MatrixEffect};
-use crate::ids::RoomId;
+use crate::ids::{RoomId, Timestamp};
 use crate::msg::Pane;
 use crate::room::{NotificationMode, RoomSummary};
 use crate::rooms::{RoomTarget, resolve_room};
@@ -32,10 +32,13 @@ impl App {
     }
 
     /// Optimistic clearing (design, "Matrix adapter"): the room's counts go
-    /// to zero at once, and the room moves when the sort keys depend on
-    /// them, the cursor staying on its room.
-    pub(super) fn clear_room_unread(&mut self, id: &RoomId) {
-        if let Some((old, new)) = self.rooms.clear_unread(id)
+    /// to zero at once and, when it has something to read, its `last_read`
+    /// to the top of the read rooms (`receipt_at` is the time of the event
+    /// the receipt goes on; see `RoomList::clear_unread`), and the room
+    /// moves when the sort keys depend on them, the cursor staying on its
+    /// room.
+    pub(super) fn clear_room_unread(&mut self, id: &RoomId, receipt_at: Option<Timestamp>) {
+        if let Some((old, new)) = self.rooms.clear_unread(id, receipt_at)
             && let Some(cursor) = self.room_cursor
         {
             self.room_cursor = Some(follow(cursor, Some(old), new));
@@ -104,11 +107,11 @@ impl App {
     /// Opens the room at `index` of the room list: unsubscribes the previous
     /// room, its thread first, subscribes the new one with a new timeline,
     /// and moves the cursor to it. Both rooms move when the sort keys depend
-    /// on their counts, since the open room sorts as read. An open room only
-    /// gets the focus. This is the one place where the open room becomes
-    /// another room, so a recorded switch puts the position before it into
-    /// the jump list whichever action or answer opens the room (design,
-    /// "Jump list").
+    /// on their counts, or under `read` on their `last_read` and latest
+    /// activity, since the open room sorts as read. An open room only gets
+    /// the focus. This is the one place where the open room becomes another
+    /// room, so a recorded switch puts the position before it into the jump
+    /// list whichever action or answer opens the room (design, "Jump list").
     pub(super) fn open_at(&mut self, index: usize, switch: RoomSwitch, effects: &mut Vec<Effect>) {
         let id = &self.rooms.rooms()[index].id;
         if self.open_room.as_ref() != Some(id) {
@@ -139,8 +142,9 @@ impl App {
     }
 
     /// `room.mark_read`. The room's counts are cleared at once (design,
-    /// "Optimistic clearing"), so a following action sees it read. On the
-    /// open room, the thread roots' marks go up to the room's latest
+    /// "Optimistic clearing"), so a following action sees it read; the
+    /// receipt goes on the room's latest event, at its latest activity. On
+    /// the open room, the thread roots' marks go up to the room's latest
     /// activity, the time of the latest event the receipt marks read.
     pub(super) fn mark_read(&mut self, effects: &mut Vec<Effect>) {
         let Some((id, latest)) = self
@@ -154,7 +158,7 @@ impl App {
         {
             self.main_timeline_mut().read_up_to_at_least(latest);
         }
-        self.clear_room_unread(&id);
+        self.clear_room_unread(&id, latest);
         effects.push(Effect::Matrix(MatrixEffect::MarkRoomRead(id)));
     }
 
