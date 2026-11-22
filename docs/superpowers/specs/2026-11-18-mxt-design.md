@@ -2511,15 +2511,21 @@ list, so mxt does not offer an event-level mention list.
     same previews in turn: once every target is kept or failed, the list is
     empty and an idle frame reports nothing new. The core keeps the latest
     list for the shown timeline as its queue and has at most 4
-    `MatrixEffect::FetchPreview { room, item }` in flight, starting the
-    next wanted item as each answer arrives, so an item scrolled away
-    before its turn is never fetched. A newer list leaves out the items in
-    flight, which the adapter does not know, so none is fetched twice.
-    The answers, `Msg::PreviewFetched { room, item, bytes }` and
-    `Msg::PreviewFailed { room, item }`, become `UiEffect::ShowPreview {
+    `MatrixEffect::FetchPreview { room, item }` in flight in all, whatever
+    room they are for, starting the next wanted item as each answer
+    arrives, so an item scrolled away before its turn is never fetched,
+    and switching rooms quickly never has more in flight. A newer list leaves
+    out the items in flight, which the adapter does not know, so none is
+    fetched twice. The answers, `Msg::PreviewFetched { room, item, bytes }`
+    and `Msg::PreviewFailed { room, item }`, become `UiEffect::ShowPreview {
     item, bytes }` and `UiEffect::PreviewFailed(item)` while `room` is the
-    open room; opening another room or losing the open one drops the
-    queue, and late answers for it are dropped. The adapter tries, in
+    open room. Showing another timeline (another room or thread, or no
+    room) drops the wanted list, but not the fetches in flight, which the
+    adapter does not cancel: an answer for a room that is no longer open
+    still frees its slot and starts the next fetch, and is dropped. The
+    adapter gives up a fetch after 60 s and answers `PreviewFailed`, since
+    the SDK downloads media without a timeout (`media.rs:818`) and a
+    stalled download would hold its slot for good. The adapter tries, in
     order: the event's thumbnail (`info.thumbnail_source`, plain or
     encrypted) unless its size is above 10 MiB; for an unencrypted file,
     the server's thumbnail, `MediaFormat::Thumbnail(
@@ -2528,9 +2534,11 @@ list, so mxt does not offer an event-level mention list.
     matrix-sdk `media.rs:859-888`),
     and the file when that request fails; for an encrypted file without a
     thumbnail, the file, decrypted, since the SDK ignores the format for
-    encrypted media (`media.rs:827-857`). Files above 10 MiB are not
-    fetched, and one without a size is refused after the download when it
-    is larger, as for the message view. 640 by 480 is one of the sizes
+    encrypted media (`media.rs:827-857`). A failing event thumbnail fails
+    the preview, without falling back to the file, and a thumbnail whose
+    info says it is above 10 MiB counts as absent. Files above 10 MiB are
+    not fetched, and one without a size is refused after the download
+    when it is larger, as for the message view. 640 by 480 is one of the sizes
     Synapse makes ahead of time by default (`DEFAULT_THUMBNAIL_SIZES` in
     `synapse/config/repository.py`), enough for 8 rows of 40-pixel cells.
     Every fetch goes through the SDK's media cache (`get_media_content`
@@ -3189,10 +3197,11 @@ at `debug` by the worker (see "Error handling").
     `gd` to a message in the main timeline from a thread and to a message
     in a thread through `FindThread`, with the answers that do not apply
   - owner work G: the timeline previews' queue (the wanted items fetched
-    at most 4 at a time, a newer list replacing the queue, answers for
-    another room dropped, the queue dropped on a room switch, local echoes
-    and other contents never fetched); `composer.normal` and an array of
-    `composer.send` and `composer.normal`; `composer.clear` and
+    at most 4 at a time across rooms, a newer list replacing the queue,
+    answers for another room dropped, the wanted list dropped on a room
+    switch while the fetches in flight keep their slots until answered,
+    local echoes and other contents never fetched); `composer.normal` and
+    an array of `composer.send` and `composer.normal`; `composer.clear` and
     `composer.delete_word_before` as effects on the shown composer; the
     command line and search histories (the filter by the text before the
     cursor, newest first, a repeat moved to the newest place, the 100-line

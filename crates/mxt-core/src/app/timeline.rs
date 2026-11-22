@@ -570,10 +570,10 @@ impl App {
     /// what belongs to the previous one: its open thread, which it
     /// unsubscribes, its viewport, which must not count for the new room's
     /// entries before the new room is drawn, the wait for a jump's message
-    /// and `gd`'s question, its previews' queue, whose late answers are
-    /// dropped, a message view (a help view stays), the picker, a
-    /// confirmation, and the focus and mention menu of its composer. Runs
-    /// while the previous room is still the open one.
+    /// and `gd`'s question, the previews it wants (those in flight keep
+    /// their slots until answered), a message view (a help view stays), the
+    /// picker, a confirmation, and the focus and mention menu of its
+    /// composer. Runs while the previous room is still the open one.
     pub(super) fn reset_timeline(&mut self, effects: &mut Vec<Effect>) {
         if let (Some(open), Some(room)) = (self.thread.take(), &self.open_room) {
             effects.push(Effect::Matrix(MatrixEffect::UnsubscribeThread {
@@ -585,7 +585,7 @@ impl App {
         self.timeline_viewport = None;
         self.jump_wait = None;
         self.reply_lookup = None;
-        self.previews = None;
+        self.drop_wanted_previews();
         if matches!(self.view, Some(View::Message(_))) {
             self.close_view(effects);
         }

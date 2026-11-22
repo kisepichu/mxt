@@ -217,9 +217,9 @@ pub struct App {
     /// paste, another room or the room's removal; an answer for anything
     /// else is ignored.
     reply_lookup: Option<(RoomId, EventId)>,
-    /// The open room's timeline previews being fetched, once the tui
-    /// adapter reported a wanted list; dropped with the open room.
-    previews: Option<PreviewQueue>,
+    /// The timeline previews being fetched: the shown timeline's wanted
+    /// list, and the fetches in flight, for any room.
+    previews: PreviewQueue,
 }
 
 impl App {
@@ -266,7 +266,7 @@ impl App {
             jumps: JumpList::default(),
             jump_wait: None,
             reply_lookup: None,
-            previews: None,
+            previews: PreviewQueue::default(),
             settings,
         }
     }

@@ -29,7 +29,7 @@ timeoutlen = 1000                                 # milliseconds
 room_list = { visible = true, sort = "recent", width = 30, network = "inline" }
 time_format = "%H:%M"                             # strftime, in the local time zone
 image_preview = "auto"                            # "auto" | "off" | "iterm2" | "sixel" | "kitty" | "halfblocks"
-timeline = { images = "off", image_rows = 8 }    # images: "off" | "on"; image_rows: 1 to 50
+timeline = { images = "off", image_rows = 8 }     # images: "off" | "on"; image_rows: 1 to 50
 read_receipts = "public"                          # "public" | "private"
 
 [files]

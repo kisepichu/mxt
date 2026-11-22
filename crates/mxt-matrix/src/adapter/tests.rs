@@ -68,7 +68,13 @@ struct Adapter {
 
 impl Adapter {
     async fn start() -> Adapter {
-        let mut adapter = Adapter::without_rooms().await;
+        Adapter::start_with(PREVIEW_TIMEOUT).await
+    }
+
+    /// `start`, with `preview_timeout` as the time a timeline preview's
+    /// fetch may take.
+    async fn start_with(preview_timeout: Duration) -> Adapter {
+        let mut adapter = Adapter::without_rooms_with(preview_timeout).await;
         let me = ruma::UserId::parse(ME).unwrap();
         let event = ruma::EventId::parse(SENT).unwrap();
         let message = EventFactory::new()
@@ -88,6 +94,12 @@ impl Adapter {
 
     /// The adapter of a client that knows no room yet.
     async fn without_rooms() -> Adapter {
+        Adapter::without_rooms_with(PREVIEW_TIMEOUT).await
+    }
+
+    /// `without_rooms`, with `preview_timeout` as the time a timeline
+    /// preview's fetch may take.
+    async fn without_rooms_with(preview_timeout: Duration) -> Adapter {
         let server = MatrixMockServer::new().await;
         let me = ruma::UserId::parse(ME).unwrap();
         let client = server
@@ -111,6 +123,7 @@ impl Adapter {
         let files = Files {
             download_dir: PathBuf::new(),
             home: PathBuf::new(),
+            preview_timeout,
         };
         let mut tasks = JoinSet::new();
         spawn_send_paths(

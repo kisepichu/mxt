@@ -1,7 +1,7 @@
 //! `FetchPreview` (design, "Images in the timeline"): the event's thumbnail
 //! first, plain or encrypted, then the server's thumbnail of a plain file
 //! and the file itself, the 10 MiB limit, stickers, and `PreviewFailed` for
-//! every failure.
+//! every failure and for a fetch that stalls.
 
 use std::io::Cursor;
 
@@ -25,6 +25,8 @@ use super::*;
 /// The authenticated media endpoints the SDK uses with Matrix 1.12.
 const DOWNLOAD: &str = "/_matrix/client/v1/media/download/";
 const THUMBNAIL: &str = "/_matrix/client/v1/media/thumbnail/";
+/// The 10 MiB limit.
+const LIMIT: u64 = 10 * 1024 * 1024;
 /// 11 MiB, above the 10 MiB limit.
 const TOO_LARGE: u64 = 11 * 1024 * 1024;
 
@@ -56,6 +58,14 @@ fn naming(requests: &[Request], media: &str) -> usize {
         .iter()
         .filter(|request| request.url.path().ends_with(&suffix))
         .count()
+}
+
+/// The server's answer with `status` for media it does not have.
+fn not_found(status: u16) -> ResponseTemplate {
+    ResponseTemplate::new(status).set_body_json(json!({
+        "errcode": "M_NOT_FOUND",
+        "error": "Not found",
+    }))
 }
 
 impl Adapter {
@@ -145,10 +155,7 @@ impl Adapter {
             .mock_authed_media_thumbnail(Method::Scale, 640, 480, false);
         let mock = match status {
             200 => thumbnail.ok(),
-            _ => thumbnail.respond_with(ResponseTemplate::new(status).set_body_json(json!({
-                "errcode": "M_NOT_FOUND",
-                "error": "Not found",
-            }))),
+            _ => thumbnail.respond_with(not_found(status)),
         };
         mock.expect(1).mount().await;
     }
@@ -303,6 +310,72 @@ async fn a_plain_image_above_ten_mib_without_a_thumbnail_asks_only_for_the_serve
 }
 
 #[tokio::test]
+async fn a_failing_event_thumbnail_fails_the_preview_without_the_file_or_the_server_s() {
+    let mut adapter = Adapter::start().await;
+    adapter
+        .server
+        .mock_authed_media_download()
+        .respond_with(not_found(404))
+        .expect(1)
+        .mount()
+        .await;
+    let thumbnail = Some(plain("thumbnail"));
+    let image = adapter
+        .image("photo", plain("photo"), info(Some(4096), thumbnail))
+        .await;
+
+    assert_eq!(adapter.preview(&image).await, None);
+    let downloads = adapter.requests(DOWNLOAD).await;
+    assert_eq!(naming(&downloads, "thumbnail"), 1, "{downloads:?}");
+    assert_eq!(naming(&downloads, "photo"), 0, "{downloads:?}");
+    assert!(adapter.requests(THUMBNAIL).await.is_empty());
+}
+
+#[tokio::test]
+async fn an_event_thumbnail_above_ten_mib_counts_as_absent() {
+    let mut adapter = Adapter::start().await;
+    adapter.mock_thumbnail(200).await;
+    adapter
+        .server
+        .mock_authed_media_download()
+        .ok_image()
+        .expect(0)
+        .mount()
+        .await;
+    let mut image_info = info(Some(4096), Some(plain("thumbnail")));
+    if let Some(thumbnail) = &mut image_info.thumbnail_info {
+        thumbnail.size = UInt::new(TOO_LARGE);
+    }
+    let image = adapter.image("photo", plain("photo"), image_info).await;
+
+    assert_eq!(
+        adapter.preview(&image).await.as_deref(),
+        Some(&b"binaryjpegthumbnaildata"[..])
+    );
+    assert_eq!(naming(&adapter.requests(THUMBNAIL).await, "photo"), 1);
+    assert!(adapter.requests(DOWNLOAD).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_plain_file_without_a_size_is_refused_when_its_bytes_are_above_ten_mib() {
+    let mut adapter = Adapter::start().await;
+    adapter.mock_thumbnail(404).await;
+    adapter
+        .server
+        .mock_authed_media_download()
+        .ok_bytes(vec![0; LIMIT as usize + 1])
+        .expect(1)
+        .mount()
+        .await;
+    let image = adapter
+        .image("photo", plain("photo"), info(None, None))
+        .await;
+
+    assert_eq!(adapter.preview(&image).await, None);
+    assert_eq!(naming(&adapter.requests(DOWNLOAD).await, "photo"), 1);
+}
+
+#[tokio::test]
 async fn a_sticker_s_source_is_fetched() {
     let mut adapter = Adapter::start().await;
     adapter.mock_thumbnail(200).await;
@@ -347,4 +420,27 @@ async fn a_text_message_or_a_room_that_is_not_open_answers_preview_failed() {
     ));
     assert!(adapter.requests(DOWNLOAD).await.is_empty());
     assert!(adapter.requests(THUMBNAIL).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_fetch_that_stalls_answers_preview_failed_after_the_timeout() {
+    let mut adapter = Adapter::start_with(Duration::from_millis(200)).await;
+    // Answered only after the test stops waiting for the adapter.
+    let stalled = ResponseTemplate::new(200)
+        .set_body_raw(b"thumbnail".to_vec(), "application/octet-stream")
+        .set_delay(WAIT * 2);
+    adapter
+        .server
+        .mock_authed_media_download()
+        .respond_with(stalled)
+        .expect(1)
+        .mount()
+        .await;
+    let thumbnail = Some(plain("thumbnail"));
+    let image = adapter
+        .image("photo", plain("photo"), info(Some(4096), thumbnail))
+        .await;
+
+    assert_eq!(adapter.preview(&image).await, None);
+    assert_eq!(naming(&adapter.requests(DOWNLOAD).await, "thumbnail"), 1);
 }
