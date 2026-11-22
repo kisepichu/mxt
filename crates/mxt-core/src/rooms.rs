@@ -363,8 +363,9 @@ impl RoomList {
     /// ignores a receipt that does not move forward, so no echo comes, when
     /// the user's newest receipt is the same kind of unthreaded receipt mxt
     /// sends; a room last read with another kind (Element's main-thread
-    /// receipts, the other receipt type) moves once its echo comes (design,
-    /// "Risks"). Returns the room's old and new index.
+    /// receipts, the other receipt type) moves once, when its echo comes,
+    /// if the user's receipt of mxt's kind is older (design, "Risks").
+    /// Returns the room's old and new index.
     pub fn clear_unread(
         &mut self,
         id: &RoomId,
@@ -1462,13 +1463,14 @@ mod tests {
     fn pick_without_a_current_room_in_the_list() {
         let l = three_unread();
         let id = |s: &str| Some(RoomId::new(s));
-        assert_eq!(
-            resolve_room(&l, None, &pick(RoomFilter::Unread, Pick::First)),
-            id("!c:example.org")
-        );
-        // A stale open room, for example after the room was removed.
+        // No open room, or a stale one, for example after the room was
+        // removed.
         let gone = RoomId::new("!gone:example.org");
         for current in [None, Some(&gone)] {
+            assert_eq!(
+                resolve_room(&l, current, &pick(RoomFilter::Unread, Pick::First)),
+                id("!c:example.org")
+            );
             assert_eq!(
                 resolve_room(&l, current, &pick(RoomFilter::Unread, Pick::Next)),
                 id("!c:example.org")

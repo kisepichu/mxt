@@ -470,10 +470,11 @@ covered by unit tests.
   the user's receipt or an older one, which the homeserver ignores (see
   "Room list"), so no echo comes, when the user's newest receipt is the
   same kind of unthreaded receipt mxt sends (the configured type, no
-  `thread_id`); a room last read with another kind moves once (see
-  "Risks"). A room whose only news is an edit is such a room when it is
-  opened, since the timeline shows the edit in the edited message's
-  place, but not for `room.mark_read`, whose receipt goes on the edit.
+  `thread_id`); a room last read with another kind moves once when the
+  user's receipt of mxt's kind is older (see "Risks"). A room whose only
+  news is an edit is such a room when it is opened, since the timeline
+  shows the edit in the edited message's place, but not for
+  `room.mark_read`, whose receipt goes on the edit.
   Raising `last_read` to the latest activity alone, as first designed,
   placed the room below the rooms read since its newest message until the
   echo moved it to the top. A room other than the open one
@@ -1076,10 +1077,10 @@ group, and moved the cursor with the room it opened.
   for a room already read, here or on another device that sends the same
   kind of unthreaded receipt (the configured type, no `thread_id`). A room
   last read by a client that sends main-thread receipts (Element) or the
-  other type moves once (see "Risks"). With `unread` or
-  `mentions` the room moves among the rooms without unread messages when
-  it is opened, since the open room sorts as read. The user documentation
-  says so.
+  other type moves once when the user's receipt of mxt's kind is older
+  (see "Risks"). With `unread` or `mentions` the room moves among the
+  rooms without unread messages when it is opened, since the open room
+  sorts as read. The user documentation says so.
 
 The list is `ui.room_list.width` columns wide, its border included (30 by
 default). Terminals narrower than 90 columns give it a third of their width
@@ -1252,16 +1253,20 @@ query is matched against shortcodes and names.
 
 `]u` opens the topmost unread room in the room list's order other than
 the open one (`pick = "first"`, which skips the open room; changed after
-0.1.4 from `pick = "next"`, the next unread room after the open one, which
-in a list sorted by unread state was often far down, while a room with a
-new mention at the top waited). `[u` opens the previous unread room,
+0.1.4 from `pick = "next"`, the next unread room after the open one,
+which, under sorts where the open room keeps its place (`recent`, `read`
+alone, `name`), was often far down, while a room with a new mention at
+the top waited; under sorts that start with `mentions`, `notify` or
+`unread` the open room sorts as read, below the unread rooms, so `next`
+already wrapped to the topmost one). `[u` opens the previous unread room,
 wrapping around (`pick = "prev"`). Both count every badge, dim counts
 included; a binding with `filter = "notify"` skips the rooms whose only
 news is a dim count (see "Room list"). A room opened but not read (the
-terminal has no focus, or `]u` comes again before the timeline is drawn)
-stays unread: the next `]u` skips it while it is open, and once that
-`]u` has opened another room it is among the unread rooms again, so
-repeated `]u` alternates between the two topmost unread rooms.
+terminal has no focus, or `]u` comes again before the timeline is drawn),
+or whose only unread messages are replies in threads that were not shown
+(see "Threads"), stays unread: the next `]u` skips it while it is open,
+and once that `]u` has opened another room it is among the unread rooms
+again, so repeated `]u` alternates between the two topmost unread rooms.
 `room.mark_read` has no default binding; the
 configuration example binds it to `<leader>x` together with opening the
 next unread room.

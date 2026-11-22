@@ -148,10 +148,11 @@ As in nvim, ctrl can stay held for the key after `<C-w>`.
 `filter = "notify"`, they skip the rooms whose only news is a dim count
 (see [Sort keys](configuration.md#sort-keys)). A room you open but have
 not read yet (the terminal has no focus, or you press `]u` again before
-its timeline is drawn) is still unread: `]u` skips it while it is open,
-and once `]u` has opened another room it is among the unread rooms again,
-so `]u` pressed again goes back and forth between the two topmost unread
-rooms.
+its timeline is drawn), or whose only unread messages are replies in
+threads you have not shown, is still unread: `]u` skips it while it is
+open, and once `]u` has opened another room it is among the unread rooms
+again, so `]u` pressed again goes back and forth between the two topmost
+unread rooms.
 
 ### `room_list` and `timeline`
 
