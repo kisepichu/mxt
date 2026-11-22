@@ -97,6 +97,13 @@ fn order(app: &App) -> Vec<&str> {
         .map(|room| room.id.as_str())
         .collect()
 }
+/// `summary` with the user's own latest read receipt at `at`.
+fn read_at(summary: RoomSummary, at: u64) -> RoomSummary {
+    RoomSummary {
+        last_read: Some(Timestamp::from_millis(at)),
+        ..summary
+    }
+}
 
 #[test]
 fn the_room_picker_lists_rooms_in_order_with_badges_and_ranks_by_name() {
@@ -413,4 +420,34 @@ fn the_open_room_moves_among_the_read_rooms_with_the_cursor_and_u_follows() {
         no_timers(keys(&mut app, "]u")),
         vec![unsubscribe(A), subscribe(D)]
     );
+}
+
+#[test]
+fn under_read_a_room_marked_read_goes_to_the_top_of_the_read_rooms_at_once() {
+    let mark = Binding::single(Action::RoomMarkRead);
+    let settings = Settings {
+        room_sort: RoomSort::new(vec![SortKey::Mentions, SortKey::Unread, SortKey::Read]).unwrap(),
+        ..Settings::default()
+    };
+    let mut app = app_in(settings, vec![(TableId::Normal, seq("<Space>r"), mark)]);
+    // !a got a message after a long silence; !d and !b are read.
+    for summary in [
+        read_at(room(A, 50, 1), 5),
+        read_at(room(B, 20, 0), 20),
+        read_at(room(C, 30, 2), 25),
+        read_at(room(D, 40, 0), 40),
+    ] {
+        app.update(Msg::RoomUpserted(summary));
+    }
+    assert_eq!(order(&app), [A, C, D, B]);
+    // From the room list, its cursor on !a.
+    assert_eq!(
+        no_timers(keys(&mut app, "<Space>r")),
+        vec![Effect::Matrix(MatrixEffect::MarkRoomRead(id(A)))]
+    );
+    assert_eq!(order(&app), [C, A, D, B]);
+    // Facts read before the receipt's echo, with the old receipt, leave it
+    // there.
+    app.update(Msg::RoomUpserted(read_at(room(A, 50, 0), 5)));
+    assert_eq!(order(&app), [C, A, D, B]);
 }

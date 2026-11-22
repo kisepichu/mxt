@@ -32,8 +32,9 @@ impl App {
     }
 
     /// Optimistic clearing (design, "Matrix adapter"): the room's counts go
-    /// to zero at once, and the room moves when the sort keys depend on
-    /// them, the cursor staying on its room.
+    /// to zero and its `last_read` up to its latest activity at once, and the
+    /// room moves when the sort keys depend on them, the cursor staying on
+    /// its room.
     pub(super) fn clear_room_unread(&mut self, id: &RoomId) {
         if let Some((old, new)) = self.rooms.clear_unread(id)
             && let Some(cursor) = self.room_cursor
@@ -104,11 +105,11 @@ impl App {
     /// Opens the room at `index` of the room list: unsubscribes the previous
     /// room, its thread first, subscribes the new one with a new timeline,
     /// and moves the cursor to it. Both rooms move when the sort keys depend
-    /// on their counts, since the open room sorts as read. An open room only
-    /// gets the focus. This is the one place where the open room becomes
-    /// another room, so a recorded switch puts the position before it into
-    /// the jump list whichever action or answer opens the room (design,
-    /// "Jump list").
+    /// on their counts or `last_read`, since the open room sorts as read. An
+    /// open room only gets the focus. This is the one place where the open
+    /// room becomes another room, so a recorded switch puts the position
+    /// before it into the jump list whichever action or answer opens the room
+    /// (design, "Jump list").
     pub(super) fn open_at(&mut self, index: usize, switch: RoomSwitch, effects: &mut Vec<Effect>) {
         let id = &self.rooms.rooms()[index].id;
         if self.open_room.as_ref() != Some(id) {

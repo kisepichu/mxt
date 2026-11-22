@@ -4,7 +4,7 @@
 use std::cmp::Ordering;
 
 use crate::fuzzy;
-use crate::ids::RoomId;
+use crate::ids::{RoomId, Timestamp};
 use crate::room::{RoomName, RoomSummary, UnreadCounts};
 
 /// One key of the room list's order (design, "Room list"). Each decides
@@ -22,8 +22,9 @@ pub enum SortKey {
     Unread,
     /// Latest activity, newest first; rooms without activity last.
     Recent,
-    /// The user's own latest read receipt, newest first; rooms never read
-    /// last.
+    /// The latest news for you, newest first: an unread room by the time of
+    /// its newest message, any other room by the user's own latest read
+    /// receipt (see `news_time`); rooms without such a time last.
     Read,
     /// Case-insensitive by the full displayed name (`network / room`), which
     /// groups rooms by network.
@@ -57,7 +58,8 @@ impl SortKey {
     /// before `true`, so comparing `b` with `a` puts the newest time and the
     /// rooms with something unread first, and rooms without a time last.
     /// The room `open` has nothing unread for `Mentions`, `Notify` and
-    /// `Unread` (design, "The open room sorts as read").
+    /// `Unread`, and counts as read up to its latest activity for `Read`
+    /// (design, "The open room sorts as read").
     fn compare(self, a: &RoomSummary, b: &RoomSummary, open: Option<&RoomId>) -> Ordering {
         let has = |room: &RoomSummary, filter: RoomFilter| {
             open != Some(&room.id) && filter.matches(&room.unread)
@@ -67,9 +69,25 @@ impl SortKey {
             SortKey::Notify => has(b, RoomFilter::Notify).cmp(&has(a, RoomFilter::Notify)),
             SortKey::Unread => has(b, RoomFilter::Unread).cmp(&has(a, RoomFilter::Unread)),
             SortKey::Recent => b.latest_activity.cmp(&a.latest_activity),
-            SortKey::Read => b.last_read.cmp(&a.last_read),
+            SortKey::Read => news_time(b, open).cmp(&news_time(a, open)),
             SortKey::Name => lowercase(&a.name).cmp(lowercase(&b.name)),
         }
+    }
+}
+
+/// A room's time under `SortKey::Read` (design, "Room list"): for a room
+/// unread by the rule of `RoomFilter::Unread` (any badge), its latest
+/// activity, the time of its newest message, or its `last_read` when it has
+/// none; for any other room its `last_read`. The open room sorts as read: the
+/// later of its `last_read` and its latest activity, where its receipt's echo
+/// will put it.
+fn news_time(room: &RoomSummary, open: Option<&RoomId>) -> Option<Timestamp> {
+    if open == Some(&room.id) {
+        room.last_read.max(room.latest_activity)
+    } else if RoomFilter::Unread.matches(&room.unread) {
+        room.latest_activity.or(room.last_read)
+    } else {
+        room.last_read
     }
 }
 
@@ -229,9 +247,16 @@ impl RoomList {
     }
 
     /// Inserts or replaces the room with the same id and restores the order.
-    /// Returns the room's old index (`None` for a new room) and its new index.
-    pub fn upsert(&mut self, summary: RoomSummary) -> (Option<usize>, usize) {
-        let old = self.take(&summary.id).map(|(index, _)| index);
+    /// A replaced room keeps the later of its stored and its updated
+    /// `last_read`: receipts only move forward, so facts read before a
+    /// receipt's echo do not move the room back (design, "Optimistic
+    /// clearing"). Returns the room's old index (`None` for a new room) and
+    /// its new index.
+    pub fn upsert(&mut self, mut summary: RoomSummary) -> (Option<usize>, usize) {
+        let old = self.take(&summary.id).map(|(index, stored)| {
+            summary.last_read = summary.last_read.max(stored.last_read);
+            index
+        });
         (old, self.insert(summary))
     }
 
@@ -258,8 +283,11 @@ impl RoomList {
         self.take(id)
     }
 
-    /// Makes `id` the open room, which sorts as read, and places it and the
-    /// previously open room again. Returns `id`'s new index.
+    /// Makes `id` the open room and places it and the previously open room
+    /// again. The open room sorts as read (design, "The open room sorts as
+    /// read"): nothing unread for the `mentions`, `notify` and `unread` keys,
+    /// and read up to its latest activity for `read`. Returns `id`'s new
+    /// index.
     pub fn open(&mut self, id: &RoomId) -> Option<usize> {
         // Both rooms out first: the others keep their order with either
         // room open.
@@ -295,11 +323,14 @@ impl RoomList {
     }
 
     /// Optimistic clearing: sets the room's counts to zero (and `marked` to
-    /// false) and places the room again, since the `mentions`, `notify` and
-    /// `unread` keys depend on them. Returns the room's old and new index.
+    /// false) and raises its `last_read` to its latest activity, where the
+    /// receipt goes, and places the room again, since the `mentions`,
+    /// `notify`, `unread` and `read` keys depend on them. Returns the room's
+    /// old and new index.
     pub fn clear_unread(&mut self, id: &RoomId) -> Option<(usize, usize)> {
         let (old, mut room) = self.take(id)?;
         room.unread = UnreadCounts::default();
+        room.last_read = room.last_read.max(room.latest_activity);
         Some((old, self.insert(room)))
     }
 }
@@ -776,6 +807,219 @@ mod tests {
     }
 
     #[test]
+    fn read_orders_unread_rooms_by_their_newest_message_and_the_others_by_the_last_read() {
+        let rooms = vec![
+            read_at(
+                room("!a:example.org", None, "a", Some(30), unread(0)),
+                Some(30),
+            ),
+            // Unread since 40, read long before.
+            read_at(
+                room("!b:example.org", None, "b", Some(40), unread(2)),
+                Some(10),
+            ),
+            read_at(
+                room("!c:example.org", None, "c", Some(50), unread(0)),
+                Some(50),
+            ),
+            // Unread without a latest activity: by its last read.
+            read_at(room("!d:example.org", None, "d", None, unread(1)), Some(20)),
+            // Never read and nothing unread: last, whatever its activity.
+            read_at(room("!e:example.org", None, "e", Some(60), unread(0)), None),
+        ];
+        assert_eq!(
+            order(&[SortKey::Read], rooms),
+            [
+                "!c:example.org",
+                "!b:example.org",
+                "!a:example.org",
+                "!d:example.org",
+                "!e:example.org"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_room_that_gets_a_new_message_goes_to_the_top_of_its_unread_group() {
+        // The unread rooms by newest message are !c, !d, !b; by last read
+        // they would be !c, !b, !d.
+        let mut l = list(
+            RoomSort::new(vec![SortKey::Mentions, SortKey::Unread, SortKey::Read]).unwrap(),
+            vec![
+                read_at(
+                    room("!a:example.org", None, "a", Some(10), mentions(1)),
+                    Some(5),
+                ),
+                read_at(
+                    room("!b:example.org", None, "b", Some(20), unread(2)),
+                    Some(3),
+                ),
+                read_at(
+                    room("!c:example.org", None, "c", Some(40), unread(1)),
+                    Some(30),
+                ),
+                read_at(
+                    room("!d:example.org", None, "d", Some(30), unread(4)),
+                    Some(1),
+                ),
+                read_at(
+                    room("!e:example.org", None, "e", Some(25), unread(0)),
+                    Some(25),
+                ),
+                read_at(
+                    room("!f:example.org", None, "f", Some(15), unread(0)),
+                    Some(15),
+                ),
+            ],
+        );
+        assert_eq!(
+            ids(&l),
+            [
+                "!a:example.org",
+                "!c:example.org",
+                "!d:example.org",
+                "!b:example.org",
+                "!e:example.org",
+                "!f:example.org"
+            ]
+        );
+        // A new message in !f, which you read before the others.
+        let news = read_at(
+            room("!f:example.org", None, "f", Some(60), unread(1)),
+            Some(15),
+        );
+        assert_eq!(l.upsert(news), (Some(5), 1));
+        assert_eq!(
+            ids(&l),
+            [
+                "!a:example.org",
+                "!f:example.org",
+                "!c:example.org",
+                "!d:example.org",
+                "!b:example.org",
+                "!e:example.org"
+            ]
+        );
+    }
+
+    #[test]
+    fn under_notify_a_room_that_gets_a_new_message_goes_to_the_top_of_its_group() {
+        let mut rooms = notify_rooms();
+        rooms.push(read_at(
+            room("!f:example.org", None, "f", Some(5), unread(0)),
+            Some(5),
+        ));
+        rooms.push(read_at(
+            room("!g:example.org", None, "g", Some(8), unread(0)),
+            Some(8),
+        ));
+        let mut l = list(notify_first(), rooms);
+        assert_eq!(
+            ids(&l),
+            [
+                "!a:example.org",
+                "!c:example.org",
+                "!b:example.org",
+                "!d:example.org",
+                "!e:example.org",
+                "!g:example.org",
+                "!f:example.org"
+            ]
+        );
+        // A message that notifies: the top of the rooms that notify.
+        let notifying = UnreadCounts {
+            messages: 1,
+            notifications: 1,
+            ..UnreadCounts::default()
+        };
+        let news = read_at(
+            room("!f:example.org", None, "f", Some(70), notifying),
+            Some(5),
+        );
+        assert_eq!(l.upsert(news), (Some(6), 1));
+        // A message with a dim count: the top of the rooms with only one.
+        let news = read_at(
+            room("!g:example.org", None, "g", Some(80), unread(1)),
+            Some(8),
+        );
+        assert_eq!(l.upsert(news), (Some(6), 4));
+        assert_eq!(
+            ids(&l),
+            [
+                "!a:example.org",
+                "!f:example.org",
+                "!c:example.org",
+                "!b:example.org",
+                "!g:example.org",
+                "!d:example.org",
+                "!e:example.org"
+            ]
+        );
+    }
+
+    #[test]
+    fn under_read_the_open_room_counts_as_read_up_to_its_latest_activity() {
+        let marked = UnreadCounts {
+            marked: true,
+            ..UnreadCounts::default()
+        };
+        let mut l = list(
+            RoomSort::one(SortKey::Read),
+            vec![
+                read_at(
+                    room("!a:example.org", None, "a", Some(30), unread(0)),
+                    Some(30),
+                ),
+                // Nothing unread, with activity after the last receipt.
+                read_at(
+                    room("!b:example.org", None, "b", Some(45), unread(0)),
+                    Some(10),
+                ),
+                // Marked unread after it was read.
+                read_at(
+                    room("!c:example.org", None, "c", Some(20), marked),
+                    Some(50),
+                ),
+                read_at(
+                    room("!d:example.org", None, "d", Some(40), unread(0)),
+                    Some(40),
+                ),
+            ],
+        );
+        assert_eq!(
+            ids(&l),
+            [
+                "!d:example.org",
+                "!a:example.org",
+                "!c:example.org",
+                "!b:example.org"
+            ]
+        );
+        // By its latest activity, later than its last read.
+        assert_eq!(l.open(&RoomId::new("!b:example.org")), Some(0));
+        assert_eq!(
+            ids(&l),
+            [
+                "!b:example.org",
+                "!d:example.org",
+                "!a:example.org",
+                "!c:example.org"
+            ]
+        );
+        // By its last read, later than its latest activity; !b goes back.
+        assert_eq!(l.open(&RoomId::new("!c:example.org")), Some(0));
+        assert_eq!(
+            ids(&l),
+            [
+                "!c:example.org",
+                "!d:example.org",
+                "!a:example.org",
+                "!b:example.org"
+            ]
+        );
+    }
+
+    #[test]
     fn rooms_every_key_leaves_tied_go_by_name_then_by_room_id() {
         let rooms = vec![
             room("!z:example.org", None, "Same", Some(40), unread(1)),
@@ -844,6 +1088,46 @@ mod tests {
     }
 
     #[test]
+    fn clear_unread_reads_the_room_up_to_its_latest_activity() {
+        let mut l = list(
+            RoomSort::new(vec![SortKey::Unread, SortKey::Read]).unwrap(),
+            vec![
+                read_at(
+                    room("!a:example.org", None, "a", Some(50), unread(1)),
+                    Some(5),
+                ),
+                read_at(
+                    room("!b:example.org", None, "b", Some(30), unread(2)),
+                    Some(20),
+                ),
+                read_at(
+                    room("!c:example.org", None, "c", Some(40), unread(0)),
+                    Some(40),
+                ),
+                read_at(
+                    room("!d:example.org", None, "d", Some(20), unread(0)),
+                    Some(20),
+                ),
+            ],
+        );
+        let a = RoomId::new("!a:example.org");
+        assert_eq!(l.clear_unread(&a), Some((0, 1)));
+        assert_eq!(
+            ids(&l),
+            [
+                "!b:example.org",
+                "!a:example.org",
+                "!c:example.org",
+                "!d:example.org"
+            ]
+        );
+        assert_eq!(
+            l.get(&a).unwrap().last_read,
+            Some(Timestamp::from_millis(50))
+        );
+    }
+
+    #[test]
     fn upsert_replaces_and_reorders() {
         let mut l = list(
             recent(),
@@ -863,6 +1147,47 @@ mod tests {
             ids(&l),
             ["!a:example.org", "!c:example.org", "!b:example.org"]
         );
+    }
+
+    #[test]
+    fn upsert_never_lowers_the_last_read() {
+        let mut l = list(
+            RoomSort::one(SortKey::Read),
+            vec![
+                read_at(
+                    room("!a:example.org", None, "a", Some(10), unread(0)),
+                    Some(30),
+                ),
+                read_at(
+                    room("!b:example.org", None, "b", Some(20), unread(0)),
+                    Some(20),
+                ),
+            ],
+        );
+        let a = RoomId::new("!a:example.org");
+        // Facts read before the receipt's echo: an older receipt, or none.
+        for stale in [Some(5), None] {
+            let update = read_at(
+                room("!a:example.org", None, "a", Some(10), unread(0)),
+                stale,
+            );
+            assert_eq!(l.upsert(update), (Some(0), 0));
+            assert_eq!(
+                l.get(&a).unwrap().last_read,
+                Some(Timestamp::from_millis(30))
+            );
+        }
+        // A newer receipt replaces the stored one.
+        let update = read_at(
+            room("!b:example.org", None, "b", Some(20), unread(0)),
+            Some(40),
+        );
+        assert_eq!(l.upsert(update), (Some(1), 0));
+        assert_eq!(
+            l.get(&RoomId::new("!b:example.org")).unwrap().last_read,
+            Some(Timestamp::from_millis(40))
+        );
+        assert_eq!(ids(&l), ["!b:example.org", "!a:example.org"]);
     }
 
     #[test]
