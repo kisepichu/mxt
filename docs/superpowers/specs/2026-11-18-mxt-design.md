@@ -3426,11 +3426,10 @@ lighter.
   reachable: every fork commit mxt pins is tagged `mxt-<short hash>` in the
   fork, and neither the tags nor the `mxt` branch are rewritten (the branch
   takes fork changes as new commits or merge commits on top), so earlier
-  mxt commits still
-  build. `cargo deny check sources` allows only crates.io and that
-  repository, and requires a git dependency to name a commit. Native inputs
-  follow the SDK's needs (nixpkgs' iamb package, also built on
-  matrix-rust-sdk, needs `sqlite`, `aws-lc` and `pkg-config`).
+  mxt commits still build. `cargo deny check sources` allows only crates.io
+  and that repository, and requires a git dependency to name a commit.
+  Native inputs follow the SDK's needs (nixpkgs' iamb package, also built
+  on matrix-rust-sdk, needs `sqlite`, `aws-lc` and `pkg-config`).
 - `devShells.default`: the toolchain listed above.
 - `checks.package`: the package build.
 
@@ -3609,16 +3608,16 @@ asking for the recovery key ("Startup").
   character or a line selection from where the selection started (a `V`
   selection keeps the cursor's column for that), the cursor staying, as in
   vim; `v` in a character selection and `V` in a line selection keep it,
-  where vim leaves visual mode. Still needing
-  edtui patches, or accepted for the first release: `x`, `r`, `a`,
-  insert-mode arrows and visual selections that work on single characters
-  inside a cluster, `e` stopping on the last character of a cluster (the
-  variation selector of `❤️`, drawn on the emoji's cell), edtui's `df`,
-  `dt`, `cf` and `ct`, which work on single characters and can split a
-  cluster (`df👍` leaves the skin tone), `df<Tab>`, which cancels where
-  `f<Tab>` finds a tab, operators with `F`, `T`, `;` and `,`, `a` text
-  objects and `yi`, a linewise `p` on the last line, `.` repeating `r`, and
-  `r` in visual mode.
+  where vim leaves visual mode. Still needing edtui patches, or accepted
+  for the first release: `x`, `r`, `a`, insert-mode arrows and visual
+  selections that work on single characters inside a cluster, `e` stopping
+  on the last character of a cluster (the variation selector of `❤️`, drawn
+  on the emoji's cell), edtui's `df`, `dt`, `cf` and `ct`, which work on
+  single characters and can split a cluster (`df👍` leaves the skin tone),
+  `df<Tab>`, which cancels where `f<Tab>` finds a tab, operators with `F`,
+  `T`, `;` and `,`, `a` text objects and `yi`, a linewise `p` on the last
+  line, `.` repeating `r`, `r` in visual mode, and a visual text object
+  selecting without moving the cursor (vim moves it to the object's end).
   Registers: edtui has one register, which mxt shares with timeline
   yanks and the terminal clipboard; mxt adds `"_` for one command (see
   "Input routing"), refuses other register names, and edtui's `x` writes

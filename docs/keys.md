@@ -643,4 +643,7 @@ supported: `"a`, `"+` and the like do nothing, and the status line says so.
   `composer.clear` deleted; `u` after `composer.clear`, or after `<BS>`,
   `<C-w>` or `<A-BS>` at the end of a line, puts the normal-mode cursor one
   column past the line's last character, so `h` then goes to the
-  second-to-last; `r` in visual mode.
+  second-to-last; `r` in visual mode; a visual text object (`iw`, `iW`,
+  `i(` …) selects without moving the cursor, so a motion after it, or `V`
+  then `v`, measures from where the cursor was (vim moves it to the
+  object's end).
