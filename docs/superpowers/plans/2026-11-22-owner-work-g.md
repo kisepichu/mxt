@@ -10,11 +10,10 @@ in the timeline, off by default, at most `image_rows` rows tall. G2:
 composer's first and last line. G6: deleting the word before the cursor in
 insert mode (`<C-w>`, `<A-BS>`). G7 to G10, the room list with
 `sort = "mentions, unread, read"`: the cursor stays on its row when the
-open room moves (G7), `]u` opens the topmost unread room (G8), a `notify`
-sort key puts the rooms that notify before those whose only news is a dim
-count (G9, option (a); the supervisor's choice among three options is
-pending, see Task G9), and `read` orders unread rooms by their newest
-message (G10). G11: search highlighting in the timeline, with `:noh`.
+open room moves (G7), `]u` opens the topmost unread room (G8), a new sort
+key `notify` puts the rooms that notify before those whose only news is
+a dim count (G9), and `read` orders unread rooms by their newest message
+(G10). G11: search highlighting in the timeline, with `:noh`.
 
 **Architecture:** G1 is two tasks. Task G1b (slot b) is the tui adapter's
 part: the reserved rows, a worker thread that decodes and encodes
@@ -29,8 +28,8 @@ and `mxt-tui`; G3 adds a per-editor flag on the register handle and a
 status message from the editor; G4 keeps the histories in the core and
 adds `Effect::Store`, which the binary executes with a writer task and the
 file `$XDG_STATE_HOME/mxt/history`. G7 to G10 change `mxt-core::rooms` and
-`app/rooms.rs` (G9 under option (a) also the loader's tests in `mxt`).
-G11 adds `mxt-core::search` (one matcher for the
+`app/rooms.rs` (G9 also the loader's test in `mxt`, whose warning lists
+the keys). G11 adds `mxt-core::search` (one matcher for the
 search and its highlight) and draws matches in the timeline and the
 message view.
 
@@ -58,7 +57,8 @@ for tests.
   G4 "Line editing" (the history), "Functional core" (`Effect::Store`),
   "Storage", "Error handling", "Logging"; G7 to G10 "Room list", "Matrix
   adapter" (optimistic clearing, the open room sorting as read), "Action
-  registry" (`filter`, `pick`), "Default keymap" (`]u`), "Goals"; G11
+  registry" (`filter`, `pick`), "Default keymap" (`]u`), and for G9
+  "Configuration" (the example) and "Layers" (the warning's names); G11
   "Search and jumps", "Commands", "Help views"; every task "Action
   registry", "Testing" and "Risks" where it is named.
 - Library behaviour is checked in the registry sources
@@ -93,16 +93,15 @@ for tests.
   (owner work F: a `### Changed` line that says how to keep a binding of
   `t`, not `**Breaking:**`). So their lines are `### Changed` lines that
   say what changed and, where there is a way, how to get the old
-  behaviour. G9 under option (a) adds a sort key (`### Added`); under (b)
-  or (c) it narrows `filter = "unread"` and the `unread` key, a
-  `### Changed` line by the same precedent. The supervisor decided this
-  on 2026-11-22: the next release is a patch, 0.1.5.
+  behaviour. G9 adds a sort key and changes nothing existing: an
+  `### Added` line. The supervisor decided this on 2026-11-22: the next
+  release is a patch, 0.1.5.
 
 ## Order and slots
 
 ```mermaid
 flowchart LR
-  G4["G4 history (a)"] --> G9["G9 notify key, option a (a)"] --> G10["G10 read key (a)"] --> G8["G8 ]u (a)"] --> G7["G7 cursor (a)"] --> G1a["G1a previews: fetch, config (a)"]
+  G4["G4 history (a)"] --> G9["G9 notify key (a)"] --> G10["G10 read key (a)"] --> G8["G8 ]u (a)"] --> G7["G7 cursor (a)"] --> G1a["G1a previews: fetch, config (a)"]
   G1b["G1b previews: tui (b)"] --> G2["G2 composer.normal (b)"] --> G6["G6 word delete (b)"] --> G5["G5 Up/Down (b)"] --> G3["G3 black hole, clear (b)"] --> G11["G11 search highlight (b)"]
   G1b --> G1a
   G1a --> G11
@@ -111,7 +110,7 @@ flowchart LR
 | Task | Slot | Crates | Runs in parallel with |
 |---|---|---|---|
 | G4: command line history | a | `mxt-core`, `mxt` | G1b, G2 |
-| G9: the `notify` sort key (option (a)) | a | `mxt-core`, `mxt` (tests only); (b) or (c): `mxt-core` | G1b, G2, G6 |
+| G9: the `notify` sort key | a | `mxt-core`, `mxt` (a test only) | G1b, G2 |
 | G10: the `read` key | a | `mxt-core` | G2, G6 |
 | G8: `]u` and `pick = "first"` | a | `mxt-core` | G6, G5 |
 | G7: the room list cursor | a | `mxt-core` | G5, G3 |
@@ -123,12 +122,11 @@ flowchart LR
 | G3: black hole register, `composer.clear` | b | `mxt-core`, `mxt-tui` | G7, G1a |
 | G11: search highlighting | b | `mxt-core`, `mxt-tui` | nothing of this plan |
 
-- Slot a starts with G4: it is decided and independent of the room list
-  items. The room list items follow once the supervisor has chosen G9's
-  option (Task G9): G9, then G10 (its news time asks G9's notion of
-  unread, and its tests use the owner's sort), then G8 (both change
-  `rooms.rs`; under (b) or (c) `resolve_room` uses G9's
-  `RoomFilter::matches`), then G7 (its tests use G8's `]u`). Then G1a,
+- Slot a starts with G4, as the supervisor ordered it while G9 was open:
+  it is independent of the room list items. G9 is decided (the `notify`
+  key) and small, so the room list items follow at once: G9, then G10
+  (its tests use the owner's sort with `notify`), then G8 (both change
+  `rooms.rs`), then G7 (its tests use G8's `]u`). Then G1a,
   which starts once G1b is merged. Slot b runs G1b first, since G1a waits
   for it, then G2, G6 (after G2: both add `composer.insert` defaults to
   `keymap.rs` and the same table of `docs/keys.md`), G5, G3 (after G5:
@@ -142,16 +140,15 @@ flowchart LR
   (`Msg`) and the tui (`UiEffect`); `MatrixEffect::FetchPreview`, which
   `mxt-matrix` matches exhaustively, waits for G1a. G1a needs slot a
   (`mxt-matrix`, `mxt`). G4 needs slot a: `Effect` gains `Store`, which
-  the binary's event loop matches, and the file is `mxt`'s. G9 under
-  option (a) needs slot a for the loader's tests in `mxt`; G7, G8, G10
-  and G9 under (b) or (c) need no slot a, but slot a has room for them,
-  and slot b has G1b's long task.
+  the binary's event loop matches, and the file is `mxt`'s. G9 needs slot
+  a for the loader's test in `mxt`. G7, G8 and G10 need no slot a, but
+  slot a has room for them, and slot b has G1b's long task.
 - Mechanical overlaps, which the second to merge resolves by merging
   `main` and keeping both: `keymap.rs` `DEFAULTS` (G2, G6, G8, G4),
   `action.rs` (G2, G3, G4, G6, G11), `effect.rs` (G1b, G1a, G2, G3, G4,
   G6, G11), `msg.rs` (G1b, G1a, G3, G4), `app.rs` `run` and `update`
   (most tasks), `terminal.rs` `execute` (G1b, G1a, G2, G3, G6),
-  `timeline_view.rs` (G1b, G1a, G11), `config/tests.rs` (G9 (a), G1a),
+  `timeline_view.rs` (G1b, G1a, G11), `config/tests.rs` (G9, G1a),
   `docs/keys.md`, `docs/configuration.md` (the Actions table, the sort
   keys) and `CHANGELOG.md`.
 
@@ -269,50 +266,35 @@ Core:
   0600), across starts. `<Up>` and `<Down>` did nothing on these lines
   before."
 
-## Task G9: Rooms that notify (option (a), pending the supervisor's choice)
+## Task G9: The `notify` sort key
 
 The owner's report (b): busy bridged channels with dim counts fill the
 unread group and come up with `]u`. The read-only observation on the
 check device (mxt 0.1.4, `sort = "mentions, unread, read"`, no room
 opened): of about 120 unread rooms, 14 notified for every message and 108
-had dim counts, 107 of them set to mentions and keywords only and 1
-muted; a room that became unread landed at position 68 to 70 of about
-118 (G10 fixes that part). The supervisor chooses one option (design,
-"Room list", "G9 options"); this task is written for (a), the
-supervisor's recommendation, and each other option replaces the steps
-marked (a) with those marked (b)/(c):
+had dim counts (107 set to mentions and keywords only, 1 muted); a room
+that became unread landed at position 68 to 70 of about 118 (G10 fixes
+that part). The owner decided (2026-11-22): a new sort key `notify`,
+rooms that notify first, by the rule of `filter = "notify"`
+(`RoomFilter::Notify`, `crates/mxt-core/src/rooms.rs:164`:
+`notifications > 0 || mentions > 0 || marked`). `unread`,
+`filter = "unread"`, the default `]u` and `[u`, the badges and muted
+rooms are unchanged. The owner sets `sort = "mentions, notify, unread,
+read"` and binds `]u` and `[u` with `filter = "notify"` in their
+dotfiles: the order is the rooms with mentions, the rooms that notify,
+the rooms whose only news is a dim count, the read rooms, and `]u` skips
+the dim rooms.
 
-- **(a)** `unread` keeps meaning every badge; a new sort key `notify`
-  puts the rooms that notify first, by the rule of `filter = "notify"`
-  (`RoomFilter::Notify`, `crates/mxt-core/src/rooms.rs:164`:
-  `notifications > 0 || mentions > 0 || marked`). The owner sets
-  `sort = "mentions, notify, unread, read"` and binds `]u` and `[u` to
-  `filter = "notify"` in their dotfiles. No change to `unread`, the
-  `filter`s or `RoomFilter::matches`; G10's news time applies to the rooms
-  unread by the `unread` notion, unchanged.
-- **(b)** A room whose mode is `Mute` or `MentionsAndKeywords` counts as
-  unread for the `unread` key, `filter = "unread"` (the picker's too),
-  `]u` and `[u` only with unread mentions or the manual mark. No new key.
-- **(c)** The same for `Mute` alone, as first written.
-
-**Slot a. Crates:** (a) `mxt-core`, and `mxt` for the loader's tests;
-(b)/(c) `mxt-core`. Starts after G4, once the supervisor has chosen.
-**Files:** (a) `crates/mxt-core/src/rooms.rs`,
-`app/tests/room_actions.rs`, `crates/mxt/src/config/tests.rs`;
-(b)/(c) `crates/mxt-core/src/rooms.rs`, `app/picker.rs` (the filter at
-`:239`), `app/tests/room_actions.rs` and the picker tests in
-`app/tests.rs`, `README.md`; both `docs/configuration.md`,
+**Slot a. Crates:** `mxt-core`, and `mxt` for the loader's test. After G4
+in slot a.
+**Files:** `crates/mxt-core/src/rooms.rs`, `app/tests/room_actions.rs`,
+`crates/mxt/src/config/tests.rs`; `docs/configuration.md`,
 `docs/keys.md`, `CHANGELOG.md`.
-**Breaking:** no. (a): a new sort key; mxt 0.1.4 skips an unknown key with
-a warning and applies the others (`crates/mxt/src/config.rs:349-371`), so
-`"mentions, notify, unread, read"` sorts there as `"mentions, unread,
-read"`. (b)/(c): no name changes and every configuration loads; a binding
-with `filter = "unread"` and the `unread` key pass over the narrowed
-rooms whose only unread state is their message count, behaviour as `t`
-taking the timeline was in F (Global Constraints); the badge is
-unchanged.
-
-Steps (a):
+**Breaking:** no. A new sort key; nothing existing changes meaning. mxt
+0.1.4 gives an unknown key in the list a warning and skips it, and the
+rest of the list applies (0.1.4 `crates/mxt/src/config.rs:350-371`), so
+it sorts `"mentions, notify, unread, read"` as
+`"mentions, unread, read"`.
 
 - [ ] `rooms.rs`: `SortKey::Notify`, `config_name` `"notify"`, between
   `Mentions` and `Unread` in the enum and in `SortKey::ALL`, so the
@@ -322,35 +304,40 @@ Steps (a):
   open room has nothing for it, as for `Mentions` and `Unread`. Doc
   comments: `SortKey::Notify` (rooms that notify first, by the rule of
   `filter = "notify"`), `SortKey::compare`'s note on the open room, and
-  `RoomFilter::Notify` (the key uses it). The loader parses with
-  `SortKey::ALL`, so `crates/mxt/src/config.rs` does not change.
+  `RoomFilter::Notify` (the key uses it). `RoomFilter::matches` does not
+  change, and the loader parses with `SortKey::ALL`, so
+  `crates/mxt/src/config.rs` does not change either.
 - [ ] Tests in `rooms.rs`: `SortKey::ALL` and `config_name` include
   `notify`; under `"mentions, notify, unread, read"`, a room with a
   mention first, then rooms with `notifications: 2` or `marked` (and no
-  mention), then a room with `messages: 5` alone, then a read room, each
-  group by G10's order once G10 lands (here by `last_read`); the open room
-  with `notifications: 2` sorts among the read rooms; an upsert that gives
-  the room with `messages: 5` a notification moves it into the second
-  group; `RoomFilter::Unread` still matches a muted room with
-  `messages: 5` (nothing narrowed). In the app tests: with that sort and a
-  user binding `"]u" = { action = "room.open", filter = "notify" }`, `]u`
-  passes over the room with the dim count.
+  mention), then a muted room with `messages: 5` alone, then a read room,
+  each group by `last_read` until G10 lands; the open room with
+  `notifications: 2` sorts among the read rooms; an upsert that gives the
+  room with `messages: 5` a notification moves it into the second group;
+  `RoomFilter::Unread` still matches the muted room with `messages: 5`
+  and `Badge::from_counts` still gives `Messages(5)` (unchanged). In the
+  app tests: with that sort, the default `]u` still counts the room with
+  the dim count (it opens it when no other room is unread), and a user
+  binding `"]u" = { action = "room.open", filter = "notify" }` passes
+  over it.
 - [ ] `crates/mxt/src/config/tests.rs`: `room_list_sort_is_a_list_of_keys`
   gains `("notify", Notify)` among the single keys and
-  `"mentions, notify, unread, read"` as a list, and its `unknown` text
-  lists `"notify"` after `"mentions"`.
+  `"mentions, notify, unread, read"` as a list, and the expected names in
+  its `unknown` text and in the unknown value test (`"size"`) list
+  `"notify"` after `"mentions"`.
 - [ ] Docs: `docs/configuration.md`, the example's comment (line 27) and
   the [sort keys](#sort-keys) table gain `"notify"` (rooms that notify
   you: unread mentions, bold counts, the manual unread mark, the rooms
   that `filter = "notify"` takes; not the rooms whose only news is a dim
   count, such as muted rooms and rooms set to mentions and keywords
-  only), and the paragraph under the table gives
+  only), the paragraph under the table gives
   `sort = "mentions, notify, unread, read"` with
   `"]u" = { action = "room.open", filter = "notify" }` and
   `"[u" = { action = "room.open", filter = "notify", pick = "prev" }` as
-  the setup that keeps busy rooms with dim counts behind the rooms that
-  notify, and says that 0.1.4 skips `notify` with a warning and sorts by
-  the other keys; `docs/keys.md`, the `]u` row's note: `]u` and `[u` count
+  the setup that puts busy rooms with dim counts after the rooms that
+  notify and keeps `]u` off them, and the paragraph on older versions
+  says that 0.1.4 skips `notify` with a warning and sorts by the other
+  keys; `docs/keys.md`, the note under the `]u` row: `]u` and `[u` count
   every badge, dim counts included, and the binding above skips them.
 - [ ] CHANGELOG `### Added`: "The `notify` sort key for
   `ui.room_list.sort` puts the rooms that notify you first: unread
@@ -359,59 +346,9 @@ Steps (a):
   read"`, rooms whose only news is a dim count (muted rooms, rooms set to
   mentions and keywords only) come after them, and
   `"]u" = { action = "room.open", filter = "notify" }` in
-  `[keymap.normal]` jumps between the rooms that notify only. mxt 0.1.4
-  skips `notify` with a warning and sorts by the other keys."
-
-Steps (b)/(c), in place of the steps (a):
-
-- [ ] `rooms.rs`: `RoomFilter::matches(self, room: &RoomSummary) -> bool`
-  in place of `matches(&UnreadCounts)`, with `let counts = &room.unread;`.
-  The rule is one match arm on the mode in `Unread`:
-
-  ```rust
-  RoomFilter::Unread => match room.mode {
-      // (b); for (c) the pattern is `NotificationMode::Mute` alone.
-      NotificationMode::Mute | NotificationMode::MentionsAndKeywords => {
-          counts.mentions > 0 || counts.marked
-      }
-      _ => {
-          counts.messages > 0
-              || counts.notifications > 0
-              || counts.mentions > 0
-              || counts.marked
-      }
-  },
-  ```
-
-  `All`, `Notify` and `Mentions` ignore the mode. Every caller passes the
-  summary: `SortKey::compare`'s `has`, `resolve_room` (`Pick` and
-  `Fuzzy`), `app/picker.rs:239`. Update the doc comments (`RoomFilter`,
-  `SortKey::Unread`). No `SortKey::Notify`; `mxt` does not change.
-- [ ] Tests in `rooms.rs`: a room in a narrowed mode with `messages: 5`
-  alone does not match `Unread`, with `mentions: 1` or `marked` it does;
-  a `Default` room with `messages: 5` does; (b) asserts
-  `MentionsAndKeywords` narrowed, (c) asserts it unchanged; `Notify`,
-  `Mentions` and `All` give the same answers in every mode for equal
-  counts; under `sort = "mentions, unread, read"` a narrowed room with
-  messages only sorts among the read rooms, one with a mention among the
-  mentions; `resolve_room` with `filter = Unread` and `Pick::Next` skips
-  the narrowed room with messages only. `Badge::from_counts` of that room
-  is still `Messages(5)` (one assertion). In the app tests: `]u` passes
-  over it, and `picker.rooms` with `filter = "unread"` does not list it.
-- [ ] Docs: `docs/configuration.md`, the `"unread"` row of the sort keys
-  and the `filter` values of `room.open` (`unread`: a room muted [(b): or
-  set to mentions and keywords only] only with unread mentions or the
-  manual mark); `docs/keys.md`, "The screen" (such a room keeps its dim
-  count and is skipped by `]u`, `[u` and the unread order unless it has
-  mentions or the mark); `README.md`, the feature line about unread
-  messages in muted rooms (still shown, not jumped to).
-- [ ] CHANGELOG `### Changed`: "A room that is muted [(b): or set to
-  mentions and keywords only] counts as unread for `filter = "unread"`,
-  the `unread` sort key, `]u` and `[u` only with unread mentions or the
-  manual unread mark, so busy rooms whose messages do not notify you no
-  longer fill the unread group or come up with `]u`; its dim count of
-  unread messages stays in the room list. `filter = "notify"`,
-  `"mentions"` and `"all"` are unchanged."
+  `[keymap.normal]` jumps between the rooms that notify only. `unread`
+  and `filter = "unread"` are unchanged. mxt 0.1.4 skips `notify` with a
+  warning and sorts by the other keys."
 
 ## Task G10: The `read` key orders unread rooms by their newest message
 
@@ -425,10 +362,11 @@ a setup.
 - [ ] `rooms.rs`: a private `fn news_time(room: &RoomSummary, open:
   Option<&RoomId>) -> Option<Timestamp>`: for the open room the later of
   `last_read` and `latest_activity` (`Option::max`, `None` below `Some`);
-  for a room that `RoomFilter::Unread` matches, the `unread` notion (under
-  G9's option (a) every badge, unchanged, `matches(&room.unread)`; under
-  (b) or (c) G9's narrowed rule, `matches(room)`),
-  `latest_activity.or(last_read)`; otherwise `last_read`.
+  for a room that `RoomFilter::Unread.matches(&room.unread)` (the
+  `unread` notion, every badge, dim counts included),
+  `latest_activity.or(last_read)`; otherwise `last_read`. With the
+  owner's `"mentions, notify, unread, read"`, each unread group is so
+  ordered newest message first and the read rooms by last read.
   `SortKey::Read` compares `news_time(b).cmp(&news_time(a))`, so the
   newest first and rooms without a time last. Doc comments of `SortKey`
   and `RoomList::open` follow the design ("Room list", "The open room
@@ -444,10 +382,10 @@ a setup.
   without `last_read` last; under `"mentions, unread, read"`, three unread
   rooms ordered by `latest_activity`, and an upsert that makes a fourth
   room unread with the newest activity puts it at the top of the unread
-  group (the observation the orchestrator repeats); under option (a),
-  with `"mentions, notify, unread, read"`, a fourth room that becomes
-  unread with a notification goes to the top of the second group and one
-  with a dim count to the top of the third; the open room under `read`
+  group (the observation the orchestrator repeats); with
+  `"mentions, notify, unread, read"`, a fourth room that becomes unread
+  with a notification goes to the top of the second group and one with a
+  dim count to the top of the third; the open room under `read`
   placed by the later of its `last_read` and `latest_activity`;
   `clear_unread` on a room with an old `last_read` moves it to the top of
   the read rooms; an upsert with an older `last_read` than the stored one
@@ -457,8 +395,9 @@ a setup.
 - [ ] Docs: `docs/configuration.md`, the `"read"` row of the sort keys
   (unread rooms by their newest message, the others by your last read;
   the open room counts as read up to its newest message) and the
-  paragraph under the table (`"mentions, unread, read"`: a room that gets
-  a new message goes to the top of its group; what `read` alone means;
+  paragraph under the table (`"mentions, unread, read"` and
+  `"mentions, notify, unread, read"`: a room that gets a new message goes
+  to the top of its group; what `read` alone means;
   a room you read takes its place at once and keeps it until the receipt
   comes back).
 - [ ] CHANGELOG `### Changed`: "The `read` sort key orders unread rooms by
@@ -1179,17 +1118,15 @@ Core:
 ## Account checks
 
 After G7 to G10, the orchestrator, read-only on the check device, with
-the owner's settings (under G9's option (a) the owner sets
-`sort = "mentions, notify, unread, read"` and binds `]u` and `[u` with
-`filter = "notify"`; under (b) or (c) `sort = "mentions, unread, read"`
-and the default `]u`): a room that gets a new message (from the owner's
-other client, in the test room) lands at the top of its group; under
-(a), a busy room with a dim count stays below the rooms that notify and
-`]u` passes over it; under (b) or (c), a room in a narrowed mode with new
-messages but no mention stays among the read rooms with its dim count and
-`]u` passes over it; `]u` opens the topmost room it selects; after `<CR>`
-on a room and `<C-w><C-h>`, the cursor is on the row where the room was.
-The log has no errors.
+the owner's settings (`sort = "mentions, notify, unread, read"`, `]u` and
+`[u` bound with `filter = "notify"`): a room that gets a new message
+(from the owner's other client, in the test room) lands at the top of
+its group (the rooms that notify when it notifies, the dim rooms
+otherwise); the rooms with dim counts stay below the rooms that notify,
+with their dim counts, and `]u` passes over them; `]u` opens the topmost
+room that notifies other than the open one; after `<CR>` on a room and
+`<C-w><C-h>`, the cursor is on the row where the room was. The log has
+no errors.
 
 After the release with G1, the owner, in WezTerm, in the test room only,
 on the check device, with `[ui.timeline] images = "on"`:

@@ -941,7 +941,7 @@ only, reads a list or a new key as an unknown value: a warning, and its
 default `"recent"` applies (0.1.3 `crates/mxt/src/config.rs:169-176`,
 `choice` over `dto::ROOM_SORTS`, then the default). mxt 0.1.4 skips a key
 it does not know with a warning and applies the others (0.1.4
-`crates/mxt/src/config.rs:349-371`), so it sorts
+`crates/mxt/src/config.rs:350-371`), so it sorts
 `"mentions, notify, unread, read"` as `"mentions, unread, read"`. A
 configuration shared with machines that run 0.1.3 or 0.1.4 can carry the
 new value; the user documentation says so.
@@ -952,37 +952,23 @@ the open room moves. mxt 0.1.4 ordered unread rooms by their `last_read`
 under `read`, so a room unread after days of silence sat low in its
 group, and moved the cursor with the room it opened.
 
-- The `notify` key: rooms whose messages do not notify, such as busy
-  bridged channels set to mute or to mentions and keywords only, show dim
-  counts, and under `"mentions, unread, read"` they share the unread group
-  with the rooms that notify. With `notify` before `unread` the rooms that
-  notify come first, and a binding with `filter = "notify"` (for example
-  `"]u" = { action = "room.open", filter = "notify" }`) jumps between them
-  only. `unread` and `filter = "unread"` keep counting every badge, so a
-  dim count still makes a room unread for the `unread` key, the default
-  `]u` and the `read` key's news time. `SortKey::Notify` asks
-  `RoomFilter::Notify`, as `Mentions` and `Unread` ask their filters.
-- **G9 options (the supervisor's choice is pending; this design is option
-  (a), the `notify` key above).** Options (b) and (c) narrow `unread`
-  instead and add no key:
-  - (b) a room whose `mode` is `Mute` or `MentionsAndKeywords` counts as
-    unread for the `unread` key and `filter = "unread"` (the room
-    picker's included), and so for `]u`, `[u` and the `read` key's news
-    time, only with unread mentions or the manual unread mark; its dim
-    count stays in the room list;
-  - (c) the same for `Mute` alone, as first written; rooms set to
-    mentions and keywords only count as before.
-
-  Either option drops the `notify` row of the table above and this
-  section's first bullet, writes its rule into the `unread` row and the
-  `filter` table's `unread` row (see "Action registry"), and narrows the
-  goal line ("Goals") and the note under `]u` (see "Default keymap").
-  `RoomFilter::matches` then takes the `RoomSummary` instead of its
-  `UnreadCounts`, and its `Unread` arm matches on the mode: one arm whose
-  pattern is `Mute | MentionsAndKeywords` for (b) and `Mute` for (c). The
-  `read` row, "The open room sorts as read" (see "Matrix adapter") and the
-  cursor rule below name the rule of `unread`, so they follow it
-  unchanged.
+- The `notify` key (added after 0.1.4): rooms whose
+  messages do not notify, such as busy bridged channels set to mute or to
+  mentions and keywords only, show dim counts, and under
+  `"mentions, unread, read"` they share the unread group with the rooms
+  that notify. With `sort = "mentions, notify, unread, read"` the order is
+  the rooms with mentions, the rooms that notify, the rooms whose only
+  unread state is a dim count, then the read rooms, each unread group
+  newest message first (the `read` key) and the read rooms by your last
+  read. A binding with `filter = "notify"`
+  (`"]u" = { action = "room.open", filter = "notify" }` with `]u`'s
+  `pick = "first"`, `"[u" = { action = "room.open", filter = "notify",
+  pick = "prev" }`) then skips the rooms with dim counts. Nothing else
+  changes: `unread`, `filter = "unread"`, the default `]u` and `[u`, the
+  badges and muted rooms stay as they were, so a dim count still makes a
+  room unread for the `unread` key, the default `]u` and the `read` key's
+  news time. `SortKey::Notify` asks `RoomFilter::Notify`, as `Mentions`
+  and `Unread` ask their filters.
 - Where the keys' values come from, without a request per room:
   `mentions`, `notify` and `unread` read the room's `UnreadCounts`, the
   counts the badges and the `filter`s use, so optimistic clearing (see
@@ -2744,7 +2730,7 @@ Each action declares typed arguments. `room.open` takes a `RoomTarget`:
 | Argument | Values | Meaning |
 |---|---|---|
 | `filter` | `all` (default) | every joined room |
-| | `unread` | any badge: `messages`, `notifications` or `mentions` above zero, or `marked` (G9's options (b) and (c) would narrow it; see "Room list") |
+| | `unread` | any badge: `messages`, `notifications` or `mentions` above zero, or `marked` |
 | | `notify` | `notifications` or `mentions` above zero, or `marked`: the rooms that notify, also the `notify` sort key's rule |
 | | `mentions` | `mentions` above zero |
 | `pick` | `first` (default) | the first matching room in the current room order other than the open room (the skip added after 0.1.4: before, `first` could pick the open room, which only moved the focus to its timeline) |
@@ -3095,9 +3081,9 @@ many and the text line shows them.
     prompt never recorded, `HistoryLoaded` trimmed and without repeats,
     `SaveHistory` after each new line); the `notify` sort key (rooms that
     notify before the dim counts under `"mentions, notify, unread, read"`,
-    the open room sorting as read for it; under G9's options (b) or (c),
-    the narrowed `unread` rule instead, for the filter, the sort key, `]u`
-    and the picker); the `read` key's news time (unread rooms by their
+    the open room sorting as read for it, `unread` and its filter still
+    counting dim counts, a `filter = "notify"` binding skipping them); the
+    `read` key's news time (unread rooms by their
     latest activity, the open room up to its latest activity, the
     optimistic `last_read`, an update never lowering it); `pick =
     "first"` skipping the open room; the room list's cursor staying on its
