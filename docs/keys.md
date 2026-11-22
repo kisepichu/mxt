@@ -16,8 +16,17 @@ mxt 0.1.2 did nothing. The leader and the longer bindings work as before.
   message's thread in the timeline's place (see [Threads](#threads)).
 - The room list is in the order of `ui.room_list.sort`, by latest activity
   unless it says otherwise (see [Sort keys](configuration.md#sort-keys)).
-  When rooms move, as messages arrive or as you read them, the cursor stays
-  on its room. `]u`, `[u` and the room picker follow the list's order.
+  After you open the room under the cursor, with `<CR>`, `]u`, the room
+  picker, `:open` or the jump list, the cursor stays where that room was,
+  on the room that took its place, as in a mail inbox: the open room sorts
+  as read, so it can move among the read rooms, and `<CR>` then opens the
+  next one. The cursor also keeps its row when the open room moves because
+  you read it. A room opened away from the cursor takes the cursor along,
+  and when other rooms move, as messages arrive, the cursor stays on its
+  room. A room you left unread (the terminal had no focus) goes back to its
+  place among the unread rooms once you open another, and can be the one
+  under the cursor again. `]u`, `[u` and the room picker follow the list's
+  order.
 - The status line at the bottom shows the mode, a count or keys typed so far,
   the open room, the last message or a question, and on the right the sync
   state: `starting` before the first sync, then `synced`, `offline` (no
