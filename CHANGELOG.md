@@ -59,6 +59,10 @@ marked **Breaking:**.
   `room.open` now skips the open room (before, it could pick the open
   room, which only moved the focus to its timeline), and `]u` is
   `{ action = "room.open", filter = "unread" }`. `[u` is unchanged.
+- In the composer's insert and normal mode, `<Up>` on the first line moves
+  to the start of the text and `<Down>` on the last line to its end, as in
+  a text field; `k` and `j` are unchanged, and the mention menu keeps its
+  `<Up>` and `<Down>`. The message view's editor does the same.
 
 ### Security
 
