@@ -497,6 +497,15 @@ taller than the screen. `i` and other edits work too, but are discarded when
 the view closes. `q` and `<Esc>` close it in normal and visual mode. `:help`,
 `:map` and `:messages` show their text in the same view.
 
+In both editors, in insert and normal mode, `<Up>` on the first line goes to
+the start of the text and `<Down>` on the last line to its end, as in a text
+field (in normal mode onto the last character, an emoji with a skin tone
+whole); on the other lines they go a line up or down. A line is a line of
+the text, wrapped on the screen or not, so `<Up>` anywhere on a wrapped
+first line goes to the start. `k` and `j`, and `<Up>` and `<Down>` in visual
+mode, stop at the first and the last line, as in vim. While the composer's
+mention menu is open, `<Up>` and `<Down>` select a mention instead.
+
 Yanks (`yy` in the timeline, `y` in the editors) go to one register that
 every editor shares, and to the terminal's clipboard
 ([Terminal setup](terminal.md#clipboard)). `p` pastes from that register, not
@@ -539,4 +548,6 @@ breaks included, and runs no keys.
   variation selector of `❤️`); `df` and `dt` can split a cluster (`df👍`
   leaves the skin tone); `df<Tab>` cancels, where `f<Tab>` finds a tab;
   operators with `F`, `T`, `;` and `,`; a linewise `p` on the last line
-  pastes above it; `.` does not repeat `r`; `r` in visual mode.
+  pastes above it; `.` does not repeat `r`, and after an insert it repeats
+  the typed characters but not what `<BS>`, `<C-w>` or `<A-BS>` deleted;
+  `r` in visual mode.

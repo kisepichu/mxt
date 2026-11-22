@@ -29,12 +29,12 @@ marked **Breaking:**.
   `"<C-c>" = "nop"` in `[keymap.composer.insert]` keeps that.
 - `composer.delete_word_before` deletes the word before the cursor, with
   the blanks after it, in the composer's insert mode, split into words as
-  the command line's `<C-w>` splits them (kanji, kana, punctuation and
-  emoji are words of their own); `<C-w>` and `<A-BS>` in insert mode run
-  it, and `<C-w>` in normal mode is still the window prefix. Many
-  terminals send `<C-BS>` as `<C-h>` or `<BS>`, so it is not a default;
-  bind it if yours tells it apart. These keys did nothing in insert mode
-  before; `"<C-w>" = "nop"` and `"<A-BS>" = "nop"` in
+  the command line's `<C-w>` splits them (kanji, hiragana, katakana, and
+  punctuation with emoji are words of their own); `<C-w>` and `<A-BS>` in
+  insert mode run it, and `<C-w>` in normal mode is still the window
+  prefix. Many terminals send `<C-BS>` as `<C-h>` or `<BS>`, so it is not
+  a default; bind it if yours tells it apart. These keys did nothing in
+  insert mode before; `"<C-w>" = "nop"` and `"<A-BS>" = "nop"` in
   `[keymap.composer.insert]` keep that.
 
 ### Changed
@@ -59,6 +59,10 @@ marked **Breaking:**.
   `room.open` now skips the open room (before, it could pick the open
   room, which only moved the focus to its timeline), and `]u` is
   `{ action = "room.open", filter = "unread" }`. `[u` is unchanged.
+- In the composer's insert and normal mode, `<Up>` on the first line moves
+  to the start of the text and `<Down>` on the last line to its end, as in
+  a text field; `k` and `j` are unchanged, and the mention menu keeps its
+  `<Up>` and `<Down>`. The message view's editor does the same.
 
 ### Security
 
