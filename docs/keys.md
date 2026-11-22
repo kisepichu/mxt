@@ -210,6 +210,7 @@ The timeline binds neither key, so a binding of `q` or `<Esc>` in
 | `composer.insert` | `<CR>` | `composer.send` | send |
 | `composer.insert` | `<C-j>` | `composer.newline` | a line break (many terminals send Shift+Enter as `<CR>`) |
 | `composer.insert` | `<C-c>` | `composer.normal` | normal mode, as vim's `<C-c>` |
+| `composer.insert` | `<C-w>`, `<A-BS>` | `composer.delete_word_before` | delete the word before the cursor, as vim's `<C-w>` |
 | `composer.insert`, `composer.normal` | `<C-x><C-e>` | `composer.external_editor` | edit in `$VISUAL` or `$EDITOR` |
 | `composer.normal` | `<Esc>` | `composer.leave` | back to the timeline; the text stays, and a reply or an edit without text ends |
 | `composer.normal` | `<C-c>` | `composer.cancel` | end a reply (the text stays) or an edit (the text goes) |
@@ -222,6 +223,17 @@ second `<Esc>` returns to the timeline. `<C-c>` in insert mode goes to
 normal mode too, and a second `<C-c>` ends a reply or an edit. `<C-c>` did
 nothing in insert mode before; `"<C-c>" = "nop"` in
 `[keymap.composer.insert]` keeps it that way.
+
+`<C-w>` and `<A-BS>` in insert mode delete the word before the cursor and
+the blanks after it, split into words as the command line's `<C-w>` splits
+them (see [Line editing](#line-editing)); at the start of a line they delete
+the line break, joining the line to the one above. `<C-w>` in normal mode is
+still the window prefix (`<C-w>h`, `<C-w>j`, …). `<C-BS>` is not a default,
+because most terminals send it as `<C-h>` or `<BS>`; if yours tells it
+apart, bind it with `"<C-BS>" = "composer.delete_word_before"` in
+`[keymap.composer.insert]`. Up to mxt 0.1.4, `<C-w>` and `<A-BS>` did
+nothing in insert mode; `"<C-w>" = "nop"` and `"<A-BS>" = "nop"` in
+`[keymap.composer.insert]` keep it that way.
 
 ### `picker`, `command_line` and `message_view`
 

@@ -768,6 +768,9 @@ impl App {
             Action::ComposerCancel => self.cancel_draft(effects),
             Action::ComposerLeave => self.leave_composer(effects),
             Action::ComposerNormal => self.composer_normal(effects),
+            Action::ComposerDeleteWordBefore => {
+                self.composer_effect(UiEffect::DeleteWordBefore, effects);
+            }
             Action::CompletionNext => self.move_completion(true),
             Action::CompletionPrev => self.move_completion(false),
             Action::CompletionAccept => self.accept_completion(effects),

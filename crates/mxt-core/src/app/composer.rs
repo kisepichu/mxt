@@ -105,8 +105,8 @@ impl App {
     }
 
     /// `composer.send`, `composer.newline`, `composer.external_editor`,
-    /// `composer.normal`: the tui adapter acts on the shown timeline's
-    /// editor.
+    /// `composer.normal`, `composer.delete_word_before`: the tui adapter
+    /// acts on the shown timeline's editor.
     pub(super) fn composer_effect(
         &self,
         effect: fn(TimelineId) -> UiEffect,

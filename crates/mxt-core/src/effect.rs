@@ -281,5 +281,10 @@ pub enum UiEffect {
     /// Put the composer's editor in normal mode as edtui's `<Esc>` does;
     /// nothing in normal mode. A key waiting for the next one is cancelled.
     ComposerNormal(TimelineId),
+    /// In insert mode, delete the word before the composer's cursor with
+    /// the blanks after it (from `line::word_start`), or at the start of a
+    /// line the line break, as one undo state without a register write;
+    /// nothing in other modes.
+    DeleteWordBefore(TimelineId),
     Quit,
 }

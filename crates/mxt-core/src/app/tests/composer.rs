@@ -294,6 +294,25 @@ fn send_and_normal_run_in_order_and_keys_resolved_after_them_use_normal_mode() {
 }
 
 #[test]
+fn ctrl_w_and_alt_backspace_delete_a_word_in_insert_mode_and_ctrl_w_stays_the_window_prefix() {
+    let delete = || vec![ui(UiEffect::DeleteWordBefore(main_of(C)))];
+    let mut app = opened();
+    keys(&mut app, "i");
+    for key in ["<C-w>", "<A-BS>"] {
+        assert_eq!(insert(&mut app, key), delete(), "{key}");
+    }
+    // The mention menu's table falls back to `composer.insert`.
+    edited(&mut app, C, false);
+    members(&mut app, vec![member(ALICE, "Alice")]);
+    query(&mut app, Some("al"));
+    assert!(menu(&app).is_some());
+    assert_eq!(insert(&mut app, "<C-w>"), delete());
+    // In normal mode `<C-w>` is the window prefix.
+    assert_eq!(normal(&mut app, "<C-w>h"), vec![]);
+    assert_eq!(app.focus(), Focus::RoomList);
+}
+
+#[test]
 fn composer_leave_ends_a_reply_without_text() {
     let mut app = opened();
     reset(&mut app, vec![msg(1)]);
