@@ -138,6 +138,8 @@ pub struct App {
     /// The editor mode reported with the last key, for the keys resolved
     /// again after a binding, also after a timeout. `composer.focus` with
     /// insert mode sets it to insert, as the tui adapter enters insert mode
+    /// for it, and `composer.normal` sets it to normal while the composer
+    /// has focus, as the tui adapter leaves insert, visual or search mode
     /// for it. Other mode changes before the next key are unknown to the
     /// core, such as a released `a` in `composer.normal` that starts insert
     /// mode: keys resolved again after it still use the mode reported last.

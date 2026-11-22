@@ -220,8 +220,8 @@ The timeline binds neither key, so a binding of `q` or `<Esc>` in
 
 `<Esc>` in insert mode is not bound: the editor goes to normal mode, and a
 second `<Esc>` returns to the timeline. `<C-c>` in insert mode goes to
-normal mode too, and a second `<C-c>` ends a reply or an edit. `<C-c>` did
-nothing in insert mode before; `"<C-c>" = "nop"` in
+normal mode too, and a second `<C-c>` ends a reply or an edit. Up to mxt
+0.1.4, `<C-c>` did nothing in insert mode; `"<C-c>" = "nop"` in
 `[keymap.composer.insert]` keeps it that way.
 
 `<C-w>` and `<A-BS>` in insert mode delete the word before the cursor and
