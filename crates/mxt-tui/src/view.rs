@@ -881,17 +881,22 @@ pub(crate) mod tests {
     pub(crate) fn app() -> App {
         let mut app = no_rooms();
         for (id, at) in [("!a:example.org", 20), ("!b:example.org", 10)] {
-            app.update(Msg::RoomUpserted(RoomSummary {
-                id: RoomId::new(id),
-                name: name(None, id),
-                kind: RoomKind::Group,
-                unread: UnreadCounts::default(),
-                mode: NotificationMode::Default,
-                latest_activity: Some(Timestamp::from_millis(at)),
-                last_read: None,
-            }));
+            app.update(upsert(id, at));
         }
         app
+    }
+
+    /// The group `id` in the room list, last active at `at` milliseconds.
+    pub(crate) fn upsert(id: &str, at: u64) -> Msg {
+        Msg::RoomUpserted(RoomSummary {
+            id: RoomId::new(id),
+            name: name(None, id),
+            kind: RoomKind::Group,
+            unread: UnreadCounts::default(),
+            mode: NotificationMode::Default,
+            latest_activity: Some(Timestamp::from_millis(at)),
+            last_read: None,
+        })
     }
 
     /// The app with `rooms` listed in this order, as `!0:example.org` and
@@ -984,7 +989,7 @@ pub(crate) mod tests {
         pub(crate) fn draw(&mut self, app: &App, view: Option<&mut View>) -> Visible {
             let mut visible = Visible::default();
             if let Some(previews) = &mut self.previews {
-                previews.begin_frame();
+                previews.begin_frame(app);
             }
             self.terminal
                 .draw(|frame| {

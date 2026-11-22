@@ -130,7 +130,7 @@ impl TimelinePane {
         frame: &mut Frame,
         area: Rect,
         app: &App,
-        mut previews: Option<&mut Previews>,
+        previews: Option<&mut Previews>,
         covered: &[Rect],
     ) -> Option<(usize, usize)> {
         // Compared without building the shown `TimelineId` on every frame.
@@ -141,9 +141,6 @@ impl TimelinePane {
         if !same {
             self.shown = app.shown_timeline();
             self.anchor = None;
-            if let Some(previews) = previews.as_deref_mut() {
-                previews.forget_failures();
-            }
         }
         let entries = app.timeline();
         if entries.is_empty() {

@@ -7,11 +7,11 @@ use mxt_core::mention::Member;
 use mxt_core::timeline::{MessageContent, TimelineDiff, TimelineEntry, TimelineItem};
 use ratatui::buffer::Cell;
 use ratatui::style::Color;
-use ratatui_image::picker::Picker;
+use ratatui_image::protocol::kitty::Kitty;
 
 use super::*;
 use crate::view::RoomListLayout;
-use crate::view::tests::{Screen, app, message, press, reset};
+use crate::view::tests::{Screen, app, message, press, reset, upsert};
 
 const ROOM: &str = "!a:example.org";
 /// The cell size of tmux's sixel in these tests, and of half blocks.
@@ -41,15 +41,19 @@ fn image(n: u32, dimensions: (u32, u32)) -> TimelineEntry {
     })
 }
 
-/// A PNG of `width` by `height` pixels, bright at the top and dark at the
-/// bottom, so that every half block has a brighter upper half: `▀`.
-fn png(width: u32, height: u32) -> MediaBytes {
-    let image = RgbImage::from_fn(width, height, |_, y| {
+/// `width` by `height` pixels, bright at the top and dark at the bottom,
+/// so that every half block has a brighter upper half: `▀`.
+fn gradient(width: u32, height: u32) -> RgbImage {
+    RgbImage::from_fn(width, height, |_, y| {
         let level = u8::try_from(255 - 255 * y / height).unwrap();
         Rgb([level, level, level])
-    });
+    })
+}
+
+/// A PNG of `gradient(width, height)`.
+fn png(width: u32, height: u32) -> MediaBytes {
     let mut bytes = Vec::new();
-    image
+    gradient(width, height)
         .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
         .unwrap();
     bytes.into()
@@ -59,10 +63,10 @@ fn tmux() -> PreviewEncoder {
     PreviewEncoder::TmuxSixel(CELL)
 }
 
-/// ratatui-image's half blocks. Inside tmux (`TERM` or `TERM_PROGRAM`)
-/// ratatui-image turns on the pane's `allow-passthrough` here, as mxt does.
+/// Half blocks, which need no picker: a picker reads `TERM` and
+/// `TERM_PROGRAM`, and inside tmux turns on the pane's `allow-passthrough`.
 fn halfblocks() -> PreviewEncoder {
-    PreviewEncoder::Picker(Picker::halfblocks())
+    PreviewEncoder::Halfblocks
 }
 
 fn previews(rows: u16, encoder: PreviewEncoder, limits: Limits) -> Previews {
@@ -124,7 +128,7 @@ fn wanted(app: &App, screen: &mut Screen) -> Option<Vec<ItemRef>> {
 /// Waits for the worker to finish every job, re-encodings too.
 fn settle(previews: &mut Previews) {
     loop {
-        while !previews.queued.is_empty() {
+        while previews.working.is_some() {
             let done = previews
                 .done
                 .recv_timeout(Duration::from_secs(30))
@@ -132,7 +136,7 @@ fn settle(previews: &mut Previews) {
             previews.accept(done);
         }
         previews.settle_cache();
-        if previews.queued.is_empty() {
+        if previews.working.is_none() {
             return;
         }
     }
@@ -199,7 +203,7 @@ fn a_preview_reserves_the_fit_of_the_image_into_its_box_in_whole_cells() {
 
 #[test]
 fn the_worker_scales_an_image_to_its_reserved_size_and_encodes_it() {
-    let encoder = Arc::new(halfblocks());
+    let encoder = halfblocks();
     // 64 by 32 pixels fit a box of 60 by 8 cells as 7 by 2 cells.
     let size = reserve(Some((64, 32)), 60, ImageRows::default(), CELL);
     assert_eq!(size, Size::new(7, 2));
@@ -207,9 +211,8 @@ fn the_worker_scales_an_image_to_its_reserved_size_and_encodes_it() {
         item: item(1),
         source: Source::Bytes(png(64, 32)),
         target: Target { size, scale: true },
-        encoder: Arc::clone(&encoder),
     };
-    let Done::Ready(ready, preview) = prepare(job) else {
+    let Done::Ready(ready, preview) = prepare(job, &encoder) else {
         panic!("the preview failed");
     };
     assert_eq!(ready, item(1));
@@ -230,9 +233,8 @@ fn the_worker_scales_an_image_to_its_reserved_size_and_encodes_it() {
             size: Size::new(60, 8),
             scale: false,
         },
-        encoder: Arc::clone(&encoder),
     };
-    let Done::Ready(_, preview) = prepare(job) else {
+    let Done::Ready(_, preview) = prepare(job, &encoder) else {
         panic!("the preview failed");
     };
     assert_eq!(preview.encoded.size(), Size::new(7, 2));
@@ -243,9 +245,14 @@ fn the_worker_scales_an_image_to_its_reserved_size_and_encodes_it() {
         item: item(3),
         source: Source::Bytes(truncated.into()),
         target: Target { size, scale: true },
-        encoder,
     };
-    assert!(matches!(prepare(job), Done::Failed(failed) if failed == item(3)));
+    assert!(matches!(prepare(job, &encoder), Done::Failed(failed) if failed == item(3)));
+}
+
+#[test]
+fn a_panic_while_making_a_preview_fails_that_preview_alone() {
+    let done = answer(item(1), || panic!("a decoder's bug"));
+    assert!(matches!(done, Done::Failed(failed) if failed == item(1)));
 }
 
 /// Thirty messages of two rows, with images of four rows at 5, 12 and 25.
@@ -307,6 +314,28 @@ fn a_failed_preview_leaves_its_line_alone_until_another_timeline_is_shown() {
     assert_eq!(frame(&app, &mut screen), (Some((24, 29)), wanted));
 }
 
+#[test]
+fn a_room_back_after_it_was_gone_reports_its_wanted_list_again() {
+    let (mut app, mut screen) = thirty_messages();
+    // `open` reported 25, which the core keeps as its queue.
+    assert_eq!(frame(&app, &mut screen), (Some((24, 29)), None));
+    // The room leaves the list, and the core drops its queue with it.
+    app.update(Msg::RoomRemoved(RoomId::new(ROOM)));
+    assert_eq!(frame(&app, &mut screen), (None, None));
+
+    // Back with the same entries: the same list, which the core no longer
+    // has.
+    app.update(upsert(ROOM, 20));
+    press(&mut app, "<C-w>hk<CR>");
+    assert_eq!(app.open_room(), Some(&RoomId::new(ROOM)));
+    app.update(Msg::Timeline {
+        timeline: TimelineId::main(RoomId::new(ROOM)),
+        diffs: vec![TimelineDiff::Reset(thirty())],
+    });
+    let wanted = Some(vec![item(25)]);
+    assert_eq!(frame(&app, &mut screen), (Some((24, 29)), wanted));
+}
+
 /// Twenty images of four rows, a pane of 8 rows with the two at 10 and 11,
 /// and the list of the frame that shows them.
 fn twenty_images(limits: Limits) -> (App, Screen, Option<Vec<ItemRef>>) {
@@ -339,7 +368,7 @@ fn the_targets_stop_at_the_cache_s_count_and_stay_kept_while_idle() {
     }
     let previews = previews_of(&mut screen);
     assert_eq!(kept(previews), items(&[9, 10, 11, 12]));
-    assert!(previews.queued.is_empty());
+    assert!(previews.working.is_none() && previews.pending.is_empty());
 }
 
 #[test]
@@ -389,6 +418,39 @@ fn a_scroll_lets_the_cache_drop_previews_that_are_no_targets_past_its_limit() {
     assert_eq!(kept(previews_of(&mut screen)), items(&[12, 13, 14, 15]));
 }
 
+#[test]
+fn a_job_whose_item_scrolled_away_is_dropped_before_it_is_decoded() {
+    let (mut app, mut screen, _) = twenty_images(Limits {
+        count: 4,
+        ..Limits::DEFAULT
+    });
+    // 10 goes to the worker, 11 waits for it.
+    let previews = previews_of(&mut screen);
+    previews.show(item(10), png(100, 50));
+    previews.show(item(11), png(100, 50));
+    assert_eq!(previews.working, Some(item(10)));
+    assert_eq!(previews.pending.len(), 1);
+    // Down to 14: the pane shows 13 and 14, and neither 10 nor 11 is a
+    // target.
+    for _ in 0..4 {
+        press(&mut app, "j");
+    }
+    let (visible, wanted) = frame(&app, &mut screen);
+    assert_eq!(visible, Some((13, 14)));
+    assert_eq!(wanted, Some(vec![item(13), item(14), item(15), item(12)]));
+    let previews = previews_of(&mut screen);
+    assert!(previews.pending.is_empty());
+    // 10 was decoded already; 11 never is.
+    settle(previews);
+    assert_eq!(kept(previews), items(&[10]));
+    // Back up: 11 is wanted again.
+    for _ in 0..4 {
+        press(&mut app, "k");
+    }
+    let wanted = Some(vec![item(11), item(12), item(9)]);
+    assert_eq!(frame(&app, &mut screen), (Some((10, 11)), wanted));
+}
+
 /// A preview of one cell, encoded for tmux.
 fn tiny() -> Preview {
     let target = Target {
@@ -432,9 +494,14 @@ fn past_64_mib_the_cache_drops_the_least_recently_drawn_that_is_no_target() {
     let mut previews = previews(8, tmux(), Limits::DEFAULT);
     previews.targets = vec![(item(0), tiny().target)];
     // About 16 MB each: four fit in 64 MiB, five do not.
-    let large = || Preview {
-        scaled: DynamicImage::new_rgba8(2000, 2000),
-        ..tiny()
+    let large = || {
+        let Preview {
+            encoded,
+            target,
+            cell,
+            ..
+        } = tiny();
+        Preview::new(DynamicImage::new_rgba8(2000, 2000), encoded, target, cell)
     };
     for n in 0..4 {
         previews.accept(Done::Ready(item(n), large()));
@@ -444,6 +511,40 @@ fn past_64_mib_the_cache_drops_the_least_recently_drawn_that_is_no_target() {
     previews.accept(Done::Ready(item(4), large()));
     previews.settle_cache();
     assert_eq!(kept(&previews), items(&[0, 2, 3, 4]));
+}
+
+/// A preview of 10 by 4 cells, 100 by 80 pixels, encoded for kitty.
+fn kitty() -> Preview {
+    let target = Target {
+        size: Size::new(10, 4),
+        scale: false,
+    };
+    let image = DynamicImage::new_rgba8(100, 80);
+    let kitty = Kitty::new(image.clone(), target.size, 1, false, false).unwrap();
+    let encoded = Encoded::Sliced(SlicedProtocol::Kitty(kitty));
+    Preview::new(image, encoded, target, CELL)
+}
+
+#[test]
+fn past_its_bytes_the_cache_counts_what_a_kitty_preview_holds() {
+    // 100 by 80 pixels are estimated at 64000 bytes, which the targets
+    // count a kept kitty preview as. It holds more: 32000 bytes of RGBA
+    // and kitty's transmission, their base64.
+    let estimate = estimate(Size::new(10, 4), CELL);
+    assert_eq!(estimate, 64_000);
+    assert_eq!(kitty().counted(), estimate);
+    assert_eq!(kitty().bytes, 32_000 + 42_668);
+    let limits = Limits {
+        bytes: 3 * estimate,
+        ..Limits::DEFAULT
+    };
+    let mut previews = previews(8, tmux(), limits);
+    for n in 0..3 {
+        previews.accept(Done::Ready(item(n), kitty()));
+    }
+    previews.settle_cache();
+    // Three fit as estimated, two as held.
+    assert_eq!(kept(&previews), items(&[1, 2]));
 }
 
 /// The cells of row `y` from column 2 for `width` columns.
@@ -480,6 +581,29 @@ fn half_blocks_fill_the_reserved_rows_below_the_image_s_line() {
         assert_eq!(screen.cell(12, y).symbol(), " ", "row {y}");
     }
     assert!(!screen.again);
+}
+
+#[test]
+fn half_blocks_fill_their_box_whatever_cell_size_their_pixels_are_in() {
+    // 4000 by 3000 pixels reserve 22 by 8 cells in 60 columns. Fitted again
+    // in the cell size a picker measured, they came out 22 by 7 at 10 by
+    // 23 and at 7 by 17 pixels, and 20 by 8 at 10 by 18.
+    let size = Size::new(22, 8);
+    for (width, height) in [(10, 23), (7, 17), (10, 18)] {
+        let padded = DynamicImage::ImageRgb8(gradient(22 * width, 8 * height));
+        let Ok(Encoded::Sliced(sliced)) = encode(padded, size, &halfblocks()) else {
+            panic!("not encoded as sliced half blocks");
+        };
+        assert_eq!(sliced.size(), size, "{width}x{height}");
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 30, 10));
+        SlicedImage::new(&sliced, SignedPosition { x: 0, y: 0 }).render(buffer.area, &mut buffer);
+        for y in 0..8 {
+            let row: Vec<Cell> = (0..22).map(|x| buffer[(x, y)].clone()).collect();
+            assert!(half_blocks(&row), "{width}x{height}, row {y}");
+            assert_eq!(buffer[(22, y)].symbol(), " ", "{width}x{height}, row {y}");
+        }
+        assert_eq!(buffer[(0, 8)].symbol(), " ", "{width}x{height}");
+    }
 }
 
 #[test]
@@ -559,6 +683,39 @@ fn a_moved_tmux_sixel_preview_is_drawn_again_on_a_cleared_screen() {
     // Nothing moves: drawn where it is, without a cleared screen.
     screen.draw(&app, None);
     assert!(!screen.again);
+}
+
+#[test]
+fn a_preview_for_another_cell_size_is_encoded_again_and_not_drawn_meanwhile() {
+    let mut screen = screen(12, previews(4, tmux(), Limits::DEFAULT));
+    let entries = vec![message(0), message(1), image(2, (100, 80)), message(3)];
+    let app = open(&mut screen, entries);
+    show(&mut screen, &[2], &png(100, 80));
+    screen.draw(&app, None);
+    assert!(sixel(screen.cell(2, 3)));
+
+    // tmux counts cells of 10 by 40 pixels now: the image's 80 pixels take
+    // 2 rows. The preview made for 4 rows of 20 pixels is left out, which
+    // takes the frame to a cleared screen, and is encoded again.
+    let taller = PreviewEncoder::TmuxSixel(FontSize::new(10, 40));
+    previews_of(&mut screen).set_encoder(taller);
+    screen.draw(&app, None);
+    assert!(!any_sixel(&screen));
+    assert!(screen.again);
+    assert!(previews_of(&mut screen).is_queued(&item(2)));
+    screen.repaint();
+    screen.draw(&app, None);
+    assert!(!any_sixel(&screen));
+    assert!(!screen.again);
+
+    // Drawn once encoded: the item's four rows above the last message, its
+    // preview on screen rows 5 and 6.
+    settle(previews_of(&mut screen));
+    screen.draw(&app, None);
+    assert!(sixel(screen.cell(2, 5)));
+    assert!(!screen.again);
+    let preview = previews_of(&mut screen).preview_of(&item(2)).unwrap();
+    assert_eq!(preview.encoded.size(), Size::new(10, 2));
 }
 
 #[test]

@@ -514,7 +514,8 @@ working"). A user's own `]u` binding is unaffected.
 
 **Slot b. Crates:** `mxt-core`, `mxt-tui`. Runs first in slot b.
 **Files:** `crates/mxt-core/src/msg.rs`, `effect.rs`, `app.rs` (the
-`Msg::PreviewsWanted` arm); `crates/mxt-tui/src/image_view.rs`, a new
+`Msg::PreviewsWanted` arm); `crates/mxt-tui/Cargo.toml` (`tracing`),
+`crates/mxt-tui/src/image_view.rs`, a new
 `previews.rs`, `timeline_view.rs`, `view.rs`, `overlay.rs`, `terminal.rs`,
 `lib.rs`, and their tests.
 **Breaking:** no, and nothing a user sees changes: previews stay off until
@@ -534,34 +535,44 @@ Core:
 - [ ] `lib.rs`: `pub struct ImageRows(u16)` with `new(i64) ->
   Option<ImageRows>` (1 to 50), `Default` 8, `get()`, as `RoomListWidth`.
 - [ ] `image_view.rs`: `decode` and `tmux_sixel` become `pub(crate)`;
-  `Images::preview_encoder() -> PreviewEncoder` (`Picker(Picker)` or
-  `TmuxSixel(FontSize)`), giving a half-block picker where
-  `picker.tmux_detected()` and the protocol is `Iterm2` or `Sixel`
-  (passthrough: a forced protocol inside tmux, and `auto` over SSH from a
-  local tmux, where `TMUX` is unset but `TERM` names tmux; design). The
-  view's own path is unchanged.
+  `Images::preview_encoder() -> PreviewEncoder` (`Picker(Picker)`,
+  `Halfblocks` without a picker, or `TmuxSixel(FontSize)`), giving
+  `Halfblocks` for a half-block picker and where `picker.tmux_detected()`
+  and the protocol is `Iterm2` or `Sixel` (passthrough: a forced protocol
+  inside tmux, and `auto` over SSH from a local tmux, where `TMUX` is
+  unset but `TERM` names tmux; design). The view's own path is unchanged.
 - [ ] `previews.rs`: `Previews` with the rows, the encoder, a job sender
   and a result receiver for one worker thread (`std::thread::Builder`,
-  name `mxt-previews`), the kept previews, the cache's `Limits { count,
+  name `mxt-previews`), the jobs waiting for it (a `VecDeque` on the UI
+  side; the worker gets one job at a time, and after each frame's
+  targets the waiting jobs whose item is no target are dropped), the kept
+  previews, the cache's `Limits { count,
   bytes }` (`Limits::DEFAULT` 64 and 64 MiB; a field, so tests pass
-  smaller ones), the failed items (cleared when the shown timeline
-  changes), the targets (item to reserved size and whether it came from
-  dimensions), the last reported list, and the tmux sixel placements on
+  smaller ones), the failed items and the last reported list (both
+  cleared when the shown timeline changes, also through no room open),
+  the targets (item to reserved size and whether it came from
+  dimensions), and the tmux sixel placements on
   the screen. The cache drops the least recently drawn previews past a
-  limit but never a target. `fn reserve(dimensions:
+  limit, counting what each one holds (its scaled image and its encoding:
+  sixel's and iTerm2's `data`, kitty's base64 of RGBA computed from its
+  pixels, half blocks' cells), but never a target. `fn reserve(dimensions:
   Option<(u32, u32)>, width: u16, rows: ImageRows, cell: FontSize) ->
   Size` per the design (ratatui-image's `Fit` arithmetic, which is
   private there: write it as `fit` and `cells` with a reference to
   `src/lib.rs:526-575`). `fn estimate(size: Size, cell: FontSize) ->
   usize`: the reserved pixels times 8 (4 bytes each for the scaled image
-  and for the encoding), for targets not kept yet. `fn prepare(job: Job)
-  -> Done`, a plain function
+  and for the encoding), for targets not kept yet; a kept target counts
+  what it holds, at most its estimate. `fn prepare(job: Job, encoder:
+  &PreviewEncoder) -> Done`, a plain function
   the worker loops over: `decode(bytes, w, h)` with the target's pixels,
   `Resize::Scale` (with dimensions) or `Resize::Fit` (without) and
   `FilterType::Triangle`, `size_for` and `resize` to whole cells, then
   `SlicedProtocol::new_with_resize(&picker, image, size, Resize::Fit(None))`
-  for a picker, or `tmux_sixel(..)` for tmux's sixel; a decoding or
-  encoding error is `Done::Failed(item)`. After each result the worker
+  for a picker, `Halfblocks::new(image, size)` for half blocks (which
+  fills the size exactly), or `tmux_sixel(..)` for tmux's sixel; a
+  decoding or encoding error is `Done::Failed(item)`, logged at `debug`
+  with `tracing`, and so is a panic, caught with `catch_unwind`. After
+  each result the worker
   calls the waker. `show(item, bytes)` drops bytes of an item without a
   target, else queues a job; `fail(item)`; `take_done()` moves results
   into the cache and marks failures; a kept preview whose size or cell
@@ -602,7 +613,8 @@ Core:
   time, now with the tmux sixel previews, so each is sent once;
   `execute` passes `ShowPreview` and `PreviewFailed` to `Previews`;
   `handle_event`'s resize gives `Previews` the new cell size after
-  `Images::resized`.
+  `Images::resized`. `install_panic_hook` neither restores the terminal
+  nor prints for the `mxt-previews` thread, and logs its panic at `warn`.
 - [ ] Tests: `reserve` for 4000 by 3000 at 60 columns, 8 rows, 10 by 20
   pixels (8 rows, 22 columns: `fit` gives 213 by 160 pixels), 100 by 50
   (3 rows, 10 columns), 3000 by 100 (1 row, 60 columns), no dimensions (8
@@ -610,7 +622,7 @@ Core:
   of an image item reserves those rows below its line, a failed one has
   only its line, a local echo reserves them too, and on a pane of 6 rows
   an 8-row preview is left out; `prepare` of a generated 64 by 32 PNG
-  with a half-block picker gives a sliced protocol of the reserved size,
+  with the half-block encoder gives a sliced protocol of the reserved size,
   of a truncated PNG `Failed`; the wanted list on a timeline of 30
   messages with images at 5, 12 and 25 and the pane on 10 to 15 lists 12,
   then 5 (within the margin), not 25, and not 12 once kept or failed; a
@@ -620,16 +632,22 @@ Core:
   and once all 4 are kept an idle frame reports nothing new and the cache
   still holds all 4; with a byte limit that fits 3 estimates, the margin
   stops after one; a scroll that leaves a kept preview out of the targets
-  lets the cache drop it past the limit; drawing with a
-  half-block picker into `TestBackend` puts `▀` cells in the reserved
+  lets the cache drop it past the limit; a waiting job whose item
+  scrolled away is dropped before it is decoded; a room opened again
+  after it was gone reports its list again; a kept tmux sixel preview
+  is encoded again for another cell size and not drawn meanwhile; a
+  panic while making a preview fails it; drawing with the
+  half-block encoder into `TestBackend` puts `▀` cells in the reserved
   rows at column 2, and with the image two rows above the pane only its
-  visible rows; a tmux sixel encoder leaves a partly visible preview's
+  visible rows; half blocks fill their box whatever cell size their
+  pixels are in; a tmux sixel encoder leaves a partly visible preview's
   rows blank; after a scroll that moved a fully visible one, the first
   draw leaves its cells without the image and asks for the second draw,
   and the second draw draws it at its new place; a frame that only adds a
   placement draws it at once without a second draw; a preview under the
   mention menu's area is not drawn; the cache drops the least recently
-  drawn preview that is not a target past 64 entries or 64 MiB.
+  drawn preview that is not a target past 64 entries or 64 MiB, and
+  counts a kitty preview's transmission.
 
 ## Task G1a: Timeline previews, fetching and configuration
 

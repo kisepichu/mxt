@@ -6,15 +6,16 @@
 //! and the list of previews to fetch.
 
 use std::cmp::Reverse;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::io;
 use std::mem;
 use std::ops::RangeInclusive;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 
-use image::{DynamicImage, RgbaImage, imageops};
+use image::{DynamicImage, ImageError, RgbaImage, imageops};
 use mxt_core::app::App;
 use mxt_core::ids::TimelineId;
 use mxt_core::msg::Msg;
@@ -22,11 +23,18 @@ use mxt_core::timeline::{ItemRef, MediaBytes};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Rect, Size};
 use ratatui::widgets::Widget as _;
+use ratatui_image::errors::Errors;
 use ratatui_image::protocol::Protocol;
+use ratatui_image::protocol::halfblocks::{HalfBlock, Halfblocks};
 use ratatui_image::sliced::{SignedPosition, SlicedImage, SlicedProtocol};
 use ratatui_image::{FilterType, FontSize, Image, Resize};
+use tracing::debug;
 
 use crate::image_view::{PreviewEncoder, decode, tmux_sixel};
+
+/// The worker thread's name, by which the panic hook knows it (see
+/// `terminal::install_panic_hook`).
+pub(crate) const WORKER: &str = "mxt-previews";
 
 /// What a not yet kept preview is counted as per pixel of its reserved
 /// size, for the scaled image and again for its encoding.
@@ -135,15 +143,22 @@ pub(crate) struct Previews {
     rows: ImageRows,
     encoder: Arc<PreviewEncoder>,
     limits: Limits,
-    jobs: Sender<Job>,
+    jobs: Sender<(Job, Arc<PreviewEncoder>)>,
     done: Receiver<Done>,
     /// The previews kept, the least recently drawn or finished first.
     kept: Vec<(ItemRef, Preview)>,
-    /// The items whose job is with the worker.
-    queued: HashSet<ItemRef>,
+    /// The jobs waiting for the worker, oldest first. They wait here, each
+    /// with its fetched file or scaled image, so that those whose item is
+    /// no target any more are dropped before they are decoded (see
+    /// [`Previews::set_targets`]); the worker gets one job at a time.
+    pending: VecDeque<Job>,
+    /// The item whose job is with the worker.
+    working: Option<ItemRef>,
     /// The items whose preview could not be fetched, decoded or encoded,
     /// until the shown timeline changes.
     failed: HashSet<ItemRef>,
+    /// The timeline the last frame showed (see [`Previews::begin_frame`]).
+    shown: Option<TimelineId>,
     /// The targets of the last frame that laid them out, in order (see
     /// [`Previews::choose_targets`]).
     targets: Vec<(ItemRef, Target)>,
@@ -167,14 +182,14 @@ impl Previews {
         limits: Limits,
         wake: Box<dyn Fn() + Send>,
     ) -> io::Result<Previews> {
-        let (jobs, job_receiver) = mpsc::channel::<Job>();
+        let (jobs, job_receiver) = mpsc::channel::<(Job, Arc<PreviewEncoder>)>();
         let (done_sender, done) = mpsc::channel();
         // Ends once `Previews`, and with it the job sender, is dropped.
         thread::Builder::new()
-            .name("mxt-previews".to_owned())
+            .name(WORKER.to_owned())
             .spawn(move || {
-                for job in job_receiver {
-                    if done_sender.send(prepare(job)).is_err() {
+                for (job, encoder) in job_receiver {
+                    if done_sender.send(prepare(job, &encoder)).is_err() {
                         break;
                     }
                     wake();
@@ -187,8 +202,10 @@ impl Previews {
             jobs,
             done,
             kept: Vec::new(),
-            queued: HashSet::new(),
+            pending: VecDeque::new(),
+            working: None,
             failed: HashSet::new(),
+            shown: None,
             targets: Vec::new(),
             reported: None,
             report: None,
@@ -212,18 +229,13 @@ impl Previews {
         }
     }
 
-    /// Another timeline is shown: its items may be wanted again.
-    pub(crate) fn forget_failures(&mut self) {
-        self.failed.clear();
-    }
-
-    /// `UiEffect::ShowPreview`: the bytes go to the worker for a target of
-    /// the last frame; those of another item are dropped.
+    /// `UiEffect::ShowPreview`: the bytes wait for the worker for a target
+    /// of the last frame; those of another item are dropped.
     pub(crate) fn show(&mut self, item: ItemRef, bytes: MediaBytes) {
         let Some(&(_, target)) = self.targets.iter().find(|(target, _)| *target == item) else {
             return;
         };
-        if self.queued.contains(&item) || self.failed.contains(&item) || self.is_kept(&item) {
+        if self.is_queued(&item) || self.failed.contains(&item) || self.is_kept(&item) {
             return;
         }
         self.queue(item, Source::Bytes(bytes), target);
@@ -245,7 +257,7 @@ impl Previews {
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    self.failed.extend(self.queued.drain());
+                    self.fail_queued();
                     break;
                 }
             }
@@ -255,17 +267,32 @@ impl Previews {
         }
     }
 
-    /// Before each draw: forgets what the last draw placed.
-    pub(crate) fn begin_frame(&mut self) {
+    /// Before each draw: forgets what the last draw placed, and when the
+    /// shown timeline changed, also through none (no room open, a frame
+    /// that draws no timeline pane), the failed marks, whose items may be
+    /// wanted again, and the last report: the core drops its queue with
+    /// the open room, so a room opened again reports its wanted list even
+    /// when it is the one reported last.
+    pub(crate) fn begin_frame(&mut self, app: &App) {
         self.placed.clear();
+        let same = match &self.shown {
+            Some(shown) => app.shows(shown),
+            None => app.open_room().is_none(),
+        };
+        if !same {
+            self.shown = app.shown_timeline();
+            self.failed.clear();
+            self.reported = None;
+        }
     }
 
     /// The targets (design, "Fetching"): `on_pane`, the remote image items
     /// whose preview has not failed among the entries with a row on the
     /// pane, all of them, then those of `margin`, the entries around them by
     /// distance from the pane, until the next one would take the targets
-    /// past the cache's limits, counting a kept preview's bytes and the
-    /// estimate of one not kept yet.
+    /// past the cache's limits, counting a kept preview's bytes, at most
+    /// its estimate (see [`Preview::counted`]), and the estimate of one not
+    /// kept yet.
     pub(crate) fn choose_targets<'a>(
         &self,
         on_pane: impl IntoIterator<Item = (&'a ItemRef, Target)>,
@@ -273,7 +300,7 @@ impl Previews {
     ) -> Vec<(ItemRef, Target)> {
         let cell = self.encoder.cell();
         let cost = |item: &ItemRef, target: Target| match self.preview_of(item) {
-            Some(preview) => preview.bytes(),
+            Some(preview) => preview.counted(),
             None => estimate(target.size, cell),
         };
         let mut targets = Vec::new();
@@ -370,16 +397,17 @@ impl Previews {
     }
 
     /// After the frame's layout: `targets` from [`Previews::choose_targets`]
-    /// for the timeline `app` shows. The cache drops what is past its limits
-    /// and no target, kept targets made for another size or cell size are
-    /// encoded again, and the wanted list, the targets the cache neither
-    /// keeps nor is decoding (the failed ones are no targets), is reported
-    /// when it differs from the last report.
+    /// for the timeline `app` shows. The jobs waiting for the worker whose
+    /// item is no target are dropped, the cache drops what is past its
+    /// limits and no target, kept targets made for another size or cell
+    /// size are encoded again, and the wanted list, the targets the cache
+    /// neither keeps nor is decoding (the failed ones are no targets), is
+    /// reported when it differs from the last report.
     pub(crate) fn set_targets(&mut self, app: &App, targets: Vec<(ItemRef, Target)>) {
         self.targets = targets;
+        self.drop_pending();
         self.settle_cache();
-        let wanted =
-            |(item, _): &&(ItemRef, Target)| !self.queued.contains(item) && !self.is_kept(item);
+        let wanted = |(item, _): &&(ItemRef, Target)| !self.is_queued(item) && !self.is_kept(item);
         let same = self.reported.as_ref().is_some_and(|(timeline, items)| {
             app.shows(timeline)
                 && items
@@ -440,42 +468,86 @@ impl Previews {
         self.kept.iter().any(|(kept, _)| kept == item)
     }
 
+    /// Whether the item's job waits for the worker or is with it.
+    fn is_queued(&self, item: &ItemRef) -> bool {
+        self.working.as_ref() == Some(item) || self.pending.iter().any(|job| job.item == *item)
+    }
+
     fn queue(&mut self, item: ItemRef, source: Source, target: Target) {
-        let job = Job {
-            item: item.clone(),
+        self.pending.push_back(Job {
+            item,
             source,
             target,
-            encoder: Arc::clone(&self.encoder),
+        });
+        self.dispatch();
+    }
+
+    /// Hands the oldest waiting job to the worker unless it has one, in
+    /// the current encoder.
+    fn dispatch(&mut self) {
+        if self.working.is_some() {
+            return;
+        }
+        let Some(job) = self.pending.pop_front() else {
+            return;
         };
-        if self.jobs.send(job).is_ok() {
-            self.queued.insert(item);
+        let item = job.item.clone();
+        if self.jobs.send((job, Arc::clone(&self.encoder))).is_ok() {
+            self.working = Some(item);
         } else {
             self.failed.insert(item);
+            self.fail_queued();
         }
     }
 
+    /// The worker is gone, after a panic outside a job: no queued preview
+    /// can be made.
+    fn fail_queued(&mut self) {
+        self.failed.extend(self.working.take());
+        self.failed
+            .extend(self.pending.drain(..).map(|job| job.item));
+    }
+
+    /// Drops the waiting jobs whose item is no target, which are wanted
+    /// again once they are targets; the others are made for their target's
+    /// current size.
+    fn drop_pending(&mut self) {
+        let targets = &self.targets;
+        self.pending.retain_mut(
+            |job| match targets.iter().find(|(item, _)| *item == job.item) {
+                Some(&(_, target)) => {
+                    job.target = target;
+                    true
+                }
+                None => false,
+            },
+        );
+    }
+
+    /// The worker's answer, after which it takes the next waiting job.
     fn accept(&mut self, done: Done) {
+        self.working = None;
         match done {
             Done::Ready(item, preview) => {
-                self.queued.remove(&item);
                 self.kept.retain(|(kept, _)| *kept != item);
                 self.kept.push((item, preview));
             }
             Done::Failed(item) => {
-                self.queued.remove(&item);
                 self.failed.insert(item);
             }
         }
+        self.dispatch();
     }
 
-    /// Drops the least recently drawn previews past the limits, never a
-    /// target, so that a window holding more previews than the limits keeps
-    /// them instead of fetching and dropping them in turn; and sends the
-    /// targets made for another size or cell size to the worker, which
-    /// scales and encodes them again from their scaled image.
+    /// Drops the least recently drawn previews past the limits, counting
+    /// what each one holds (see [`Preview::bytes`]), never a target, so that
+    /// a window holding more previews than the limits keeps them instead of
+    /// fetching and dropping them in turn; and sends the targets made for
+    /// another size or cell size to the worker, which scales and encodes
+    /// them again from their scaled image.
     fn settle_cache(&mut self) {
         loop {
-            let bytes: usize = self.kept.iter().map(|(_, preview)| preview.bytes()).sum();
+            let bytes: usize = self.kept.iter().map(|(_, preview)| preview.bytes).sum();
             if self.kept.len() <= self.limits.count && bytes <= self.limits.bytes {
                 break;
             }
@@ -583,7 +655,6 @@ struct Job {
     item: ItemRef,
     source: Source,
     target: Target,
-    encoder: Arc<PreviewEncoder>,
 }
 
 enum Source {
@@ -608,14 +679,29 @@ struct Preview {
     /// What it was made for.
     target: Target,
     cell: FontSize,
+    /// What it holds: its scaled image and its encoding (see
+    /// [`encoding_bytes`]).
+    bytes: usize,
 }
 
 impl Preview {
-    /// The scaled image's bytes and its encoding's, counted as 4 bytes per
-    /// pixel of the encoded image, so that a kept preview never counts more
-    /// than its estimate.
-    fn bytes(&self) -> usize {
-        self.scaled.as_bytes().len() + pixels(self.encoded.size(), self.cell) * BYTES_PER_PIXEL
+    fn new(scaled: DynamicImage, encoded: Encoded, target: Target, cell: FontSize) -> Preview {
+        let bytes = scaled.as_bytes().len() + encoding_bytes(&encoded, cell);
+        Preview {
+            scaled,
+            encoded,
+            target,
+            cell,
+            bytes,
+        }
+    }
+
+    /// What the targets count it as: its bytes, at most its estimate (a
+    /// kitty preview holds more), so that keeping a target never pushes
+    /// another out of the targets, which would fetch, decode and drop
+    /// previews in turn.
+    fn counted(&self) -> usize {
+        self.bytes.min(estimate(self.target.size, self.cell))
     }
 
     /// Whether it was made for `target` in cells of `cell` pixels.
@@ -640,33 +726,97 @@ impl Encoded {
     }
 }
 
-/// The worker's work on one job: the fetched file decoded with the message
-/// view's `decode` within the target's pixels (the format sniffed, the
-/// memory limit, the Exif orientation), or the kept scaled image, scaled to
-/// fit the target with a triangle filter (`Resize::Scale` with the image's
-/// dimensions, `Resize::Fit` without), padded to whole cells as
-/// `Resize::resize` does (ratatui-image `src/lib.rs:413-437`) and encoded
-/// for the protocol. A decoding or encoding error fails the preview.
-fn prepare(job: Job) -> Done {
+/// The bytes an encoding in cells of `cell` pixels holds while it is kept,
+/// as far as ratatui-image shows them: the escape sequences of sixel, cut
+/// into bands at draw time, and of each iTerm2 row (their public `data`);
+/// kitty's transmission computed from its pixels, base64 of RGBA, which
+/// ratatui-image keeps after sending it (`KittyProtoState`,
+/// `src/protocol/kitty.rs:25-41`; `transmit_virtual`, `kitty.rs:226-276`);
+/// half blocks' cells, one `HalfBlock` each.
+fn encoding_bytes(encoded: &Encoded, cell: FontSize) -> usize {
+    match encoded {
+        Encoded::Sliced(SlicedProtocol::Sliced(rows)) => {
+            rows.iter().map(|row| protocol_bytes(row, cell)).sum()
+        }
+        Encoded::Sliced(SlicedProtocol::Sixel(sixel)) => sixel.borrow_owner().data.len(),
+        Encoded::Sliced(SlicedProtocol::Kitty(_)) => kitty_bytes(encoded.size(), cell),
+        Encoded::Sliced(SlicedProtocol::Halfblocks(_)) => half_block_bytes(encoded.size()),
+        Encoded::TmuxSixel(protocol) => protocol_bytes(protocol, cell),
+    }
+}
+
+fn protocol_bytes(protocol: &Protocol, cell: FontSize) -> usize {
+    match protocol {
+        Protocol::Sixel(sixel) => sixel.data.len(),
+        Protocol::ITerm2(iterm2) => iterm2.data.len(),
+        Protocol::Kitty(_) => kitty_bytes(protocol.size(), cell),
+        Protocol::Halfblocks(_) => half_block_bytes(protocol.size()),
+    }
+}
+
+/// Base64 of the RGBA pixels of `size` in cells of `cell` pixels.
+fn kitty_bytes(size: Size, cell: FontSize) -> usize {
+    (pixels(size, cell) * BYTES_PER_PIXEL).div_ceil(3) * 4
+}
+
+fn half_block_bytes(size: Size) -> usize {
+    usize::from(size.width) * usize::from(size.height) * size_of::<HalfBlock>()
+}
+
+/// Why the worker could not make a preview.
+#[derive(Debug)]
+enum Failure {
+    Decode(ImageError),
+    Encode(Errors),
+}
+
+/// The worker's work on one job (see [`make`]).
+fn prepare(job: Job, encoder: &PreviewEncoder) -> Done {
     let Job {
         item,
         source,
         target,
-        encoder,
     } = job;
-    match make(source, target, &encoder) {
-        Some(preview) => Done::Ready(item, preview),
-        None => Done::Failed(item),
+    answer(item, || make(source, target, encoder))
+}
+
+/// The worker's answer for `item`: the preview `make` makes, or a failed
+/// preview, logged at `debug` (design, "Logging"). A panic while making it,
+/// a decoder's or an encoder's on an image anyone in the room sent, fails
+/// this preview alone: the panic hook logs it for this thread and leaves
+/// the terminal alone (see `terminal::install_panic_hook`), and the worker
+/// goes on with the next job.
+fn answer(item: ItemRef, make: impl FnOnce() -> Result<Preview, Failure>) -> Done {
+    // Nothing `make` touches is used after a panic: the job's file or
+    // image is its own, and the encoder is only read.
+    match panic::catch_unwind(AssertUnwindSafe(make)) {
+        Ok(Ok(preview)) => Done::Ready(item, preview),
+        Ok(Err(Failure::Decode(error))) => {
+            debug!(?item, "a timeline preview could not be decoded: {error}");
+            Done::Failed(item)
+        }
+        Ok(Err(Failure::Encode(error))) => {
+            debug!(?item, "a timeline preview could not be encoded: {error}");
+            Done::Failed(item)
+        }
+        Err(_) => Done::Failed(item),
     }
 }
 
-fn make(source: Source, target: Target, encoder: &PreviewEncoder) -> Option<Preview> {
+/// The fetched file decoded with the message view's `decode` within the
+/// target's pixels (the format sniffed, the memory limit, the Exif
+/// orientation), or the kept scaled image, scaled to fit the target with a
+/// triangle filter (`Resize::Scale` with the image's dimensions,
+/// `Resize::Fit` without), padded to whole cells as `Resize::resize` does
+/// (ratatui-image `src/lib.rs:413-437`) and encoded for the protocol (see
+/// [`encode`]).
+fn make(source: Source, target: Target, encoder: &PreviewEncoder) -> Result<Preview, Failure> {
     let cell = encoder.cell();
     let image = match source {
         Source::Bytes(bytes) => {
             let width = u32::from(target.size.width) * u32::from(cell.width);
             let height = u32::from(target.size.height) * u32::from(cell.height);
-            decode(bytes.as_bytes(), width, height).ok()?
+            decode(bytes.as_bytes(), width, height).map_err(Failure::Decode)?
         }
         Source::Scaled(image) => image,
     };
@@ -685,20 +835,37 @@ fn make(source: Source, target: Target, encoder: &PreviewEncoder) -> Option<Prev
         .into_rgba8();
     let mut padded = RgbaImage::new(width, height);
     imageops::replace(&mut padded, &scaled, 0, 0);
-    let padded = DynamicImage::ImageRgba8(padded);
-    let encoded = match encoder {
-        PreviewEncoder::Picker(picker) => Encoded::Sliced(
-            SlicedProtocol::new_with_resize(picker, padded, size, Resize::Fit(None)).ok()?,
-        ),
-        PreviewEncoder::TmuxSixel(cell) => {
-            Encoded::TmuxSixel(tmux_sixel(&padded, *cell, &Resize::Fit(None), size).ok()?)
-        }
-    };
-    Some(Preview {
-        scaled: DynamicImage::ImageRgba8(scaled),
+    let encoded =
+        encode(DynamicImage::ImageRgba8(padded), size, encoder).map_err(Failure::Encode)?;
+    Ok(Preview::new(
+        DynamicImage::ImageRgba8(scaled),
         encoded,
         target,
         cell,
+    ))
+}
+
+/// `padded`, an image of `size` in whole cells, encoded for the protocol.
+/// Half blocks take exactly `size`, whatever cell size the pixels are in
+/// (`Halfblocks::new` scales them to 1 by 2 per cell,
+/// `src/protocol/halfblocks/primitive.rs:13-18`); ratatui-image's picker
+/// would fit them again in the cell size it measured, a row or columns
+/// short of the reserved size (`Picker::new_protocol`,
+/// `src/picker.rs:270-287`).
+fn encode(padded: DynamicImage, size: Size, encoder: &PreviewEncoder) -> Result<Encoded, Errors> {
+    Ok(match encoder {
+        PreviewEncoder::Picker(picker) => Encoded::Sliced(SlicedProtocol::new_with_resize(
+            picker,
+            padded,
+            size,
+            Resize::Fit(None),
+        )?),
+        PreviewEncoder::Halfblocks => {
+            Encoded::Sliced(SlicedProtocol::Halfblocks(Halfblocks::new(padded, size)?))
+        }
+        PreviewEncoder::TmuxSixel(cell) => {
+            Encoded::TmuxSixel(tmux_sixel(&padded, *cell, &Resize::Fit(None), size)?)
+        }
     })
 }
 

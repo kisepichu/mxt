@@ -131,24 +131,24 @@ impl Images {
     }
 
     /// How timeline previews are encoded (design, "Images in the
-    /// timeline"): as the view's images, but in half blocks where
-    /// ratatui-image would send iTerm2 images or sixel through tmux's
-    /// passthrough, which tmux neither moves nor clears: a forced `iterm2`
-    /// or `sixel` inside tmux, and `auto` over SSH from a local tmux, where
-    /// `TMUX` is unset but `TERM` names tmux. The view keeps its protocol.
+    /// timeline"): as the view's images, but half blocks without the
+    /// picker, laid out in 10 by 20 pixel cells whatever cell size it
+    /// measured, and also where ratatui-image would send iTerm2 images or
+    /// sixel through tmux's passthrough, which tmux neither moves nor
+    /// clears: a forced `iterm2` or `sixel` inside tmux, and `auto` over SSH
+    /// from a local tmux, where `TMUX` is unset but `TERM` names tmux. The
+    /// view keeps its protocol.
     pub(crate) fn preview_encoder(&self) -> PreviewEncoder {
         match &self.encoder {
             Encoder::Picker(picker) => {
-                let mut picker = picker.clone();
-                if picker.tmux_detected()
-                    && matches!(
-                        picker.protocol_type(),
-                        ProtocolType::Iterm2 | ProtocolType::Sixel
-                    )
-                {
-                    picker.set_protocol_type(ProtocolType::Halfblocks);
+                let protocol = picker.protocol_type();
+                let passthrough = picker.tmux_detected()
+                    && matches!(protocol, ProtocolType::Iterm2 | ProtocolType::Sixel);
+                if passthrough || protocol == ProtocolType::Halfblocks {
+                    PreviewEncoder::Halfblocks
+                } else {
+                    PreviewEncoder::Picker(picker.clone())
                 }
-                PreviewEncoder::Picker(picker)
             }
             Encoder::TmuxSixel(cell) => PreviewEncoder::TmuxSixel(*cell),
         }
@@ -239,24 +239,24 @@ impl Images {
 /// How timeline previews are encoded, from [`Images::preview_encoder`].
 #[derive(Clone)]
 pub(crate) enum PreviewEncoder {
-    /// ratatui-image's sliced images, in the protocol of the picker.
+    /// ratatui-image's sliced images, in the protocol of the picker: sixel,
+    /// kitty graphics or iTerm2.
     Picker(Picker),
+    /// Half blocks of exactly the reserved size (see
+    /// `previews::encode`).
+    Halfblocks,
     /// Sixel for tmux to store, in tmux's cell size (see [`tmux_sixel`]).
     TmuxSixel(FontSize),
 }
 
 impl PreviewEncoder {
     /// The cell size in pixels that previews are laid out and scaled in:
-    /// tmux's for its sixel, 10 by 20 for half blocks, which draw a cell as
-    /// 1 by 2 pixels whatever its size, and the picker's otherwise.
+    /// the picker's, 10 by 20 for half blocks, which draw a cell as 1 by 2
+    /// pixels whatever its size, and tmux's for its sixel.
     pub(crate) fn cell(&self) -> FontSize {
         match self {
-            PreviewEncoder::Picker(picker)
-                if picker.protocol_type() == ProtocolType::Halfblocks =>
-            {
-                HALF_BLOCK_CELL
-            }
             PreviewEncoder::Picker(picker) => picker.font_size(),
+            PreviewEncoder::Halfblocks => HALF_BLOCK_CELL,
             PreviewEncoder::TmuxSixel(cell) => *cell,
         }
     }

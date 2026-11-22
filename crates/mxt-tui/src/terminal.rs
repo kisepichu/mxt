@@ -24,6 +24,7 @@ use mxt_core::settings::ImagePreview;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::ListState;
+use tracing::warn;
 
 use crate::clipboard::SharedRegister;
 use crate::composer::{Composer, Composers};
@@ -31,7 +32,7 @@ use crate::image_view::Images;
 use crate::input::{key_from_crossterm, pasted_text};
 use crate::opener::Opener;
 use crate::overlay::Overlays;
-use crate::previews::{ImageRows, Limits, Previews};
+use crate::previews::{self, ImageRows, Limits, Previews};
 use crate::timeline_view::{TimeFormat, TimelinePane};
 use crate::timers::Timers;
 use crate::view::{self, Panes, RoomListLayout, View};
@@ -181,8 +182,8 @@ impl Tui {
     /// once. An image that failed to encode while drawing becomes
     /// `Msg::EffectFailed`, once per image. Fails once the terminal has
     /// been restored, which while the UI runs only the panic hook does, so a
-    /// panic in any task ends the event loop instead of drawing onto the
-    /// main screen.
+    /// panic in any task but the previews' worker ends the event loop
+    /// instead of drawing onto the main screen.
     pub fn draw(&mut self, app: &App) -> io::Result<Vec<Msg>> {
         if !ACTIVE.load(Ordering::SeqCst) {
             return Err(io::Error::other("the terminal was restored after a panic"));
@@ -242,7 +243,7 @@ impl Tui {
             ..
         } = self;
         if let Some(previews) = previews {
-            previews.begin_frame();
+            previews.begin_frame(app);
         }
         let composer = app
             .shown_timeline()
@@ -568,10 +569,18 @@ fn cannot_show(error: impl std::fmt::Display) -> Msg {
     }
 }
 
-/// Restores the terminal before the default hook prints the panic.
+/// Restores the terminal before the default hook prints the panic. A panic
+/// on the previews' worker thread fails only that preview, which shows its
+/// text line (see `previews::answer`), so mxt goes on: the hook leaves the
+/// terminal alone, prints nothing over the UI, and logs the panic at
+/// `warn`.
 pub fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().name() == Some(previews::WORKER) {
+            warn!("a timeline preview's worker panicked: {info}");
+            return;
+        }
         // The panic is the error worth printing.
         let _ = restore_terminal();
         previous(info);
