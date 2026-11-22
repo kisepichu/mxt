@@ -9,11 +9,12 @@ in the timeline, off by default, at most `image_rows` rows tall. G2:
 `:` command line and the `/` search lines. G5: `<Up>` and `<Down>` at the
 composer's first and last line. G6: deleting the word before the cursor in
 insert mode (`<C-w>`, `<A-BS>`). G7 to G10, the room list with
-`sort = "mentions, unread, read"`: the cursor stays on its row when the
-open room moves (G7), `]u` opens the topmost unread room (G8), a new sort
-key `notify` puts the rooms that notify before those whose only news is
-a dim count (G9), and `read` orders unread rooms by their newest message
-(G10). G11: search highlighting in the timeline, with `:noh`.
+`sort = "mentions, unread, read"`: the cursor goes to the room after the
+open room when that moves (G7), `]u` opens the topmost unread room (G8),
+a new sort key `notify` puts the rooms that notify before those whose
+only news is a dim count (G9), and `read` orders unread rooms by their
+newest message (G10). G11: search highlighting in the timeline, with
+`:noh`.
 
 **Architecture:** G1 is two tasks. Task G1b (slot b) is the tui adapter's
 part: the reserved rows, a worker thread that decodes and encodes
@@ -472,56 +473,83 @@ working"). A user's own `]u` binding is unaffected.
   timeline before), and `]u` is `{ action = "room.open", filter =
   "unread" }`. `[u` is unchanged."
 
-## Task G7: The room list cursor stays on its row
+## Task G7: The room list cursor goes to the room after the open room
 
 **Slot a. Crates:** `mxt-core`. Starts after G8 is merged.
-**Files:** `crates/mxt-core/src/rooms.rs` (`upsert`'s result),
-`app/rooms.rs` (`open_at`, `upsert_room`, `clear_room_unread`, `follow`),
-`app/tests/room_actions.rs`; `docs/keys.md`, `CHANGELOG.md`.
+**Files:** `crates/mxt-core/src/rooms.rs` (`RoomList::open`'s result),
+`app.rs` (the flag), `app/rooms.rs` (`open_at`, `upsert_room`,
+`clear_room_unread`, `remove_room`, `place_room_cursor`, `follow`),
+`app/search.rs` (`place_room_cursor`), `app/tests/room_actions.rs`;
+`docs/keys.md`, the design ("Room list", "Matrix adapter", "Testing"),
+`CHANGELOG.md`.
 **Breaking:** no: where the cursor rests is behaviour.
 
-- [ ] `rooms.rs`: `RoomList::upsert` returns a small struct with `old`,
-  `new` and `read_only`: whether the stored room and the update differ
-  only in `unread` and `last_read` (false for a new room), compared as the
-  two summaries with those two fields set equal. Callers updated.
-- [ ] `app/rooms.rs`: `open_at` remembers whether `room_cursor` was
-  `Some(index)` before `self.rooms.open(&id)`; if so the cursor stays at
-  `index` (at most the last index), otherwise it goes to the opened room's
-  new index as now. `clear_room_unread` on the open room with the cursor
-  on it keeps the cursor's index; elsewhere `follow` as now.
-  `upsert_room` of the open room with the cursor on it and `read_only`
-  keeps the cursor's index; every other upsert uses `follow`. Doc
+The rule (the supervisor's, 2026-11-22, replacing the earlier ones that
+kept the cursor's row): opening a room by any path puts the room list's
+cursor on it; the first time the open room then moves in the list (its
+index changes because of a change to the room itself: its opening, its
+receipt or `room.mark_read`, an update of it) while the cursor is still
+on it, the cursor goes to the room that came right after it in the order
+before the move, the room before it when it was last, and stays when the
+list has only that room; from then on the cursor follows the room it is
+on. Another room shifting the open room (its update passing it, a room
+added or removed above it, the previously open room placed again during
+an open) is not the open room's move: the cursor follows the open room
+and the rule stays. A cursor moved off the open room before it moved
+follows its room. No row is kept anywhere.
+
+- [ ] `rooms.rs`: `RoomList::open` places the previously open room again
+  with no room open, then the opened room, and returns both moves (old
+  and new index) in that order.
+- [ ] `app/rooms.rs`: `App` keeps one flag, "opening put the cursor on
+  the open room and it has not moved since". `open_at` puts the cursor
+  on the room at `index` and sets the flag before it applies the two
+  moves. One function applies every change of the list to the cursor
+  (moves by `follow`, removals), told whether the change was one of the
+  open room that changed its index (the second step of an open, the open
+  room's upsert or optimistic clearing): the cursor follows its room,
+  except when the flag is set and the change is such a move; then the
+  flag clears and the cursor goes to the room next to it before the
+  change, tracked through the same change. `place_room_cursor` clears the
+  flag when the row changes; the removal of the open room clears it. Doc
   comments name the design's rule ("Room list").
-- [ ] Tests in `app/tests/room_actions.rs`, with `sort = "mentions, unread,
-  read"` and four rooms: `<CR>` on the unread room at row 0 opens it, the
-  room moves among the read rooms, and the cursor is on row 0, now the
-  next unread room; `]u` from the timeline with the room list's cursor on
-  the topmost unread room keeps the cursor on that row; the room picker
-  and `:open` opening the room under the cursor do the same; `]u` opening
-  a room while the cursor is on another room puts the cursor on the
-  opened room's new place; a receipt's optimistic clearing and
-  `room.mark_read` of the open room with the cursor on it keep the row; an
-  upsert of the open room with a newer `last_read`, cleared counts and the
-  same `latest_activity` keeps the row, while one with newer activity
-  (under `recent`), one that renames it (under `name`) and one that
-  changes its mode take the cursor along; an upsert of another room under
-  the cursor takes it along, and one passing the cursor shifts its index,
-  as before; opening the last room keeps the cursor within the list; with
-  the terminal unfocused, opening A from row 0 and then B, which moved
-  into row 0, puts A, still unread and no longer open, back at row 0
-  under the cursor, where `<CR>` opens it again (the documented case).
-- [ ] Docs: `docs/keys.md`, "The screen": after you open a room, the room
-  list's cursor stays where that room was, on the room that took its
-  place, so `<CR>` opens the next one; when other rooms move, the cursor
-  stays on its room; a room you left unread (the terminal had no focus)
-  goes back to its place among the unread rooms and can be the one under
-  the cursor again.
-- [ ] CHANGELOG `### Changed`: "When the room you open moves in the room
-  list (it sorts as read while open), the room list's cursor stays on its
-  row, on the room that took its place, as in a mail inbox; also when
-  `]u`, the picker or `:open` opens the room under the cursor, and when
-  the open room moves because you read it. Other moves keep the cursor on
-  its room."
+- [ ] Tests in `app/tests/room_actions.rs`, with the owner's
+  `sort = "mentions, notify, unread, read"` where it matters: `<CR>` on
+  the top room, which sorts as read as it opens, puts the cursor on the
+  room after it, and its receipt (a second move) leaves the cursor there,
+  for `<CR>`, `]u`, the room picker and `:open`; the owner's `]u`
+  (`filter = "notify"`) from a cursor elsewhere leaves the cursor on the
+  next room that notifies, at the top after `<C-w><C-h>`. Under
+  `sort = "read"`: `<CR>` on an unread room at row k, then its receipt
+  or `room.mark_read` lifting it to row 0, puts the cursor on the room
+  from row k+1, still on row k+1, which `<CR>` opens; the last room
+  moving puts the cursor on the room before it; a cursor moved off the
+  open room first (also off and back) follows its room, a change of focus
+  alone does not count; an update of the open room (a receipt from
+  elsewhere, a new message, a rename) is a first move too; another
+  room's message lifting it past the open room, a room added above it,
+  rooms removed above or after it and the previously open room going
+  back above it as it opens leave the cursor on the open room, and the
+  open room's own later move then takes the cursor to the room after it;
+  the open room removed leaves the cursor in the list; with the terminal
+  unfocused, the room left unread goes back among the unread rooms and
+  the cursor goes to the room after the newly opened one.
+- [ ] Docs: `docs/keys.md`, "The screen": the rule in user terms, with
+  the inbox walk under the owner's sort and under `read` alone, and that
+  another room passing the open room does not count.
+- [ ] CHANGELOG `### Changed`: "Opening a room, with `<CR>`, `]u`, `[u`,
+  the picker, `:open`, `:join` or the jump list, puts the room list's
+  cursor on it, and the first time that room then moves in the list
+  because of a change to it, while the cursor is still on it (it sorts as
+  read as it opens, you read it, a message arrives in it), the cursor
+  goes to the room that came right after it, or to the room before it if
+  it was the last, as in a mail inbox: with
+  `sort = "mentions, notify, unread, read"`, `<CR>` or `]u` opens the top
+  room, it drops out of its group, and the cursor is on the next one.
+  Another room passing the open room does not count: the cursor stays on
+  the open room. After that the cursor stays on its room as rooms move,
+  and so it does when you moved the cursor off the room before it moved.
+  Before, the cursor went along with the room you opened."
 
 ## Task G1b: Timeline previews, the tui part
 
@@ -1155,9 +1183,9 @@ the owner's settings (`sort = "mentions, notify, unread, read"`, `]u` and
 its group (the rooms that notify when it notifies, the dim rooms
 otherwise); the rooms with dim counts stay below the rooms that notify,
 with their dim counts, and `]u` passes over them; `]u` opens the topmost
-room that notifies other than the open one; after `<CR>` on a room and
-`<C-w><C-h>`, the cursor is on the row where the room was. The log has
-no errors.
+room that notifies other than the open one; after `<CR>` on a room or
+`]u` opens a room that moves as it opens, `<C-w><C-h>` shows the cursor
+on the room that came right after it. The log has no errors.
 
 After the release with G1, the owner, in WezTerm, in the test room only,
 on the check device, with `[ui.timeline] images = "on"`:

@@ -470,10 +470,11 @@ covered by unit tests.
   the user's receipt or an older one, which the homeserver ignores (see
   "Room list"), so no echo comes, when the user's newest receipt is the
   same kind of unthreaded receipt mxt sends (the configured type, no
-  `thread_id`); a room last read with another kind moves once (see
-  "Risks"). A room whose only news is an edit is such a room when it is
-  opened, since the timeline shows the edit in the edited message's
-  place, but not for `room.mark_read`, whose receipt goes on the edit.
+  `thread_id`); a room last read with another kind moves once when the
+  user's receipt of mxt's kind is older (see "Risks"). A room whose only
+  news is an edit is such a room when it is opened, since the timeline
+  shows the edit in the edited message's place, but not for
+  `room.mark_read`, whose receipt goes on the edit.
   Raising `last_read` to the latest activity alone, as first designed,
   placed the room below the rooms read since its newest message until the
   echo moved it to the top. A room other than the open one
@@ -503,10 +504,11 @@ covered by unit tests.
   still count the events up to it, so the room being read would sit among
   the unread rooms. The rule relies on no SDK ordering. The badge can
   still show such a count until the receipt's echo. `RoomList` knows the
-  open room (`RoomList::open`): opening a room places it and the
-  previously open room again; the room list's cursor stays on its row
-  when it was on the opened room, and otherwise goes to the opened room
-  (see "Room list").
+  open room (`RoomList::open`): opening a room places the previously open
+  room and then the opened one again; opening puts the room list's cursor
+  on the opened room, and that room's first move of its own (not a shift
+  by another room) takes the cursor to the room after it (see "Room
+  list").
 - Room keys are shared with the SDK's default recipient strategy
   (`CollectStrategy::AllDevices`), which does not refuse to send when another
   user's identity changes.
@@ -1037,23 +1039,56 @@ group, and moved the cursor with the room it opened.
 - The room list's cursor stays on its room when the order changes under
   it: a room that moves takes the cursor along when the cursor is on it,
   and otherwise the cursor's index shifts with the rooms that move past
-  it. One exception (added after 0.1.4): when the open room moves because
-  it was opened or read, a cursor on it stays on its row, now on the room
-  that moved into its place, as in a mail inbox (`<CR>` opens that one
-  next). Opened covers every path that opens the room under the cursor:
-  `<CR>`, `]u`, the picker, `:open`, `:join` and the jump list. Read
-  covers optimistic clearing of the open room (its receipt, or
-  `room.mark_read`) and an update of the open room that changes nothing
-  but its counts and `last_read` (a receipt's echo, cleared counts):
-  `RoomList::upsert` tells whether the stored room and the update differ
-  only there. Any other update of the open room (new activity, a rename
-  under `name`, a new notification mode) is another reorder, which the
-  cursor follows with the room. A room opened while the cursor is on
-  another room puts the cursor on the opened room in its new place, as
-  before. Opening also places the previously open room again by its
-  counts: when it is still unread (the terminal had no focus, so no
-  receipt went out), it can move into the cursor's row, and `<CR>` there
-  opens it again. The row is the cursor's index, at most the last room's.
+  it. One exception (added after 0.1.4), so that the cursor goes to "the
+  next one after where it was", as in a mail inbox: opening a room by any
+  path (`<CR>`, `]u`, `[u`, any `room.open` binding, the room picker,
+  `:open`, `:join`, the jump list) puts the cursor on it, and the first
+  time the open room then moves in the list while the cursor is still on
+  it, the cursor goes to the room that came right after it in the order
+  before the move, or to the room before it when it was the last (the
+  rule's "the cursor stays when the list has only that room" needs no
+  case: a room alone in the list never moves by a change of its own).
+  From then on the cursor is on another room and follows that room, as
+  every cursor does, so later moves of the open room never take the
+  cursor along. A move is a change of the room's index caused by a
+  change of the room itself: it sorts as read as it opens, its receipt or
+  `room.mark_read` lifts it, or an update of it places it again (new
+  activity, a receipt from another device, a rename under `name`, a new
+  notification mode). A shift of its index caused by another room is not
+  its move: another room's update passing it, a room added or removed
+  above it, the previously open room going back to its place as it
+  opens. The cursor then follows the open room, as every cursor follows
+  its room, and the rule stays for the room's own first move, however
+  late that comes. When the cursor moved off the open room before the
+  room moved (a motion or a search; moving off and back counts, a change
+  of focus does not), nothing special happens: the cursor follows its
+  room. One rule for every way of opening, and no row is kept anywhere.
+  Under `"mentions, notify, unread, read"` this walks the inbox: `<CR>`
+  or `]u` opens the top room, it drops out of its group, and the cursor
+  is on the next one. Under `read` alone, `<CR>` on an unread room leaves
+  it in place, its receipt lifts it to the top, and the cursor goes to
+  the room that was right below it. The supervisor decided this rule on
+  2026-11-22. It replaces the earlier rules of G7, which kept the cursor's
+  row when the open room moved because it was opened or read: the row
+  holds the next room only when the room moves down, while a read only
+  raises the open room's time under `read` and so moves it up, and after
+  `]u` opened a room away from the cursor, its receipt left the cursor far
+  down among the read rooms. A first version of the rule also counted
+  shifts by other rooms, which took the cursor off the open room for
+  changes it had nothing to do with: a read room below it lifted past it
+  by a message, or the room left unread going back above the room being
+  opened; the same day, only the room's own changes were made to count.
+  `App` keeps one flag, set as opening puts the cursor on the room and
+  cleared by the room's first move, by a cursor action that takes the
+  cursor to another row, and by the removal of the open room; each change
+  of the list tells the cursor whether it was one of the open room that
+  changed its index. `RoomList::open` places the previously open room
+  again and then the opened one, one room at a time, so only the second
+  step can be the opened room's move, while the cursor and the room after
+  it follow both steps and "the order before the move" is the order
+  before the open. Opening also places the previously open room
+  again by its counts: when it is still unread (the terminal had no
+  focus, so no receipt went out), it goes back among the unread rooms.
   Before the cursor was first placed it stays on the first room,
   whichever room that is. `]u`, `[u`, `room.open` and the
   room picker follow the list's order: `first`, `next` and `prev` are
@@ -1076,10 +1111,10 @@ group, and moved the cursor with the room it opened.
   for a room already read, here or on another device that sends the same
   kind of unthreaded receipt (the configured type, no `thread_id`). A room
   last read by a client that sends main-thread receipts (Element) or the
-  other type moves once (see "Risks"). With `unread` or
-  `mentions` the room moves among the rooms without unread messages when
-  it is opened, since the open room sorts as read. The user documentation
-  says so.
+  other type moves once when the user's receipt of mxt's kind is older
+  (see "Risks"). With `unread` or `mentions` the room moves among the
+  rooms without unread messages when it is opened, since the open room
+  sorts as read. The user documentation says so.
 
 The list is `ui.room_list.width` columns wide, its border included (30 by
 default). Terminals narrower than 90 columns give it a third of their width
@@ -1252,16 +1287,21 @@ query is matched against shortcodes and names.
 
 `]u` opens the topmost unread room in the room list's order other than
 the open one (`pick = "first"`, which skips the open room; changed after
-0.1.4 from `pick = "next"`, the next unread room after the open one, which
-in a list sorted by unread state was often far down, while a room with a
-new mention at the top waited). `[u` opens the previous unread room,
+0.1.4 from `pick = "next"`, the next unread room after the open one,
+which, under sorts where the open room keeps its place (`recent`, `read`
+alone, `name`), was often far down, while a room with a new mention at
+the top waited; under sorts that put every unread room before the open
+room (`unread` before `recent` or `read`, as in `"mentions, unread,
+read"`) the open room sorts as read, below the unread rooms, so `next`
+already wrapped to the topmost one). `[u` opens the previous unread room,
 wrapping around (`pick = "prev"`). Both count every badge, dim counts
 included; a binding with `filter = "notify"` skips the rooms whose only
 news is a dim count (see "Room list"). A room opened but not read (the
-terminal has no focus, or `]u` comes again before the timeline is drawn)
-stays unread: the next `]u` skips it while it is open, and once that
-`]u` has opened another room it is among the unread rooms again, so
-repeated `]u` alternates between the two topmost unread rooms.
+terminal has no focus, or `]u` comes again before the timeline is drawn),
+or whose only unread messages are replies in threads that were not shown
+(see "Threads"), stays unread: the next `]u` skips it while it is open,
+and once that `]u` has opened another room it is among the unread rooms
+again, so repeated `]u` alternates between the two topmost unread rooms.
 `room.mark_read` has no default binding; the
 configuration example binds it to `<leader>x` together with opening the
 next unread room.
@@ -3145,11 +3185,18 @@ panic on that worker is logged at `warn` (see "Error handling").
     something to read, a badge or a receipt on a newer event, and
     unchanged for one without, such as a room whose only news is an edit,
     an update never lowering it); `pick =
-    "first"` skipping the open room; the room list's cursor staying on its
-    row when the open room moves because it was opened or read (an update
-    that changes only its counts and `last_read`), and following its room
-    otherwise (new activity, a rename, a mode change); the search matcher
-    (case-insensitive as the search, byte
+    "first"` skipping the open room; the room list's cursor put on the
+    room that opens by any path and, on that room's first move of its
+    own, going to the room right after it (down as it opens under
+    `"mentions, notify, unread, read"` or as a rename moves it, up as its
+    receipt, `room.mark_read` or an update lifts it under `read` alone,
+    `]u` from a cursor elsewhere, the unfocused case), to the room before
+    it when it was last, and following its room on a second move and
+    after a cursor motion; staying on the open room, with the rule kept,
+    when another room's message lifts that room past it, a room is added
+    or removed above it, or the previously open room goes back above it as
+    it opens, and in the list when the open room or a room next to it is
+    removed; the search matcher (case-insensitive as the search, byte
     ranges on grapheme cluster boundaries, CJK, emoji with modifiers,
     lowercase forms of another length), the matches per plain line after
     the line's prefix, and the highlight turned on by every search and
