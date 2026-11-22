@@ -36,6 +36,13 @@ marked **Breaking:**.
   a default; bind it if yours tells it apart. These keys did nothing in
   insert mode before; `"<C-w>" = "nop"` and `"<A-BS>" = "nop"` in
   `[keymap.composer.insert]` keep that.
+- History in the `:` command line and the `/` search lines: `<Up>` and
+  `<Down>` (`command_line.history_prev` and `command_line.history_next`)
+  recall earlier lines that start with the text before the cursor, newest
+  first, and `<Down>` past the newest brings back what you typed. Commands
+  and searches keep separate histories of 100 lines each in
+  `$XDG_STATE_HOME/mxt/history` (mode 0600), across starts. `<Up>` and
+  `<Down>` did nothing on these lines before.
 
 ### Changed
 

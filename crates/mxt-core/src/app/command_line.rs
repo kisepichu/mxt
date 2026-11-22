@@ -1,12 +1,13 @@
-//! The `:` command line and the `/` search line: text editing, execution and
-//! completion.
+//! The `:` command line and the `/` search line: text editing, execution,
+//! completion and the histories.
 
 use super::join::join_candidates;
 use super::{App, StatusKind};
 use crate::command::{Argument, COMMANDS, parse_command};
-use crate::effect::Effect;
+use crate::effect::{Effect, StoreEffect};
 use crate::emoji;
 use crate::fuzzy;
+use crate::history::{History, LineHistories};
 use crate::keys::Key;
 use crate::line::{LineChange, LineEditor};
 use crate::msg::Pane;
@@ -29,10 +30,12 @@ pub struct CommandLine {
     pub input: LineEditor,
 }
 
-/// The open line and its completion, which ends with the line.
+/// The open line, its completion and its history browsing, which end with
+/// the line. At most one of them is going on: each ends the other.
 pub(super) struct OpenLine {
     line: CommandLine,
     completion: Option<Completion>,
+    browse: Option<Browse>,
 }
 
 /// The candidates of `command_line.complete` since the last edit or cursor
@@ -44,6 +47,19 @@ struct Completion {
     candidates: Vec<String>,
     /// The candidate in the text; `candidates.len()` stands for `typed`.
     shown: usize,
+}
+
+/// `command_line.history_prev` and `command_line.history_next` since the
+/// last other change of the line.
+struct Browse {
+    /// The text before the cursor at the first `history_prev`; the lines
+    /// that start with it match.
+    filter: String,
+    /// The text and cursor at the first `history_prev`, which come back past
+    /// the newest match.
+    typed: LineEditor,
+    /// The index in the history of the match in the line.
+    at: usize,
 }
 
 impl App {
@@ -59,18 +75,22 @@ impl App {
                 input: LineEditor::default(),
             },
             completion: None,
+            browse: None,
         });
     }
 
     /// A key released to the line: the line editor's. Editing the text or
-    /// moving the cursor ends a completion, and a backspace on an empty line
-    /// closes it.
+    /// moving the cursor ends a completion and the history browsing, and a
+    /// backspace on an empty line closes it.
     pub(super) fn type_into_line(&mut self, key: Key) {
         let Some(open) = &mut self.command_line else {
             return;
         };
         match open.line.input.key(key) {
-            LineChange::Text | LineChange::Cursor => open.completion = None,
+            LineChange::Text | LineChange::Cursor => {
+                open.completion = None;
+                open.browse = None;
+            }
             LineChange::BackspaceOnEmpty => self.command_line = None,
             LineChange::Nothing => {}
         }
@@ -82,6 +102,7 @@ impl App {
             && open.line.input.insert(text)
         {
             open.completion = None;
+            open.browse = None;
         }
     }
 
@@ -89,14 +110,16 @@ impl App {
         self.command_line = None;
     }
 
-    /// Closes the line, then runs its command or searches with its text (an
-    /// empty search text reuses the last pattern).
+    /// Closes the line, puts its text into the line's history, then runs its
+    /// command or searches with its text (an empty search text reuses the
+    /// last pattern).
     pub(super) fn execute_line(&mut self, effects: &mut Vec<Effect>) {
         let Some(open) = self.command_line.take() else {
             return;
         };
         let CommandLine { kind, input } = open.line;
         let text = input.into_text();
+        self.record_line(kind, &text, effects);
         match kind {
             LineKind::Command => match parse_command(&text) {
                 Ok(Some(action)) => self.run(&action, 1, effects),
@@ -107,15 +130,102 @@ impl App {
         }
     }
 
+    /// Records an executed line in its history, as it was typed, and when
+    /// that changed the history, saves both.
+    fn record_line(&mut self, kind: LineKind, text: &str, effects: &mut Vec<Effect>) {
+        let history = match kind {
+            LineKind::Command => &mut self.histories.commands,
+            LineKind::Search(_) => &mut self.histories.searches,
+        };
+        if history.record(text) {
+            let lines = |history: &History| history.lines().map(str::to_owned).collect();
+            effects.push(Effect::Store(StoreEffect::SaveHistory {
+                commands: lines(&self.histories.commands),
+                searches: lines(&self.histories.searches),
+            }));
+        }
+    }
+
+    /// `Msg::HistoryLoaded`.
+    pub(super) fn history_loaded(&mut self, commands: Vec<String>, searches: Vec<String>) {
+        self.histories = LineHistories {
+            commands: History::from_lines(commands),
+            searches: History::from_lines(searches),
+        };
+    }
+
+    /// `command_line.history_prev`: the first press takes the text before
+    /// the cursor as the filter and keeps the text and cursor; each press
+    /// puts the next older line of the line's history that starts with the
+    /// filter in the line, the cursor at its end. With none left it does
+    /// nothing.
+    pub(super) fn history_prev(&mut self) {
+        let Some(open) = &mut self.command_line else {
+            return;
+        };
+        let history = history_of(&self.histories, open.line.kind);
+        let input = &open.line.input;
+        let (filter, before) = match &open.browse {
+            Some(browse) => (browse.filter.as_str(), browse.at),
+            None => (&input.text()[..input.cursor()], history.lines().len()),
+        };
+        let older = history
+            .lines()
+            .enumerate()
+            .take(before)
+            .rev()
+            .find(|(_, line)| line.starts_with(filter));
+        let Some((at, line)) = older else {
+            return;
+        };
+        let browse = open.browse.get_or_insert_with(|| Browse {
+            filter: input.text()[..input.cursor()].to_owned(),
+            typed: input.clone(),
+            at,
+        });
+        browse.at = at;
+        open.line.input.set_text(line);
+        open.completion = None;
+    }
+
+    /// `command_line.history_next`: while browsing, the next newer match,
+    /// and past the newest the text and cursor from before browsing, which
+    /// ends it. Without browsing it does nothing.
+    pub(super) fn history_next(&mut self) {
+        let Some(open) = &mut self.command_line else {
+            return;
+        };
+        let Some(browse) = &mut open.browse else {
+            return;
+        };
+        let history = history_of(&self.histories, open.line.kind);
+        let newer = history
+            .lines()
+            .enumerate()
+            .skip(browse.at + 1)
+            .find(|(_, line)| line.starts_with(browse.filter.as_str()));
+        match newer {
+            Some((at, line)) => {
+                browse.at = at;
+                open.line.input.set_text(line);
+            }
+            None => {
+                open.line.input = std::mem::take(&mut browse.typed);
+                open.browse = None;
+            }
+        }
+    }
+
     /// Replaces the whole text, wherever the cursor is, with the next
     /// candidate and puts the cursor at the end; after the last one the
     /// typed text comes back, then the cycle repeats. A single candidate ends
     /// the completion, so the next press completes the new text (`open `
-    /// goes on to room names), like vim.
+    /// goes on to room names), like vim. It ends the history browsing.
     pub(super) fn complete_line(&mut self) {
         let Some(open) = &mut self.command_line else {
             return;
         };
+        open.browse = None;
         if open.line.kind != LineKind::Command {
             return;
         }
@@ -143,6 +253,15 @@ impl App {
             .get(completion.shown)
             .unwrap_or(&completion.typed);
         open.line.input.set_text(shown);
+    }
+}
+
+/// The history of a line of `kind`: searches share one, whichever pane they
+/// search.
+fn history_of(histories: &LineHistories, kind: LineKind) -> &History {
+    match kind {
+        LineKind::Command => &histories.commands,
+        LineKind::Search(_) => &histories.searches,
     }
 }
 

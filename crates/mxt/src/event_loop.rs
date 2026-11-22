@@ -1,13 +1,13 @@
 //! The event loop: terminal input, timers and the matrix adapter's messages
-//! into `App::update`, its effects out to the adapters, and a frame after
-//! every batch.
+//! into `App::update`, its effects out to the adapters and the history
+//! writer, and a frame after every batch.
 
 use std::collections::VecDeque;
 use std::io;
 use std::time::Instant;
 
 use mxt_core::app::App;
-use mxt_core::effect::{Effect, MatrixEffect};
+use mxt_core::effect::{Effect, MatrixEffect, StoreEffect};
 use mxt_core::msg::Msg;
 use mxt_tui::Tui;
 use tokio::sync::mpsc::error::SendError;
@@ -15,15 +15,21 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::warn;
 
 /// Runs until `UiEffect::Quit`. `from_matrix` delivers adapter messages;
-/// matrix effects are sent to `to_matrix`.
+/// matrix effects are sent to `to_matrix`, and store effects to `to_store`,
+/// the history writer.
 pub async fn run(
     app: &mut App,
     tui: &mut Tui,
     mut from_matrix: UnboundedReceiver<Msg>,
     to_matrix: UnboundedSender<MatrixEffect>,
+    to_store: UnboundedSender<StoreEffect>,
 ) -> io::Result<()> {
+    let senders = Senders {
+        matrix: to_matrix,
+        store: to_store,
+    };
     let mut queue = VecDeque::new();
-    draw(app, tui, &to_matrix, &mut queue)?;
+    draw(app, tui, &senders, &mut queue)?;
     while !tui.should_quit() {
         let deadline = tui.next_deadline();
         let timer = async move {
@@ -45,23 +51,29 @@ pub async fn run(
         while let Ok(msg) = from_matrix.try_recv() {
             queue.push_back(msg);
         }
-        update(app, tui, &to_matrix, &mut queue);
+        update(app, tui, &senders, &mut queue);
         if !tui.should_quit() {
-            draw(app, tui, &to_matrix, &mut queue)?;
+            draw(app, tui, &senders, &mut queue)?;
         }
     }
     Ok(())
+}
+
+/// Where the effects that leave the process go.
+struct Senders {
+    matrix: UnboundedSender<MatrixEffect>,
+    store: UnboundedSender<StoreEffect>,
 }
 
 /// Draws, then feeds the viewport messages of the frame to `update`.
 fn draw(
     app: &mut App,
     tui: &mut Tui,
-    to_matrix: &UnboundedSender<MatrixEffect>,
+    senders: &Senders,
     queue: &mut VecDeque<Msg>,
 ) -> io::Result<()> {
     queue.extend(tui.draw(app)?);
-    update(app, tui, to_matrix, queue);
+    update(app, tui, senders, queue);
     Ok(())
 }
 
@@ -69,19 +81,14 @@ fn draw(
 /// What the tui adapter reports while executing an effect (the composer's
 /// text and edits) joins the end of the queue. Every failure for the status
 /// line passes here, so this is where it is logged.
-fn update(
-    app: &mut App,
-    tui: &mut Tui,
-    to_matrix: &UnboundedSender<MatrixEffect>,
-    queue: &mut VecDeque<Msg>,
-) {
+fn update(app: &mut App, tui: &mut Tui, senders: &Senders, queue: &mut VecDeque<Msg>) {
     while let Some(msg) = queue.pop_front() {
         log_failure(&msg);
         for effect in app.update(msg) {
             match effect {
                 Effect::Ui(effect) => queue.extend(tui.execute(effect, Instant::now())),
                 Effect::Matrix(effect) => {
-                    if let Err(SendError(effect)) = to_matrix.send(effect) {
+                    if let Err(SendError(effect)) = senders.matrix.send(effect) {
                         let error = "The matrix adapter has stopped".to_owned();
                         // Every send is answered, so the core lets go of its
                         // draft.
@@ -90,6 +97,11 @@ fn update(
                             _ => Msg::EffectFailed { error },
                         });
                     }
+                }
+                // The writer's task ends only once every sender is gone,
+                // unless it panicked, which the panic hook has reported.
+                Effect::Store(effect) => {
+                    let _ = senders.store.send(effect);
                 }
             }
         }

@@ -18,7 +18,7 @@ pub struct Paths {
     pub data: PathBuf,
     /// The SDK's event cache and media cache.
     pub cache: PathBuf,
-    /// The logs.
+    /// The logs and the command line history.
     pub state: PathBuf,
 }
 
@@ -48,6 +48,13 @@ impl Paths {
 
     pub fn store_dir(&self) -> PathBuf {
         self.data.join("store")
+    }
+
+    /// The history of the `:` command line and the `/` search lines. Its
+    /// name does not start with `mxt`: tracing-appender's pruning deletes
+    /// the files in `state` whose names start with `mxt` and end with `log`.
+    pub fn history_file(&self) -> PathBuf {
+        self.state.join("history")
     }
 
     /// The SDK's stores: state and crypto in `store_dir`, where
@@ -226,6 +233,10 @@ mod tests {
         assert_eq!(
             paths.store_dir(),
             Path::new("/home/alice/.local/share/mxt/store")
+        );
+        assert_eq!(
+            paths.history_file(),
+            Path::new("/home/alice/.local/state/mxt/history")
         );
     }
 

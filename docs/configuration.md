@@ -481,6 +481,8 @@ arguments; any other argument ignores the binding with a warning. Actions on
 | `command_line.execute` | | Runs the command, or searches with a `/` line. |
 | `command_line.cancel` | | Closes the line. |
 | `command_line.complete` | | Completes command names, room names after `:open`, the names of pending invites after `:join`, and emoji shortcodes after `:react`; pressing it again cycles through the candidates. |
+| `command_line.history_prev` | | Puts the next older line of the history of the command line or the `/` search line that starts with the text that was before the cursor at the first press, with the cursor at its end; with none left it does nothing (see [History](keys.md#history)). |
+| `command_line.history_next` | | While browsing the history, goes to the next newer such line, and past the newest brings back the typed text and cursor. Otherwise it does nothing. |
 | `cursor.down`, `cursor.up` | | Moves the cursor of the focused list by one room or message, or by the count. |
 | `cursor.first`, `cursor.last` | | Moves it to the first or last room or message. |
 | `cursor.half_page_down`, `cursor.half_page_up` | | Moves it by half of the visible rooms or messages, times the count. |

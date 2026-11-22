@@ -16,6 +16,20 @@ pub enum Effect {
     Matrix(MatrixEffect),
     /// Executed by the tui adapter.
     Ui(UiEffect),
+    /// Executed by the binary, which owns the files mxt keeps beside the
+    /// SDK's stores.
+    Store(StoreEffect),
+}
+
+/// What the binary writes to its files (design, "Functional core").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoreEffect {
+    /// Replaces the history file with both histories, each oldest first
+    /// (design, "Line editing"). A newer one replaces one still waiting.
+    SaveHistory {
+        commands: Vec<String>,
+        searches: Vec<String>,
+    },
 }
 
 /// A message to send from the composer.

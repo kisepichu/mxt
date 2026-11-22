@@ -7,6 +7,7 @@
 
 mod config;
 mod event_loop;
+mod history;
 mod invalidate;
 mod lock;
 mod logging;

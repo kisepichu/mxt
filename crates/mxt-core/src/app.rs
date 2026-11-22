@@ -19,6 +19,7 @@ use std::collections::{HashMap, VecDeque};
 use crate::action::{Action, Binding};
 use crate::command::{COMMANDS, help_text};
 use crate::effect::{Effect, MatrixEffect, RecoveryKey, UiEffect};
+use crate::history::LineHistories;
 use crate::ids::{EventId, RoomId, SendId, TimelineId, Timestamp, UserId};
 use crate::keymap::{InputContext, KeySink, Keymap, keymap_text};
 use crate::keys::Key;
@@ -180,6 +181,8 @@ pub struct App {
     /// The open room's, from a render of that room; `None` until then.
     timeline_viewport: Option<Viewport>,
     command_line: Option<OpenLine>,
+    /// The executed lines of the `:` command line and the `/` search lines.
+    histories: LineHistories,
     /// The pattern `search.next` and `search.prev` repeat.
     last_search: Option<String>,
     /// Per timeline, created when first used.
@@ -241,6 +244,7 @@ impl App {
             room_list_viewport: None,
             timeline_viewport: None,
             command_line: None,
+            histories: LineHistories::default(),
             last_search: None,
             composers: HashMap::new(),
             members: HashMap::new(),
@@ -309,6 +313,7 @@ impl App {
             Msg::PreviewsWanted { .. } => {}
             Msg::Recovered => self.recovered(),
             Msg::ConfigWarnings { warnings } => self.config_warnings(warnings),
+            Msg::HistoryLoaded { commands, searches } => self.history_loaded(commands, searches),
             Msg::Invites(invites) => self.invites = invites,
             Msg::Joined { target, room, how } => self.joined(&target, room, how, &mut effects),
             Msg::NoDirectMessage { target, user } => self.no_direct_message(&target, user),
@@ -793,6 +798,8 @@ impl App {
             Action::CommandLineExecute => self.execute_line(effects),
             Action::CommandLineCancel => self.cancel_line(),
             Action::CommandLineComplete => self.complete_line(),
+            Action::CommandLineHistoryPrev => self.history_prev(),
+            Action::CommandLineHistoryNext => self.history_next(),
             Action::SearchStart => self.start_search(),
             Action::SearchNext => self.search_again(Direction::Forward, effects),
             Action::SearchPrev => self.search_again(Direction::Backward, effects),

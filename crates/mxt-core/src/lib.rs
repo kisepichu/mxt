@@ -9,6 +9,7 @@ pub mod command;
 pub mod effect;
 pub mod emoji;
 pub mod fuzzy;
+pub mod history;
 pub mod ids;
 pub mod keymap;
 pub mod keys;
