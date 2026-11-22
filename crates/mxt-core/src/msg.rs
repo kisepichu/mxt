@@ -147,6 +147,16 @@ pub enum Msg {
         item: ItemRef,
         reason: String,
     },
+    /// The tui adapter's list of the previews it wants for the shown
+    /// timeline (design, "Images in the timeline"): the remote image items
+    /// on or near the timeline pane whose previews it neither keeps nor is
+    /// decoding nor has seen fail, those on the pane first, then the others
+    /// by their distance from it. Sent when the list changes; it replaces
+    /// the one before.
+    PreviewsWanted {
+        timeline: TimelineId,
+        items: Vec<ItemRef>,
+    },
     /// `MatrixEffect::Recover` imported the secrets.
     Recovered,
     /// The configuration's warnings, each as the log has it, sent once

@@ -9,12 +9,14 @@ mod image_view;
 mod input;
 mod opener;
 mod overlay;
+mod previews;
 mod terminal;
 mod timeline_view;
 mod timers;
 mod view;
 
 pub use input::key_from_crossterm;
+pub use previews::ImageRows;
 pub use terminal::{Tui, install_panic_hook};
 pub use timeline_view::TimeFormat;
 pub use view::{NetworkPlacement, RoomListLayout, RoomListWidth};

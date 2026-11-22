@@ -143,7 +143,7 @@ flowchart BT
 |---|---|---|
 | `mxt-core` | Domain types, keymap and its resolver, action registry, pickers, mention rendering, `App` state and `update` | `std` and small pure crates without I/O (`nucleo-matcher`, `emojis`, `pulldown-cmark`, `unicode-segmentation`). Not the SDK, `ruma`, an async runtime, a terminal library, `serde` or `toml`. |
 | `mxt-matrix` | Builds the SDK client, converts SDK data into domain types, executes matrix effects, forwards SDK streams as `Msg`s, reads bridge state, renders HTML bodies into domain rich text, reads and writes the session file | `mxt-core`, `matrix-sdk`, `matrix-sdk-ui`, tokio, `futures-util`, `tracing`, `serde`/`serde_json` (the session file holds the SDK's serde session type), `mime_guess` (the MIME type of an upload), `image` (the dimensions of uploaded images); HTML parsing through `matrix_sdk::ruma::html`, plus a feature-only `ruma` dependency of the SDK's ruma version that enables `html-matrix` (the SDK enables only `html`) and `markdown` (`FormattedBody::markdown`); as dev-dependencies, `matrix-sdk` with its `testing` feature, `matrix-sdk-test` and `mxt-core` with its `testing` feature (the tests against `MatrixMockServer`), and `wiremock` (the requests of `:join` that `MatrixMockServer` has no mock for) |
-| `mxt-tui` | Layout and widgets, input routing, the composers and the message view (edtui), image decoding and previews (the message view's, and the timeline's on a worker thread), OSC 52 clipboard, local time formatting, executing UI effects | `mxt-core`, ratatui, crossterm, edtui, ratatui-image, image, jiff, `base64` (OSC 52), `futures-util` (the terminal event stream), `unicode-segmentation`, `rustix` (reading the terminal's answer to XTVERSION with a timeout, and the window's size in pixels) |
+| `mxt-tui` | Layout and widgets, input routing, the composers and the message view (edtui), image decoding and previews (the message view's, and the timeline's on a worker thread), OSC 52 clipboard, local time formatting, executing UI effects | `mxt-core`, ratatui, crossterm, edtui, ratatui-image, image, jiff, `base64` (OSC 52), `futures-util` (the terminal event stream), `unicode-segmentation`, `rustix` (reading the terminal's answer to XTVERSION with a timeout, and the window's size in pixels), `tracing` (failed timeline previews, and a panic on their worker thread) |
 | `mxt` | Command line, startup flow, configuration file loading (TOML DTOs), paths, the data directory lock, logging, the command line history file (`Effect::Store`), wiring the adapters and the event loop | all of the above, `serde`, `toml`, `tracing`, `tracing-appender` and `tracing-subscriber` (the log files), `rpassword` (the password and recovery key prompts); `matrix-sdk` as a dev-dependency |
 
 Because `mxt-core` does not depend on the SDK, its tests build and run without
@@ -2455,14 +2455,19 @@ list, so mxt does not offer an event-level mention list.
     among as many entries again above
     and below them (at least 5 each way), by distance from the pane, below
     first, until the next one would take the targets past the cache's
-    limits (below: 64 previews, 64 MiB), counting a kept preview's size
-    and, for one not kept yet, its reserved size's pixels at 4 bytes each
-    for the scaled image and the same again for its encoding. The pane's
+    limits (below: 64 previews, 64 MiB), counting a kept preview's size,
+    at most what it was counted as before it was kept (a kitty preview
+    holds more, see "Memory"), and for one not kept yet its reserved
+    size's pixels at 4 bytes each for the scaled image and the same again
+    for its encoding. The pane's
     own items always count, so a pane full of previews is shown however
     much it takes; it cannot take more than about 8 bytes per pixel of the
     pane. The wanted list is the targets that the adapter neither keeps
     nor is decoding nor has seen fail, in that order, and when it changes
     the adapter reports it as `Msg::PreviewsWanted { timeline, items }`.
+    When the shown timeline changes, also through no room open, the
+    adapter forgets its last report, so a room opened again after it was
+    gone reports its list, which the core dropped with the room.
     The cache never drops a target (see "Memory"), so a window that holds
     more previews than the cache keeps does not fetch, decode and drop the
     same previews in turn: once every target is kept or failed, the list is
@@ -2498,26 +2503,46 @@ list, so mxt does not offer an event-level mention list.
     carries its dimensions. A failure answers `PreviewFailed` and is
     logged at `debug`: the item shows its text line, without a status
     message, and is not wanted again until the shown timeline changes
-    (another room or thread).
-  - Decoding, never on the UI thread. `ShowPreview` hands the bytes to one
-    worker thread of the tui adapter, which decodes them with the message
+    (another room or thread, or no room).
+  - Decoding, never on the UI thread. `ShowPreview` queues the bytes in
+    the tui adapter, which hands its one worker thread one job at a time
+    and, after each frame's targets, drops the queued jobs whose item is
+    no target any more: an item scrolled away is not decoded, and fetched
+    files wait only for targets (a dropped item is wanted again once it
+    is a target). The worker decodes the bytes with the message
     view's `decode` (the format sniffed, the 128 MiB limit, the Exif
     orientation), scales them to the reserved size with a triangle filter
     and pads them to whole cells (`Resize::resize`, ratatui-image
-    `src/lib.rs:413-437`), encodes them for the protocol, and calls the
+    `src/lib.rs:413-437`), encodes them for the protocol (half blocks with
+    ratatui-image's `Halfblocks::new`, which fills the reserved size
+    exactly, not with its picker, which would fit them again in the cell
+    size it measured, a row or some columns short; `src/picker.rs:270-287`),
+    and calls the
     waker `mxt` gave the tui adapter (`Tui::enable_previews(rows, wake)`):
     a `tokio::sync::Notify` that is a fourth branch of the event loop's
     `select!`, so the next frame takes the finished previews. A decoding
-    failure is a failed preview. A preview whose reserved size or cell
+    or encoding failure is a failed preview, logged at `debug`. So is a
+    panic while decoding or encoding, an image anyone in the room sent
+    being the input: the worker catches it (`catch_unwind`), and the panic
+    hook leaves the terminal alone for the worker's thread, `mxt-previews`,
+    and logs the panic at `warn` (see "Error handling"). A preview whose
+    reserved size or cell
     size changed (the room list was toggled, tmux took another cell size)
     is encoded again on the worker from the scaled image it keeps, and is
     not drawn meanwhile.
   - Memory: the tui adapter keeps the previews last drawn or finished, at
-    most 64 of them and 64 MiB counting each one's scaled image and its
-    encoding, dropping the least recently drawn first, but never one of
-    the current targets (see "Fetching"): those stay even past a limit,
+    most 64 of them and 64 MiB counting what each one holds: its scaled
+    image in RGBA and its encoding as ratatui-image keeps it, that is the
+    escape sequence of sixel and of each iTerm2 row (their public `data`,
+    `src/protocol/sixel.rs:20-24`, `iterm2.rs:16-20`; the sliced sixel's
+    through its `borrow_owner()`), kitty's transmission computed from its
+    pixels as base64 of RGBA, about 5.3 bytes per pixel, which
+    ratatui-image keeps after sending it (`kitty.rs:25-41`), and half
+    blocks' cells. It drops the least recently drawn first, but never one
+    of the current targets (see "Fetching"): those stay even past a limit,
     which the targets' cut keeps them near. The fetched bytes are dropped
-    once decoded. The limits are fields of the cache, set from these
+    once decoded; until then they wait only for targets (see "Decoding").
+    The limits are fields of the cache, set from these
     constants, so tests can give smaller ones.
   - Drawing, and what each protocol leaves behind. Previews are drawn with
     ratatui-image's `SlicedImage` (`src/sliced.rs:15-125`), which draws
@@ -3039,7 +3064,10 @@ platforms.
 - Redaction asks for confirmation in `CONFIRM` mode because it cannot be
   undone.
 - `M_UNKNOWN_TOKEN` is handled as described in "Startup".
-- A panic hook restores the terminal before printing the panic.
+- A panic hook restores the terminal before printing the panic, except
+  on the timeline previews' worker thread (`mxt-previews`), where a panic
+  fails only the preview being made (see "Images in the timeline") and is
+  logged at `warn` instead.
 
 ## Logging
 
@@ -3054,7 +3082,9 @@ The command line history file is logged with the target `mxt::history`
 write failures after the first at `warn`, the first write failure's full
 error at `debug`, since the event loop logs its status text at `warn`.
 Failed timeline previews are logged at `debug`, since a room can hold
-many and the text line shows them.
+many and the text line shows them: fetch failures by the matrix
+adapter, decoding and encoding failures by the tui adapter's worker. A
+panic on that worker is logged at `warn` (see "Error handling").
 
 ## Testing
 
@@ -3207,11 +3237,16 @@ many and the text line shows them.
   an item that does not fit the pane or whose preview failed shown with
   its text line alone, the wanted list (on and near the pane, in order,
   without kept, decoding or failed items, reported when it changes, the
-  failed marks dropped with another shown timeline, the margin cut at the
+  failed marks dropped with another shown timeline, reported again for a
+  room opened again after it was gone, the margin cut at the
   cache's limits, and a window holding more previews than the limits
   whose idle frame reports nothing new while the cache keeps every
   target), the worker's preparation as a plain function (decode, scale,
-  pad, encode, a decode failure), the cache's limits, half-block previews
+  pad, encode, a decode failure, a panic), a queued job whose item
+  scrolled away dropped before it is decoded, a preview encoded again
+  for another cell size and not drawn meanwhile, the cache's limits (by
+  what a kitty preview holds), half-block previews filling their box
+  whatever cell size their pixels are in and
   drawn on `TestBackend` with a partly visible one cut to its visible
   rows, tmux's sixel drawn only whole, left out of the first draw and
   drawn in the second on a cleared screen when a placement goes, previews

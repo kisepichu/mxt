@@ -3,6 +3,8 @@
 //! drawn with ratatui-image in the graphics protocol chosen for the terminal
 //! (see [`crate::image_protocol`]): sixel, kitty, iTerm2, else half blocks,
 //! and inside tmux sixel that tmux stores in the pane or kitty graphics.
+//! The timeline's previews share the choice, [`decode`] and [`tmux_sixel`]
+//! (see [`crate::previews`]).
 
 use std::io::{self, Cursor, Write as _};
 use std::thread;
@@ -36,6 +38,8 @@ const MAX_DECODE_ALLOC: u64 = 128 * 1024 * 1024;
 const RELEASE_WAIT: Duration = Duration::from_millis(100);
 /// The rows of pixels in a sixel band.
 const SIXEL_BAND: u32 = 6;
+/// The cell size previews in half blocks are laid out in.
+const HALF_BLOCK_CELL: FontSize = FontSize::new(10, 20);
 
 pub(crate) struct Images {
     encoder: Encoder,
@@ -126,6 +130,30 @@ impl Images {
         matches!(self.encoder, Encoder::TmuxSixel(_))
     }
 
+    /// How timeline previews are encoded (design, "Images in the
+    /// timeline"): as the view's images, but half blocks without the
+    /// picker, laid out in 10 by 20 pixel cells whatever cell size it
+    /// measured, and also where ratatui-image would send iTerm2 images or
+    /// sixel through tmux's passthrough, which tmux neither moves nor
+    /// clears: a forced `iterm2` or `sixel` inside tmux, and `auto` over SSH
+    /// from a local tmux, where `TMUX` is unset but `TERM` names tmux. The
+    /// view keeps its protocol.
+    pub(crate) fn preview_encoder(&self) -> PreviewEncoder {
+        match &self.encoder {
+            Encoder::Picker(picker) => {
+                let protocol = picker.protocol_type();
+                let passthrough = picker.tmux_detected()
+                    && matches!(protocol, ProtocolType::Iterm2 | ProtocolType::Sixel);
+                if passthrough || protocol == ProtocolType::Halfblocks {
+                    PreviewEncoder::Halfblocks
+                } else {
+                    PreviewEncoder::Picker(picker.clone())
+                }
+            }
+            Encoder::TmuxSixel(cell) => PreviewEncoder::TmuxSixel(*cell),
+        }
+    }
+
     /// After the terminal resized, takes tmux's cell size again for sixel
     /// that tmux stores. tmux resizes the window when another client with
     /// another window size takes it over (with tmux's default `window-size
@@ -208,6 +236,32 @@ impl Images {
     }
 }
 
+/// How timeline previews are encoded, from [`Images::preview_encoder`].
+#[derive(Clone)]
+pub(crate) enum PreviewEncoder {
+    /// ratatui-image's sliced images, in the protocol of the picker: sixel,
+    /// kitty graphics or iTerm2.
+    Picker(Picker),
+    /// Half blocks of exactly the reserved size (see
+    /// `previews::encode`).
+    Halfblocks,
+    /// Sixel for tmux to store, in tmux's cell size (see [`tmux_sixel`]).
+    TmuxSixel(FontSize),
+}
+
+impl PreviewEncoder {
+    /// The cell size in pixels that previews are laid out and scaled in:
+    /// the picker's, 10 by 20 for half blocks, which draw a cell as 1 by 2
+    /// pixels whatever its size, and tmux's for its sixel.
+    pub(crate) fn cell(&self) -> FontSize {
+        match self {
+            PreviewEncoder::Picker(picker) => picker.font_size(),
+            PreviewEncoder::Halfblocks => HALF_BLOCK_CELL,
+            PreviewEncoder::TmuxSixel(cell) => *cell,
+        }
+    }
+}
+
 /// An image for tmux to store in the pane as sixel. tmux places it at the
 /// pane's cursor, keeps it within the pane, draws it for each client whose
 /// terminal draws sixel (scaled to that terminal's cell size), and drops
@@ -256,7 +310,7 @@ impl TmuxSixel {
 /// there, such as the blanks of the view's first frame, makes tmux drop the
 /// image, and on the pane's last row tmux scrolls the pane instead. This
 /// takes at most 5 rows of pixels off the bottom.
-fn tmux_sixel(
+pub(crate) fn tmux_sixel(
     image: &DynamicImage,
     cell: FontSize,
     resize: &Resize,
@@ -278,7 +332,7 @@ fn tmux_sixel(
 /// portrait photos as landscape ones with orientation 6 or 8), so that a
 /// turn by 90 degrees copies the small image. Only JPEG and PNG are turned;
 /// other formats, and an orientation that cannot be read, stay as stored.
-fn decode(bytes: &[u8], width: u32, height: u32) -> ImageResult<DynamicImage> {
+pub(crate) fn decode(bytes: &[u8], width: u32, height: u32) -> ImageResult<DynamicImage> {
     let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
     let format = reader.format();
     let mut limits = Limits::default();

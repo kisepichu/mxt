@@ -19,6 +19,7 @@ mxt-core.workspace = true
 ratatui.workspace = true
 ratatui-image.workspace = true
 rustix.workspace = true
+tracing.workspace = true
 unicode-segmentation.workspace = true
 
 [dev-dependencies]

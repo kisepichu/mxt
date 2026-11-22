@@ -3056,6 +3056,7 @@ dependencies = [
  "ratatui",
  "ratatui-image",
  "rustix 1.1.6",
+ "tracing",
  "unicode-segmentation",
 ]
 
