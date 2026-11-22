@@ -399,9 +399,10 @@ fn message_view_opens_and_closes() {
     reset(&mut app, vec![item(remote(1), "first line\nsecond line")]);
     assert_eq!(
         keys(&mut app, "<CR>"),
-        vec![Effect::Ui(UiEffect::OpenView(ViewContent::Text(
-            "first line\nsecond line".into()
-        )))]
+        vec![Effect::Ui(UiEffect::OpenView(ViewContent::Text {
+            text: "first line\nsecond line".into(),
+            matches: Vec::new(),
+        }))]
     );
     assert!(app.view_open());
     assert_eq!(app.mode_label(Some(EditorMode::Normal)), "VIEW NORMAL");

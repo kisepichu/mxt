@@ -60,6 +60,14 @@ marked **Breaking:**.
   background and keeps a bounded number in memory.
   `ui.image_preview = "off"` turns previews off too. `<CR>` on a sticker
   shows its image. mxt 0.1.4 ignores `ui.timeline` with a warning.
+- Search highlighting in the timeline, as nvim's `hlsearch`: after `/`, `n`
+  or `N`, every match of the pattern in the messages on the screen is shown
+  in reverse video (underlined in inline code, which is already reversed; a
+  spoiler with a match turns to `▒`), and the matches in the message under
+  the cursor in bold too. `:noh` (`:nohlsearch`, the action
+  `search.clear_highlight`) hides it until the next search, and opening
+  another room does too. Matches in the cut-off part of a tall message are
+  not shown; `<CR>` opens the message, whose view underlines them in bold.
 
 ### Changed
 

@@ -126,6 +126,19 @@ impl RichText {
         plain.out
     }
 
+    /// [`RichText::to_plain`] and, for each of its lines, the length of the
+    /// prefixes it starts with (`> `, `- `, `1. ` and the indentation under
+    /// a list item's first line), 0 for a line without: the search
+    /// highlights the text after them (design, "Search and jumps").
+    pub fn to_plain_with_prefixes(&self) -> (String, Vec<usize>) {
+        let mut plain = Plain {
+            prefix_lengths: Some(vec![0]),
+            ..Plain::default()
+        };
+        plain.blocks(&self.blocks);
+        (plain.out, plain.prefix_lengths.unwrap_or_default())
+    }
+
     /// Mention spans, in order (used to rebuild the mentions of an edit).
     pub fn mentions(&self) -> Vec<(&str, &MentionTarget)> {
         let mut mentions = Vec::new();
@@ -221,6 +234,8 @@ struct Plain {
     prefixes: Vec<Prefix>,
     /// Spoilers become `SPOILER`.
     hide_spoilers: bool,
+    /// With `Some`, for each line of `out`, the length of its prefixes.
+    prefix_lengths: Option<Vec<usize>>,
 }
 
 enum Prefix {
@@ -237,7 +252,7 @@ impl Plain {
     fn blocks(&mut self, blocks: &[Block]) {
         for (index, block) in blocks.iter().enumerate() {
             if index > 0 {
-                self.out.push('\n');
+                self.new_line();
             }
             self.block(block);
         }
@@ -275,7 +290,7 @@ impl Plain {
             } => {
                 for (index, item) in (0..).zip(items) {
                     if index > 0 {
-                        self.out.push('\n');
+                        self.new_line();
                     }
                     let number = ordered.then(|| start.saturating_add(index));
                     let prefix = Prefix::Item {
@@ -317,14 +332,27 @@ impl Plain {
             self.out.push_str(first);
         }
         for line in lines {
-            self.out.push('\n');
+            self.new_line();
             self.start_line();
             self.out.push_str(line);
         }
     }
 
+    fn new_line(&mut self) {
+        self.out.push('\n');
+        if let Some(lengths) = &mut self.prefix_lengths {
+            lengths.push(0);
+        }
+    }
+
     fn start_line(&mut self) {
-        let Plain { out, prefixes, .. } = self;
+        let Plain {
+            out,
+            prefixes,
+            prefix_lengths,
+            ..
+        } = self;
+        let start = out.len();
         for prefix in prefixes {
             match prefix {
                 Prefix::Quote => out.push_str("> "),
@@ -344,6 +372,12 @@ impl Plain {
                     }
                 }
             }
+        }
+        if let Some(length) = prefix_lengths
+            .as_mut()
+            .and_then(|lengths| lengths.last_mut())
+        {
+            *length += out.len() - start;
         }
     }
 }
@@ -442,6 +476,32 @@ mod tests {
             },
         ]);
         assert_eq!(rich.to_plain(), "Steps:\n3. x\n4. y\n   z");
+    }
+
+    #[test]
+    fn to_plain_with_prefixes_gives_the_prefix_length_of_each_line() {
+        let list = |ordered, start, items| Block::List {
+            ordered,
+            start,
+            items,
+        };
+        let rich = rich(vec![
+            paragraph("Steps:"),
+            Block::Quote(vec![list(false, 1, vec![vec![paragraph("a\nb")]])]),
+            list(
+                true,
+                9,
+                vec![vec![paragraph("x")], vec![paragraph("y"), paragraph("z")]],
+            ),
+            // An empty list writes nothing; the blocks around it are on
+            // lines of their own, with an empty line between.
+            list(false, 1, Vec::new()),
+            paragraph("end"),
+        ]);
+        let (text, prefixes) = rich.to_plain_with_prefixes();
+        assert_eq!(text, rich.to_plain());
+        assert_eq!(text, "Steps:\n> - a\n>   b\n9. x\n10. y\n    z\n\nend");
+        assert_eq!(prefixes, [0, 4, 4, 3, 4, 4, 0, 0]);
     }
 
     #[test]

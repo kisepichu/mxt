@@ -1363,10 +1363,14 @@ next unread room.
       inside the reversed code (adding reverse video would change
       nothing);
     - spoiler blocks that a match touches are drawn as `▒` (U+2592, as wide
-      as `█`) in place of `█`, all of the spoiler's blocks: a reversed `█`
-      paints the cell in the background colour, a blank, and an underline
-      is drawn in the glyph's colour under a block that already fills the
-      cell, so neither would show;
+      as `█`) in place of `█`: a reversed `█` paints the cell in the
+      background colour, a blank, and an underline is drawn in the glyph's
+      colour under a block that already fills the cell, so neither would
+      show. All of the spoiler's blocks turn, and the rule holds across
+      lines, so no line of a spoiler shows which of them holds the match:
+      a spoiler's run goes on over line breaks, blank lines and the edges
+      of blocks (text and a code block in one `data-mx-spoiler` become two
+      blocks) until text that is not a spoiler;
     - in the cursor's message the same, with bold added to each: the
       search moves the cursor by message and `n` goes to the next message,
       so every match in the cursor's message is the current one, and
@@ -3323,10 +3327,10 @@ at `debug` by the worker (see "Error handling").
   unaffected, `.` after `"_dd` writing the register and `"_.` not); the
   search highlight on the cells of each content kind (rich text across
   styles, quotes and lists, inline code underlined instead of reversed,
-  spoilers drawn as `▒` whole, the name in an image's line, the
-  `(deleted)` line, an emote's lead left out), the cursor's message with
-  bold added, the matches of a cut-off message left out, and the message
-  view's highlights in underline and bold.
+  spoilers drawn as `▒` whole and on all of their lines, the name in an
+  image's line, the `(deleted)` line, an emote's lead left out), the
+  cursor's message with bold added, the matches of a cut-off message left
+  out, and the message view's highlights in underline and bold.
 - `mxt`: configuration loading from strings: each error and each warning
   with its position and text (the `<C-i>` and `<Tab>` duplicate in either
   order among them, and the `ui.room_list.sort` lists: each key alone,

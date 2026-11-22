@@ -128,6 +128,18 @@ pub static COMMANDS: &[Command] = &[
         action: |_| Ok(Action::StatusMessages),
     },
     Command {
+        name: "noh",
+        argument: Argument::None,
+        description: "Hide the search highlight until the next search",
+        action: |_| Ok(Action::SearchClearHighlight),
+    },
+    Command {
+        name: "nohlsearch",
+        argument: Argument::None,
+        description: "Hide the search highlight until the next search",
+        action: |_| Ok(Action::SearchClearHighlight),
+    },
+    Command {
         name: "q",
         argument: Argument::None,
         description: "Quit",
@@ -267,6 +279,11 @@ mod tests {
         assert_eq!(parse_command(" mute "), Ok(Some(Action::RoomMute)));
         assert_eq!(parse_command("unmute"), Ok(Some(Action::RoomUnmute)));
         assert_eq!(parse_command("recover"), Ok(Some(Action::AccountRecover)));
+        // Two spellings of one action, as in vim.
+        for name in ["noh", "nohlsearch"] {
+            let clear = Ok(Some(Action::SearchClearHighlight));
+            assert_eq!(parse_command(name), clear, "{name}");
+        }
         assert_eq!(parse_command("   "), Ok(None));
     }
 
@@ -313,7 +330,7 @@ mod tests {
 
     #[test]
     fn names_match_exactly() {
-        for name in ["h", "o", "qu", "Q"] {
+        for name in ["h", "o", "qu", "Q", "nohl"] {
             assert_eq!(
                 parse_command(name),
                 Err(CommandError::Unknown { name: name.into() })
@@ -383,6 +400,8 @@ mod tests {
                 ":help",
                 ":map",
                 ":messages",
+                ":noh",
+                ":nohlsearch",
                 ":q"
             ]
         );

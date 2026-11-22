@@ -15,6 +15,7 @@ mod join;
 mod jumps;
 mod previews;
 mod room_actions;
+mod search;
 mod threads;
 mod timeline;
 
@@ -1046,8 +1047,12 @@ fn the_recovery_key_is_edited_at_its_cursor_in_its_own_buffer() {
     assert_eq!((prompt.clusters, prompt.cursor), (0, 0));
 }
 
+/// A help view's text, which has no matches.
 fn text_view(text: String) -> Effect {
-    Effect::Ui(UiEffect::OpenView(crate::effect::ViewContent::Text(text)))
+    Effect::Ui(UiEffect::OpenView(crate::effect::ViewContent::Text {
+        text,
+        matches: Vec::new(),
+    }))
 }
 
 #[test]
@@ -1092,7 +1097,7 @@ const MESSAGES_FIRST_LINE: &str = "Status line messages, oldest first; the last 
 /// The lines of the view `:messages` opens.
 fn messages(app: &mut App) -> Vec<String> {
     match no_timers(keys(app, ":messages<CR>")).as_slice() {
-        [Effect::Ui(UiEffect::OpenView(crate::effect::ViewContent::Text(text)))] => {
+        [Effect::Ui(UiEffect::OpenView(crate::effect::ViewContent::Text { text, .. }))] => {
             text.lines().map(str::to_owned).collect()
         }
         other => panic!("{other:?}"),

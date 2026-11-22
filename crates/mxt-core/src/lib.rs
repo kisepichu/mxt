@@ -20,5 +20,6 @@ pub mod resolver;
 pub mod rich;
 pub mod room;
 pub mod rooms;
+pub mod search;
 pub mod settings;
 pub mod timeline;
