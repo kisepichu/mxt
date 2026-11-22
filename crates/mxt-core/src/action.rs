@@ -69,6 +69,9 @@ pub enum Action {
     /// Back to the timeline; an empty reply or edit ends first.
     ComposerLeave,
     ComposerExternalEditor,
+    /// The shown timeline's composer goes to normal mode, as edtui's `<Esc>`
+    /// leaves insert, visual and search mode.
+    ComposerNormal,
     CompletionNext,
     CompletionPrev,
     CompletionAccept,
@@ -177,6 +180,7 @@ impl Action {
             "composer.cancel" => Action::ComposerCancel,
             "composer.leave" => Action::ComposerLeave,
             "composer.external_editor" => Action::ComposerExternalEditor,
+            "composer.normal" => Action::ComposerNormal,
             "completion.next" => Action::CompletionNext,
             "completion.prev" => Action::CompletionPrev,
             "completion.accept" => Action::CompletionAccept,
@@ -246,6 +250,7 @@ impl Action {
             Action::ComposerCancel => "composer.cancel",
             Action::ComposerLeave => "composer.leave",
             Action::ComposerExternalEditor => "composer.external_editor",
+            Action::ComposerNormal => "composer.normal",
             Action::CompletionNext => "completion.next",
             Action::CompletionPrev => "completion.prev",
             Action::CompletionAccept => "completion.accept",
@@ -637,6 +642,7 @@ mod tests {
             "composer.cancel",
             "composer.leave",
             "composer.external_editor",
+            "composer.normal",
             "completion.next",
             "completion.prev",
             "completion.accept",

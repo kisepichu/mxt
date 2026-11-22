@@ -20,6 +20,13 @@ marked **Breaking:**.
   `mentions` and `unread`, the room you have open sorts as read. `unread`
   and `filter = "unread"` are unchanged. mxt 0.1.4 skips `notify` with a
   warning and sorts by the other keys.
+- `composer.normal` puts the composer's editor in normal mode, and `<C-c>`
+  in insert mode runs it, as vim's insert-mode `<C-c>` does; `<C-c>` in
+  normal mode still ends a reply or an edit. With
+  `"<CR>" = ["composer.send", "composer.normal"]` in
+  `[keymap.composer.insert]`, the editor is in normal mode after sending,
+  also when nothing was sent. `<C-c>` did nothing in insert mode before;
+  `"<C-c>" = "nop"` in `[keymap.composer.insert]` keeps that.
 
 ### Changed
 

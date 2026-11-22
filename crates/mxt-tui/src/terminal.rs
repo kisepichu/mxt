@@ -357,6 +357,8 @@ impl Tui {
     /// - `ExternalEditor` runs `$VISUAL` or `$EDITOR` on the main screen
     ///   (see [`Tui::edit_externally`]). A failure becomes
     ///   `Msg::EffectFailed`.
+    /// - `ComposerNormal` puts the composer's editor in normal mode as
+    ///   edtui's `<Esc>` does.
     /// - `Quit` sets `should_quit`.
     pub fn execute(&mut self, effect: UiEffect, now: Instant) -> Vec<Msg> {
         let mut msgs = Vec::new();
@@ -446,6 +448,11 @@ impl Tui {
                 }
             }
             UiEffect::ExternalEditor(timeline) => self.edit_externally(&timeline, &mut msgs),
+            UiEffect::ComposerNormal(timeline) => {
+                if let Some(composer) = self.composers.get_mut(&timeline) {
+                    composer.enter_normal_mode(&mut msgs);
+                }
+            }
             UiEffect::Quit => self.should_quit = true,
         }
         msgs

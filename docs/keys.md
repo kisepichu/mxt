@@ -209,6 +209,7 @@ The timeline binds neither key, so a binding of `q` or `<Esc>` in
 |---|---|---|---|
 | `composer.insert` | `<CR>` | `composer.send` | send |
 | `composer.insert` | `<C-j>` | `composer.newline` | a line break (many terminals send Shift+Enter as `<CR>`) |
+| `composer.insert` | `<C-c>` | `composer.normal` | normal mode, as vim's `<C-c>` |
 | `composer.insert`, `composer.normal` | `<C-x><C-e>` | `composer.external_editor` | edit in `$VISUAL` or `$EDITOR` |
 | `composer.normal` | `<Esc>` | `composer.leave` | back to the timeline; the text stays, and a reply or an edit without text ends |
 | `composer.normal` | `<C-c>` | `composer.cancel` | end a reply (the text stays) or an edit (the text goes) |
@@ -217,7 +218,10 @@ The timeline binds neither key, so a binding of `q` or `<Esc>` in
 | `composer.completion` | `<C-e>` | `completion.cancel` | close the mention menu |
 
 `<Esc>` in insert mode is not bound: the editor goes to normal mode, and a
-second `<Esc>` returns to the timeline.
+second `<Esc>` returns to the timeline. `<C-c>` in insert mode goes to
+normal mode too, and a second `<C-c>` ends a reply or an edit. `<C-c>` did
+nothing in insert mode before; `"<C-c>" = "nop"` in
+`[keymap.composer.insert]` keeps it that way.
 
 ### `picker`, `command_line` and `message_view`
 
@@ -455,7 +459,17 @@ The composer:
   character under the cursor. `<Esc>` goes to normal mode; `<Esc>` again goes
   back to the timeline. Each room keeps its own text, reply and mode.
 - The text is Markdown. `<CR>` in insert mode sends it, `<C-j>` inserts a
-  line break, and `<C-x><C-e>` edits it in `$VISUAL` or `$EDITOR`.
+  line break, and `<C-x><C-e>` edits it in `$VISUAL` or `$EDITOR`. After
+  sending, the composer stays in insert mode; to be in normal mode after
+  sending, also when a blank text sends nothing, bind `<CR>` to both:
+
+  ```toml
+  [account]
+  user_id = "@alice:example.org"
+
+  [keymap.composer.insert]
+  "<CR>" = ["composer.send", "composer.normal"]
+  ```
 - `@` at the start of the text or after whitespace opens the mention menu with
   the room's members (at most 50, the people who wrote the loaded messages
   first); typing narrows it. The inserted `@name` is plain text: delete or

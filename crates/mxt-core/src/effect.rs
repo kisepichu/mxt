@@ -278,5 +278,8 @@ pub enum UiEffect {
     },
     /// Edit the composer's text in `$VISUAL` or `$EDITOR`.
     ExternalEditor(TimelineId),
+    /// Put the composer's editor in normal mode as edtui's `<Esc>` does;
+    /// nothing in normal mode. A key waiting for the next one is cancelled.
+    ComposerNormal(TimelineId),
     Quit,
 }
