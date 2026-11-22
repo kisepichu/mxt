@@ -135,6 +135,10 @@ visual mode. In a thread, `thread` comes first, then `timeline`, then
 
 As in nvim, ctrl can stay held for the key after `<C-w>`.
 
+`]u` and `[u` count every badge, dim counts included. Bound with
+`filter = "notify"`, they skip the rooms whose only news is a dim count
+(see [Sort keys](configuration.md#sort-keys)).
+
 ### `room_list` and `timeline`
 
 | Key | Action | |
