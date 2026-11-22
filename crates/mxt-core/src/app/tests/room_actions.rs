@@ -1,7 +1,7 @@
 use super::timeline::{event, msg, status};
 use super::*;
 use crate::room::Badge;
-use crate::rooms::{RoomFilter, RoomSort, SortKey};
+use crate::rooms::{Pick, RoomFilter, RoomSort, RoomTarget, SortKey};
 use crate::timeline::TimelineDiff;
 
 const D: &str = "!d:example.org";
@@ -60,6 +60,35 @@ fn unread_first(user: Vec<(TableId, KeySeq, Binding)>) -> App {
         ..Settings::default()
     };
     app_in(settings, user)
+}
+/// The rooms of `app()` under `sort = "mentions, notify, unread, read"`:
+/// `!c` notifies, `!a`, muted, has only a dim count, and `!b` is read.
+fn notify_first(user: Vec<(TableId, KeySeq, Binding)>) -> App {
+    let sort = vec![
+        SortKey::Mentions,
+        SortKey::Notify,
+        SortKey::Unread,
+        SortKey::Read,
+    ];
+    let settings = Settings {
+        room_sort: RoomSort::new(sort).unwrap(),
+        ..Settings::default()
+    };
+    let mut app = app_in(settings, user);
+    app.update(Msg::RoomUpserted(with_mode(
+        room(A, 10, 1),
+        NotificationMode::Mute,
+    )));
+    app.update(Msg::RoomUpserted(RoomSummary {
+        unread: UnreadCounts {
+            messages: 2,
+            notifications: 2,
+            ..UnreadCounts::default()
+        },
+        ..room(C, 30, 2)
+    }));
+    assert_eq!(order(&app), [C, A, B]);
+    app
 }
 fn order(app: &App) -> Vec<&str> {
     app.rooms()
@@ -297,6 +326,31 @@ fn under_mentions_the_open_room_sorts_as_read_until_another_room_opens() {
     );
     assert_eq!(order(&app), [C, A, B]);
     assert_eq!((cursor_id(&app), app.room_cursor()), (A, Some(1)));
+}
+
+#[test]
+fn under_notify_the_default_u_still_opens_a_room_whose_only_news_is_a_dim_count() {
+    let mut app = notify_first(vec![]);
+    assert_eq!(no_timers(keys(&mut app, "]u")), vec![subscribe(C)]);
+    // !c sorts as read while open; the muted !a is the other unread room.
+    assert_eq!(
+        no_timers(keys(&mut app, "]u")),
+        vec![unsubscribe(C), subscribe(A)]
+    );
+}
+
+#[test]
+fn a_u_binding_with_filter_notify_passes_over_the_rooms_whose_only_news_is_a_dim_count() {
+    let notify = Binding::single(Action::RoomOpen(RoomTarget::Pick {
+        filter: RoomFilter::Notify,
+        pick: Pick::First,
+    }));
+    let mut app = notify_first(vec![(TableId::Normal, seq("]u"), notify)]);
+    assert_eq!(no_timers(keys(&mut app, "]u")), vec![subscribe(C)]);
+    // !c's receipt comes back; only the muted !a is unread.
+    app.update(Msg::RoomUpserted(room(C, 30, 0)));
+    assert_eq!(no_timers(keys(&mut app, "]u")), vec![]);
+    assert_eq!(status(&app), Some("No matching room"));
 }
 
 #[test]
