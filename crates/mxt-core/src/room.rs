@@ -90,7 +90,9 @@ pub struct RoomSummary {
     pub latest_activity: Option<Timestamp>,
     /// The time of the user's own latest read receipt in the room, from any
     /// device, for the `read` sort key (design, "Room list"); `None` when
-    /// the user never read it.
+    /// the user never read it. In `RoomList` it never goes down, and
+    /// optimistic clearing raises it ahead of the receipt's echo (see
+    /// `RoomList::clear_unread`).
     pub last_read: Option<Timestamp>,
 }
 

@@ -21,6 +21,18 @@ marked **Breaking:**.
   and `filter = "unread"` are unchanged. mxt 0.1.4 skips `notify` with a
   warning and sorts by the other keys.
 
+### Changed
+
+- The `read` sort key orders unread rooms by the time of their newest
+  message and the other rooms by your last read, newest first, so with
+  `sort = "mentions, unread, read"` (or `"mentions, notify, unread, read"`)
+  a room that gets a new message goes to the top of its group; before,
+  unread rooms went by your last read too, and a room unread after days of
+  silence sat low in its group. The room you have open counts as read up
+  to its newest message, and a room you read with something new goes to
+  the top of the read rooms at once instead of waiting for the homeserver
+  to confirm the receipt.
+
 ## [0.1.4] - 2026-11-22
 
 ### Added
