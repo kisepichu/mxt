@@ -146,10 +146,12 @@ the text then.
 Commands and searches have separate histories of 100 lines each, and the
 room list's and the timeline's searches share one. A line goes in when you
 run it with `<CR>`, also when the command fails; a line you cancel with
-`<Esc>` and an empty line do not, and a line you ran before moves to the
+`<Esc>`, an empty line and a command line of blanks only do not (a search
+of blanks is a pattern and goes in), and a line you ran before moves to the
 newest place. mxt keeps both in `$XDG_STATE_HOME/mxt/history` (mode 0600)
 across starts. Picker queries and the recovery key have no history: after
-`:recover`, only `recover` goes in.
+`:recover`, only `recover` goes in, and a `:recover` line with an argument,
+which may be the key itself, does not go in at all.
 
 ## Default keymap
 

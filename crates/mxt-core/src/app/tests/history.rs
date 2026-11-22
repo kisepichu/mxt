@@ -160,9 +160,12 @@ fn executed_lines_go_into_their_history_and_save_both() {
         vec![save(&["zzz", "open b"], &[])]
     );
     assert_eq!(keys_and_store(&mut app, ":open b<CR>", None), vec![]);
-    // An empty line, an empty search (the last pattern) and a cancelled
-    // line are not recorded.
-    assert_eq!(keys_and_store(&mut app, ":<CR>:help<Esc>", None), vec![]);
+    // An empty line, a command line of blanks only, an empty search (the
+    // last pattern) and a cancelled line are not recorded.
+    assert_eq!(
+        keys_and_store(&mut app, ":<CR>:   <CR>:help<Esc>", None),
+        vec![]
+    );
     keys(&mut app, "<C-w>h");
     assert_eq!(app.focus(), Focus::RoomList);
     keys(&mut app, "/b:e<CR>");
@@ -172,6 +175,39 @@ fn executed_lines_go_into_their_history_and_save_both() {
         keys_and_store(&mut app, "/exa<CR>", None),
         vec![save(&["zzz", "open b"], &["b:e", "exa"])]
     );
+    // A search of blanks is a pattern.
+    assert_eq!(
+        keys_and_store(&mut app, "/  <CR>", None),
+        vec![save(&["zzz", "open b"], &["b:e", "exa", "  "])]
+    );
+}
+
+#[test]
+fn a_completed_name_with_a_line_break_is_not_recorded() {
+    let mut app = app();
+    let mut broken = room("!q:example.org", 5, 0);
+    broken.name.room = "q\nz".into();
+    app.update(Msg::RoomUpserted(broken));
+    keys(&mut app, ":open q<Tab>");
+    assert_eq!(shown(&app), ("open q\nz", 8));
+    // The command runs, but the history file holds one line per entry.
+    assert_eq!(
+        keys_and_store(&mut app, "<CR>", None),
+        vec![Effect::Matrix(MatrixEffect::SubscribeTimeline(id(
+            "!q:example.org"
+        )))]
+    );
+    keys(&mut app, ":<Up>");
+    assert_eq!(shown(&app), ("", 0));
+}
+
+#[test]
+fn a_loaded_line_with_a_line_break_is_dropped() {
+    let mut app = loaded(&["open b", "open q\nz"], &[]);
+    keys(&mut app, ":<Up>");
+    assert_eq!(shown(&app), ("open b", 6));
+    keys(&mut app, "<Up>");
+    assert_eq!(shown(&app), ("open b", 6));
 }
 
 #[test]
@@ -215,6 +251,23 @@ fn a_loaded_history_keeps_its_newest_100_lines_without_repeats() {
             searches,
         })]
     );
+}
+
+#[test]
+fn a_recover_line_with_an_argument_is_not_recorded() {
+    // The argument can only be the recovery key, typed or pasted after
+    // the command, however it is spaced.
+    let mut app = app();
+    for line in [":recover abc<CR>", ": recover   abc <CR>"] {
+        assert_eq!(keys_and_store(&mut app, line, None), vec![]);
+        let status = app.status().unwrap();
+        assert_eq!(
+            (status.kind, status.text.as_str()),
+            (StatusKind::Error, ":recover takes no argument")
+        );
+    }
+    keys(&mut app, ":<Up>");
+    assert_eq!(shown(&app), ("", 0));
 }
 
 #[test]

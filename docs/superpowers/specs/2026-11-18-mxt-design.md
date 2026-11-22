@@ -1964,9 +1964,14 @@ search lines:
   editors' `/` is edtui's search mode, not this line, and has none. A
   line goes in when `command_line.execute` runs it, as it was typed, also
   when the command then fails; an empty line does not (an empty search
-  reuses the last pattern). A line equal to one in its history moves to
-  the newest place instead of being added twice. Lines hold no line
-  break: no key types one, and a paste keeps its first line.
+  reuses the last pattern), and neither does a `:` line of blanks only,
+  which runs nothing (a search of blanks is a pattern and goes in). A line
+  equal to one in its history moves to the newest place instead of being
+  added twice. No key types a line break, and a paste keeps its first
+  line, but `<Tab>` completion can put a room or invite name that holds
+  one in the line (the matrix adapter passes names on as the server sends
+  them); such a line is not recorded, and `Msg::HistoryLoaded` drops any
+  such line, so a history holds single lines only, as its file needs.
 - `command_line.history_prev` (`<Up>`) and `command_line.history_next`
   (`<Down>`), in the `command_line` table. The first `history_prev` on a
   line takes the text before the cursor as the filter, keeps the line's
@@ -2023,7 +2028,11 @@ search lines:
   waits up to 1 s for the writer to finish, so `:q` and the lines before
   it are kept.
 - The `SECRET` prompt never reaches a history: it is neither a command
-  nor a search line, and `:recover` goes in as the command alone.
+  nor a search line, and `:recover` goes in as the command alone. A
+  `:recover` line with an argument, which may be the key itself, is not
+  recorded (the core parses the line first and leaves it out when the
+  parser rejects it as `:recover` with an argument, however it is
+  spaced).
 
 ### Joining rooms and direct messages
 

@@ -195,7 +195,8 @@ The defaults apply on macOS too, and also when a variable is empty or a
 relative path. `HOME` must be an absolute path. mxt creates the directories
 with mode 0700 and tightens existing ones to 0700; `session.json`, `lock` and
 `history` have mode 0600. The stores have no passphrase: the permissions
-protect them.
+protect them. Instances that share the state directory share one `history`
+(the lock is per data directory), and the last to save wins.
 The cache directory must not contain the data or state directory, because
 mxt deletes the cache directory when it sets data aside (below). Downloads
 go to `files.download_dir`, not to the cache.

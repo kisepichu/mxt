@@ -64,8 +64,9 @@ pub fn load(path: &Path) -> Histories {
 }
 
 /// The file's contents: [`HEADER`], then a line per entry, `:` and a
-/// command line's text, then `/` and a search line's text. The core's lines
-/// hold no line break.
+/// command line's text, then `/` and a search line's text. The core's
+/// histories hold no line break: completion can put a room or invite name
+/// with one in a line, but such a line is not recorded.
 pub fn format(commands: &[String], searches: &[String]) -> String {
     let mut text = format!("{HEADER}\n");
     for (prefix, lines) in [(':', commands), ('/', searches)] {
@@ -357,15 +358,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_newer_snapshot_replaces_a_waiting_one() {
+    async fn the_newest_snapshot_ends_up_in_the_file() {
         let dir = TestDir::new("history-writer-newest");
         let path = dir.join("history");
         let (to_core, _from_writer) = mpsc::unbounded_channel();
         let writer = Writer::spawn(path.clone(), to_core);
         let snapshots = writer.sender();
 
-        // The single-threaded test runtime runs the task only once this
-        // test waits.
+        // Both wait, since the single-threaded test runtime runs the task
+        // only once this test waits. Whether the older one is written first
+        // or skipped, the file ends with the newer one.
         snapshots.send(save(&["quit"], &[])).unwrap();
         snapshots.send(save(&["quit", "help"], &["a"])).unwrap();
         drop(snapshots);

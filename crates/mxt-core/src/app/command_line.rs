@@ -3,7 +3,7 @@
 
 use super::join::join_candidates;
 use super::{App, StatusKind};
-use crate::command::{Argument, COMMANDS, parse_command};
+use crate::command::{Argument, COMMANDS, CommandError, parse_command};
 use crate::effect::{Effect, StoreEffect};
 use crate::emoji;
 use crate::fuzzy;
@@ -30,12 +30,19 @@ pub struct CommandLine {
     pub input: LineEditor,
 }
 
-/// The open line, its completion and its history browsing, which end with
-/// the line. At most one of them is going on: each ends the other.
+/// The open line, and its completion or history browsing, which end with
+/// the line.
 pub(super) struct OpenLine {
     line: CommandLine,
-    completion: Option<Completion>,
-    browse: Option<Browse>,
+    cycle: Cycle,
+}
+
+/// What the open line cycles through: at most one, since each ends the
+/// other.
+enum Cycle {
+    None,
+    Completing(Completion),
+    Browsing(Browse),
 }
 
 /// The candidates of `command_line.complete` since the last edit or cursor
@@ -52,14 +59,19 @@ struct Completion {
 /// `command_line.history_prev` and `command_line.history_next` since the
 /// last other change of the line.
 struct Browse {
-    /// The text before the cursor at the first `history_prev`; the lines
-    /// that start with it match.
-    filter: String,
     /// The text and cursor at the first `history_prev`, which come back past
     /// the newest match.
     typed: LineEditor,
     /// The index in the history of the match in the line.
     at: usize,
+}
+
+impl Browse {
+    /// The text before the cursor at the first `history_prev`: the lines
+    /// that start with it match.
+    fn filter(&self) -> &str {
+        &self.typed.text()[..self.typed.cursor()]
+    }
 }
 
 impl App {
@@ -74,8 +86,7 @@ impl App {
                 kind,
                 input: LineEditor::default(),
             },
-            completion: None,
-            browse: None,
+            cycle: Cycle::None,
         });
     }
 
@@ -87,10 +98,7 @@ impl App {
             return;
         };
         match open.line.input.key(key) {
-            LineChange::Text | LineChange::Cursor => {
-                open.completion = None;
-                open.browse = None;
-            }
+            LineChange::Text | LineChange::Cursor => open.cycle = Cycle::None,
             LineChange::BackspaceOnEmpty => self.command_line = None,
             LineChange::Nothing => {}
         }
@@ -101,8 +109,7 @@ impl App {
         if let Some(open) = &mut self.command_line
             && open.line.input.insert(text)
         {
-            open.completion = None;
-            open.browse = None;
+            open.cycle = Cycle::None;
         }
     }
 
@@ -112,21 +119,34 @@ impl App {
 
     /// Closes the line, puts its text into the line's history, then runs its
     /// command or searches with its text (an empty search text reuses the
-    /// last pattern).
+    /// last pattern). A command line of blanks only, which runs nothing, is
+    /// not recorded, and neither is `:recover` with an argument: that can
+    /// only be the recovery key, which never goes to disk.
     pub(super) fn execute_line(&mut self, effects: &mut Vec<Effect>) {
         let Some(open) = self.command_line.take() else {
             return;
         };
         let CommandLine { kind, input } = open.line;
         let text = input.into_text();
-        self.record_line(kind, &text, effects);
         match kind {
-            LineKind::Command => match parse_command(&text) {
-                Ok(Some(action)) => self.run(&action, 1, effects),
-                Ok(None) => {}
-                Err(error) => self.set_status(StatusKind::Error, error.to_string()),
-            },
-            LineKind::Search(pane) => self.search_line(pane, text, effects),
+            LineKind::Command => {
+                let parsed = parse_command(&text);
+                if !matches!(
+                    parsed,
+                    Ok(None) | Err(CommandError::UnexpectedArgument { command: "recover" })
+                ) {
+                    self.record_line(kind, &text, effects);
+                }
+                match parsed {
+                    Ok(Some(action)) => self.run(&action, 1, effects),
+                    Ok(None) => {}
+                    Err(error) => self.set_status(StatusKind::Error, error.to_string()),
+                }
+            }
+            LineKind::Search(pane) => {
+                self.record_line(kind, &text, effects);
+                self.search_line(pane, text, effects);
+            }
         }
     }
 
@@ -164,10 +184,12 @@ impl App {
             return;
         };
         let history = history_of(&self.histories, open.line.kind);
-        let input = &open.line.input;
-        let (filter, before) = match &open.browse {
-            Some(browse) => (browse.filter.as_str(), browse.at),
-            None => (&input.text()[..input.cursor()], history.lines().len()),
+        let (filter, before) = match &open.cycle {
+            Cycle::Browsing(browse) => (browse.filter(), browse.at),
+            Cycle::None | Cycle::Completing(_) => {
+                let input = &open.line.input;
+                (&input.text()[..input.cursor()], history.lines().len())
+            }
         };
         let older = history
             .lines()
@@ -178,14 +200,16 @@ impl App {
         let Some((at, line)) = older else {
             return;
         };
-        let browse = open.browse.get_or_insert_with(|| Browse {
-            filter: input.text()[..input.cursor()].to_owned(),
-            typed: input.clone(),
-            at,
-        });
-        browse.at = at;
+        match &mut open.cycle {
+            Cycle::Browsing(browse) => browse.at = at,
+            cycle => {
+                *cycle = Cycle::Browsing(Browse {
+                    typed: open.line.input.clone(),
+                    at,
+                });
+            }
+        }
         open.line.input.set_text(line);
-        open.completion = None;
     }
 
     /// `command_line.history_next`: while browsing, the next newer match,
@@ -195,7 +219,7 @@ impl App {
         let Some(open) = &mut self.command_line else {
             return;
         };
-        let Some(browse) = &mut open.browse else {
+        let Cycle::Browsing(browse) = &mut open.cycle else {
             return;
         };
         let history = history_of(&self.histories, open.line.kind);
@@ -203,7 +227,7 @@ impl App {
             .lines()
             .enumerate()
             .skip(browse.at + 1)
-            .find(|(_, line)| line.starts_with(browse.filter.as_str()));
+            .find(|(_, line)| line.starts_with(browse.filter()));
         match newer {
             Some((at, line)) => {
                 browse.at = at;
@@ -211,7 +235,7 @@ impl App {
             }
             None => {
                 open.line.input = std::mem::take(&mut browse.typed);
-                open.browse = None;
+                open.cycle = Cycle::None;
             }
         }
     }
@@ -225,34 +249,38 @@ impl App {
         let Some(open) = &mut self.command_line else {
             return;
         };
-        open.browse = None;
         if open.line.kind != LineKind::Command {
+            open.cycle = Cycle::None;
             return;
         }
-        let completion = match &mut open.completion {
-            Some(completion) => completion,
-            None => {
+        match &mut open.cycle {
+            Cycle::Completing(completion) => {
+                completion.shown = (completion.shown + 1) % (completion.candidates.len() + 1);
+                let shown = completion
+                    .candidates
+                    .get(completion.shown)
+                    .unwrap_or(&completion.typed);
+                open.line.input.set_text(shown);
+            }
+            cycle => {
                 let text = open.line.input.text();
                 let mut candidates = candidates(text, &self.rooms, &self.invites);
                 if candidates.len() <= 1 {
                     if let Some(only) = candidates.pop() {
                         open.line.input.set_text(&only);
                     }
+                    *cycle = Cycle::None;
                     return;
                 }
-                open.completion.insert(Completion {
-                    typed: text.to_owned(),
-                    shown: candidates.len(),
+                let typed = text.to_owned();
+                open.line.input.set_text(&candidates[0]);
+                *cycle = Cycle::Completing(Completion {
+                    typed,
                     candidates,
-                })
+                    shown: 0,
+                });
             }
-        };
-        completion.shown = (completion.shown + 1) % (completion.candidates.len() + 1);
-        let shown = completion
-            .candidates
-            .get(completion.shown)
-            .unwrap_or(&completion.typed);
-        open.line.input.set_text(shown);
+        }
     }
 }
 
