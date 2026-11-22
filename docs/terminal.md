@@ -214,8 +214,10 @@ picker take room names in any script.
 
 mxt reads keys in the terminal's traditional encoding, so some keys arrive
 as others: `<C-i>` as `<Tab>`, `<C-m>` as `<CR>`, `<C-[>` as `<Esc>`, and in
-many terminals Shift+Enter as `<CR>`. That is why a line break in the
-composer is `<C-j>`. Bind the key that arrives.
+many terminals Shift+Enter as `<CR>` and `<C-BS>` as `<C-h>` or `<BS>`.
+That is why a line break in the composer is `<C-j>`, and why `<C-BS>` does
+not delete a word there by default (`<C-w>` and `<A-BS>` do). Bind the key
+that arrives.
 
 ## Opening files and links
 

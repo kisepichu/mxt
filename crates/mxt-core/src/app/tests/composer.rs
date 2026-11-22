@@ -294,6 +294,53 @@ fn send_and_normal_run_in_order_and_keys_resolved_after_them_use_normal_mode() {
 }
 
 #[test]
+fn composer_normal_bound_in_the_timeline_acts_on_the_shown_composer_and_keeps_the_focus() {
+    // Wherever the focus is, as `composer.send` does. The editor mode keys
+    // are resolved in stays: it is the composer's only while it has focus.
+    let to_normal = Binding::single(Action::ComposerNormal);
+    let mut app = app_with(vec![(TableId::Timeline, seq("<C-x>"), to_normal)]);
+    keys(&mut app, "<CR>");
+    reset(&mut app, vec![msg(1)]);
+    assert_eq!(
+        keys(&mut app, "<C-x>"),
+        vec![ui(UiEffect::ComposerNormal(main_of(C)))]
+    );
+    assert_eq!((app.focus(), app.editor), (Focus::Timeline, None));
+
+    // In a shown thread, the thread's composer.
+    keys(&mut app, "t");
+    let thread = TimelineId {
+        room: id(C),
+        thread: Some(event(1)),
+    };
+    assert_eq!(app.shown_timeline(), Some(thread.clone()));
+    assert_eq!(
+        keys(&mut app, "<C-x>"),
+        vec![ui(UiEffect::ComposerNormal(thread))]
+    );
+    assert_eq!((app.focus(), app.editor), (Focus::Timeline, None));
+}
+
+#[test]
+fn ctrl_w_and_alt_backspace_delete_a_word_in_insert_mode_and_ctrl_w_stays_the_window_prefix() {
+    let delete = || vec![ui(UiEffect::DeleteWordBefore(main_of(C)))];
+    let mut app = opened();
+    keys(&mut app, "i");
+    for key in ["<C-w>", "<A-BS>"] {
+        assert_eq!(insert(&mut app, key), delete(), "{key}");
+    }
+    // The mention menu's table falls back to `composer.insert`.
+    edited(&mut app, C, false);
+    members(&mut app, vec![member(ALICE, "Alice")]);
+    query(&mut app, Some("al"));
+    assert!(menu(&app).is_some());
+    assert_eq!(insert(&mut app, "<C-w>"), delete());
+    // In normal mode `<C-w>` is the window prefix.
+    assert_eq!(normal(&mut app, "<C-w>h"), vec![]);
+    assert_eq!(app.focus(), Focus::RoomList);
+}
+
+#[test]
 fn composer_leave_ends_a_reply_without_text() {
     let mut app = opened();
     reset(&mut app, vec![msg(1)]);

@@ -228,6 +228,7 @@ The timeline binds neither key, so a binding of `q` or `<Esc>` in
 | `composer.insert` | `<CR>` | `composer.send` | send |
 | `composer.insert` | `<C-j>` | `composer.newline` | a line break (many terminals send Shift+Enter as `<CR>`) |
 | `composer.insert` | `<C-c>` | `composer.normal` | normal mode, as vim's `<C-c>` |
+| `composer.insert` | `<C-w>`, `<A-BS>` | `composer.delete_word_before` | delete the word before the cursor, as vim's `<C-w>` |
 | `composer.insert`, `composer.normal` | `<C-x><C-e>` | `composer.external_editor` | edit in `$VISUAL` or `$EDITOR` |
 | `composer.normal` | `<Esc>` | `composer.leave` | back to the timeline; the text stays, and a reply or an edit without text ends |
 | `composer.normal` | `<C-c>` | `composer.cancel` | end a reply (the text stays) or an edit (the text goes) |
@@ -237,9 +238,20 @@ The timeline binds neither key, so a binding of `q` or `<Esc>` in
 
 `<Esc>` in insert mode is not bound: the editor goes to normal mode, and a
 second `<Esc>` returns to the timeline. `<C-c>` in insert mode goes to
-normal mode too, and a second `<C-c>` ends a reply or an edit. `<C-c>` did
-nothing in insert mode before; `"<C-c>" = "nop"` in
+normal mode too, and a second `<C-c>` ends a reply or an edit. Up to mxt
+0.1.4, `<C-c>` did nothing in insert mode; `"<C-c>" = "nop"` in
 `[keymap.composer.insert]` keeps it that way.
+
+`<C-w>` and `<A-BS>` in insert mode delete the word before the cursor and
+the blanks after it, split into words as the command line's `<C-w>` splits
+them (see [Line editing](#line-editing)); at the start of a line they delete
+the line break, joining the line to the one above. `<C-w>` in normal mode is
+still the window prefix (`<C-w>h`, `<C-w>j`, …). `<C-BS>` is not a default,
+because most terminals send it as `<C-h>` or `<BS>`; if yours tells it
+apart, bind it with `"<C-BS>" = "composer.delete_word_before"` in
+`[keymap.composer.insert]`. Up to mxt 0.1.4, `<C-w>` and `<A-BS>` did
+nothing in insert mode; `"<C-w>" = "nop"` and `"<A-BS>" = "nop"` in
+`[keymap.composer.insert]` keep it that way.
 
 ### `picker`, `command_line` and `message_view`
 
@@ -503,6 +515,15 @@ taller than the screen. `i` and other edits work too, but are discarded when
 the view closes. `q` and `<Esc>` close it in normal and visual mode. `:help`,
 `:map` and `:messages` show their text in the same view.
 
+In both editors, in insert and normal mode, `<Up>` on the first line goes to
+the start of the text and `<Down>` on the last line to its end, as in a text
+field (in normal mode onto the last character, an emoji with a skin tone
+whole); on the other lines they go a line up or down. A line is a line of
+the text, wrapped on the screen or not, so `<Up>` anywhere on a wrapped
+first line goes to the start. `k` and `j`, and `<Up>` and `<Down>` in visual
+mode, stop at the first and the last line, as in vim. While the composer's
+mention menu is open, `<Up>` and `<Down>` select a mention instead.
+
 Yanks (`yy` in the timeline, `y` in the editors) go to one register that
 every editor shares, and to the terminal's clipboard
 ([Terminal setup](terminal.md#clipboard)). `p` pastes from that register, not
@@ -545,4 +566,6 @@ breaks included, and runs no keys.
   variation selector of `❤️`); `df` and `dt` can split a cluster (`df👍`
   leaves the skin tone); `df<Tab>` cancels, where `f<Tab>` finds a tab;
   operators with `F`, `T`, `;` and `,`; a linewise `p` on the last line
-  pastes above it; `.` does not repeat `r`; `r` in visual mode.
+  pastes above it; `.` does not repeat `r`, and after an insert it repeats
+  the typed characters but not what `<BS>`, `<C-w>` or `<A-BS>` deleted;
+  `r` in visual mode.

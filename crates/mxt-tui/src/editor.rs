@@ -11,6 +11,11 @@
 //! without the keymap: nvim's operator-pending mode sees no normal-mode
 //! mappings, and nvim reads the key after `g` without mappings too (design,
 //! "Input routing").
+//!
+//! In normal and insert mode, with no key waiting, mxt handles `<Up>` on
+//! the first line and `<Down>` on the last, where edtui's `MoveUp` and
+//! `MoveDown` stop: they go to the start and the end of the text, as in a
+//! text field (design, "Terminal adapter and the composer").
 
 use std::cmp::Ordering;
 
@@ -125,6 +130,9 @@ impl Editor {
     pub(crate) fn feed(&mut self, key: Key) {
         let waiting = self.waiting();
         self.pending = None;
+        if waiting.is_none() && self.move_to_edge(key) {
+            return;
+        }
         match waiting {
             None | Some(Pending::Operator(_) | Pending::Object | Pending::G) => {}
             Some(Pending::Char { till }) => {
@@ -282,6 +290,44 @@ impl Editor {
             Ordering::Less => self.state.execute(MoveBackward(from - col)),
             Ordering::Equal => {}
         }
+    }
+
+    /// `<Up>` on the first line goes to the start of the text, and
+    /// `<Down>` on the last line to its end: after the last character in
+    /// insert mode, and in normal mode on the start of the last grapheme
+    /// cluster, so the cursor never lands inside one (on `👍🏽`'s first
+    /// character, not on its skin tone modifier). Lines are the text's, not
+    /// the rows a wrapped line takes on the screen, as for edtui's
+    /// `MoveUp` and `MoveDown`. Whether `key` was such a key; other keys,
+    /// and these keys in visual and search mode, are left to edtui.
+    fn move_to_edge(&mut self, key: Key) -> bool {
+        let state = &mut self.state;
+        let insert = match state.mode {
+            edtui::EditorMode::Insert => true,
+            edtui::EditorMode::Normal => false,
+            edtui::EditorMode::Visual | edtui::EditorMode::Search => return false,
+        };
+        if key.mods() != Modifiers::default() {
+            return false;
+        }
+        let last = state.lines.len().saturating_sub(1);
+        state.cursor = match key.code() {
+            KeyCode::Up if state.cursor.row == 0 => Index2::new(0, 0),
+            KeyCode::Down if state.cursor.row >= last => {
+                let line = state
+                    .lines
+                    .get(RowIndex::new(last))
+                    .map_or(&[][..], Vec::as_slice);
+                let col = if insert {
+                    line.len()
+                } else {
+                    cluster_starts(line).last().copied().unwrap_or(0)
+                };
+                Index2::new(last, col)
+            }
+            _ => return false,
+        };
+        true
     }
 
     /// The search pattern while the editor is in search mode.
@@ -1051,6 +1097,110 @@ pub(crate) mod tests {
         // ends the word, and only the next `b` goes to the bracket.
         let mut editor = holding("「日本」");
         assert_eq!(cols(&mut editor, &["w", "w", "b", "b"]), [1, 3, 1, 0]);
+    }
+
+    /// The cursor after `typed`, starting at `(row, col)`.
+    fn after(editor: &mut Editor, (row, col): (usize, usize), typed: &str) -> Index2 {
+        editor.state.cursor = Index2::new(row, col);
+        feed(editor, typed);
+        editor.state.cursor
+    }
+
+    #[test]
+    fn up_on_the_first_line_and_down_on_the_last_go_to_the_start_and_the_end() {
+        // Insert mode: after the last character.
+        let mut editor = holding("ab\ncd");
+        feed(&mut editor, "i");
+        assert_eq!(after(&mut editor, (0, 1), "<Up>"), Index2::new(0, 0));
+        assert_eq!(after(&mut editor, (1, 0), "<Down>"), Index2::new(1, 2));
+        // Normal mode: on the last character.
+        let mut editor = holding("ab\ncd");
+        assert_eq!(after(&mut editor, (0, 1), "<Up>"), Index2::new(0, 0));
+        assert_eq!(after(&mut editor, (1, 0), "<Down>"), Index2::new(1, 1));
+        // `a👍🏽` is `a`, `👍` and the skin tone modifier. Normal mode stops
+        // on the emoji's first character, not inside the cluster; insert
+        // mode goes after it.
+        let mut editor = holding("ab\na👍🏽");
+        assert_eq!(after(&mut editor, (1, 0), "<Down>"), Index2::new(1, 1));
+        feed(&mut editor, "i");
+        assert_eq!(after(&mut editor, (1, 0), "<Down>"), Index2::new(1, 3));
+        // One line is the first and the last.
+        let mut editor = holding("one");
+        assert_eq!(after(&mut editor, (0, 1), "<Down>"), Index2::new(0, 2));
+        assert_eq!(after(&mut editor, (0, 1), "<Up>"), Index2::new(0, 0));
+    }
+
+    #[test]
+    fn up_and_down_between_the_edges_move_a_line() {
+        for insert in [false, true] {
+            let mut editor = holding("one\ntwo\nthree");
+            if insert {
+                feed(&mut editor, "i");
+            }
+            assert_eq!(
+                after(&mut editor, (1, 1), "<Up>"),
+                Index2::new(0, 1),
+                "{insert}"
+            );
+            assert_eq!(
+                after(&mut editor, (1, 1), "<Down>"),
+                Index2::new(2, 1),
+                "{insert}"
+            );
+        }
+    }
+
+    #[test]
+    fn up_and_down_in_an_empty_editor_stay() {
+        for typed in ["<Up>", "<Down>", "i<Up>", "i<Down>"] {
+            let mut editor = holding("");
+            feed(&mut editor, typed);
+            assert_eq!(editor.state.cursor, Index2::new(0, 0), "{typed}");
+            assert_eq!(text(&editor), "", "{typed}");
+        }
+    }
+
+    #[test]
+    fn up_from_the_second_row_of_a_wrapped_first_line_goes_to_the_start() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        // At four columns `abcdef` takes two rows, `abcd` and `ef`; the
+        // cursor on `f` is on the second.
+        for insert in [false, true] {
+            let mut editor = holding("abcdef\ngh");
+            if insert {
+                feed(&mut editor, "i");
+            }
+            editor.state.cursor = Index2::new(0, 5);
+            let mut terminal = Terminal::new(TestBackend::new(4, 3)).unwrap();
+            let mut screen_row = |editor: &mut Editor| {
+                terminal
+                    .draw(|frame| editor.draw(frame, frame.area(), Block::new(), true))
+                    .unwrap();
+                editor.state.cursor_screen_position().unwrap().y
+            };
+            assert_eq!(screen_row(&mut editor), 1, "{insert}");
+            feed(&mut editor, "<Up>");
+            assert_eq!(editor.state.cursor, Index2::new(0, 0), "{insert}");
+            assert_eq!(screen_row(&mut editor), 0, "{insert}");
+        }
+    }
+
+    #[test]
+    fn visual_mode_k_j_and_a_waiting_key_leave_up_and_down_to_edtui() {
+        // edtui's visual `<Up>` and `<Down>` stop at the first and the last
+        // line.
+        let mut editor = holding("ab\ncd");
+        feed(&mut editor, "lv<Up>");
+        assert_eq!(editor.state.cursor, Index2::new(0, 1));
+        feed(&mut editor, "j<Down>");
+        assert_eq!(editor.state.cursor, Index2::new(1, 1));
+        // `k` and `j` stay vim's.
+        let mut editor = holding("ab\ncd");
+        assert_eq!(after(&mut editor, (0, 1), "k"), Index2::new(0, 1));
+        assert_eq!(after(&mut editor, (1, 0), "j"), Index2::new(1, 0));
+        // The key after `g` goes to edtui, which drops it with the `g`.
+        assert_eq!(after(&mut editor, (0, 1), "g<Up>"), Index2::new(0, 1));
     }
 
     #[test]

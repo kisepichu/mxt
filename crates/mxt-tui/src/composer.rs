@@ -7,11 +7,12 @@
 use std::collections::HashMap;
 use std::io;
 
-use edtui::actions::{LineBreak, MoveForward, OpenSystemEditor, SwitchMode};
+use edtui::actions::{DeleteChar, LineBreak, MoveForward, OpenSystemEditor, SwitchMode};
 use edtui::{EditorState, Index2, Lines, RowIndex};
 use mxt_core::action::FocusMode;
 use mxt_core::ids::TimelineId;
 use mxt_core::keys::Key;
+use mxt_core::line::word_start;
 use mxt_core::msg::{EditorMode, Msg};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -155,6 +156,36 @@ impl Composer {
     pub(crate) fn enter_normal_mode(&mut self, msgs: &mut Vec<Msg>) {
         self.editor.enter_normal_mode();
         self.report(msgs);
+    }
+
+    /// `DeleteWordBefore`, in insert mode: deletes the word before the
+    /// cursor with the blanks between it and the cursor, from where the
+    /// line editor's `<C-w>` deletes (see [`word_start`]), on the cursor's
+    /// line. At the start of a later line it deletes the line break, which
+    /// joins the line to the one above; at the start of the text it does
+    /// nothing. edtui's `DeleteChar` deletes, so the deletion is one undo
+    /// state and writes no register, unlike edtui's `DeleteWordBackward`.
+    /// Other modes: nothing.
+    pub(crate) fn delete_word_before(&mut self, msgs: &mut Vec<Msg>) {
+        let state = &mut self.editor.state;
+        if state.mode != edtui::EditorMode::Insert {
+            return;
+        }
+        let Some(line) = state.lines.get(RowIndex::new(state.cursor.row)) else {
+            return;
+        };
+        let col = state.cursor.col.min(line.len());
+        let count = if col == 0 {
+            usize::from(state.cursor.row > 0)
+        } else {
+            let before: String = line[..col].iter().collect();
+            before[word_start(&before, before.len())..].chars().count()
+        };
+        // `DeleteChar` saves an undo state even when it deletes nothing.
+        if count > 0 {
+            state.execute(DeleteChar(count));
+            self.report(msgs);
+        }
     }
 
     /// `Paste` (see [`Editor::paste`]), reported once. A paste never opens
@@ -422,6 +453,99 @@ mod tests {
         assert_eq!(type_keys(&mut composer, "!"), []);
         assert_eq!(composer.text(), "first\nsecond!");
         assert_eq!(type_keys(&mut composer, "<Esc>dddd"), [edited(true)]);
+    }
+
+    /// A composer in insert mode holding `text`, with the cursor at its end.
+    fn inserting(text: &str, register: SharedRegister) -> Composer {
+        let mut composer = Composer::new(main_of("!room:example.org"), register);
+        composer.focus(FocusMode::Insert, &mut Vec::new());
+        composer.load(text, &mut Vec::new());
+        composer
+    }
+
+    fn delete_word(composer: &mut Composer) -> Vec<Msg> {
+        let mut msgs = Vec::new();
+        composer.delete_word_before(&mut msgs);
+        msgs
+    }
+
+    #[test]
+    fn the_word_before_the_cursor_goes_with_the_blanks_after_it() {
+        // Words as the line editor's `<C-w>` splits them: kanji, hiragana,
+        // katakana, and punctuation with emoji are words of their own, and
+        // `👍🏽` goes whole.
+        for (text, left) in [
+            ("foo bar", "foo "),
+            ("foo bar  ", "foo "),
+            ("open foo.bar", "open foo."),
+            ("日本語のテキスト", "日本語の"),
+            ("hi 👍🏽", "hi "),
+        ] {
+            let mut composer = inserting(text, SharedRegister::default());
+            delete_word(&mut composer);
+            assert_eq!(composer.text(), left, "{text:?}");
+        }
+
+        // Only the text before the cursor counts, and the rest stays.
+        let mut composer = inserting("one two three", SharedRegister::default());
+        type_keys(&mut composer, "<Left><Left><Left><Left><Left><Left>");
+        delete_word(&mut composer);
+        type_keys(&mut composer, "x");
+        assert_eq!(composer.text(), "one x three");
+
+        // With the cursor past the end of a shorter line, where edtui's
+        // `<Up>` from a later line keeps the column, the whole line before
+        // it goes.
+        let mut composer = inserting("ab\nhello world", SharedRegister::default());
+        type_keys(&mut composer, "<Up>");
+        assert_eq!(composer.editor.state.cursor, Index2::new(0, 11));
+        delete_word(&mut composer);
+        assert_eq!(composer.text(), "\nhello world");
+    }
+
+    #[test]
+    fn at_the_start_of_a_line_the_line_break_goes_and_at_the_start_of_the_text_nothing() {
+        // The joined line's `@` token ends at the cursor again.
+        let mut composer = inserting("@al\n", SharedRegister::default());
+        assert_eq!(delete_word(&mut composer), [query(Some("al"))]);
+        assert_eq!(composer.text(), "@al");
+
+        composer.editor.state.cursor = Index2::new(0, 0);
+        assert_eq!(delete_word(&mut composer), []);
+        assert_eq!(composer.text(), "@al");
+
+        // Emptied, the composer says so.
+        let mut composer = inserting("word", SharedRegister::default());
+        assert_eq!(delete_word(&mut composer), [edited(true)]);
+    }
+
+    #[test]
+    fn a_word_deletion_is_one_undo_state_and_leaves_the_register() {
+        let register = SharedRegister::default();
+        register.copy("yanked".to_owned());
+        register.take_unsent();
+        let mut composer = inserting("one two three", register.clone());
+        delete_word(&mut composer);
+        delete_word(&mut composer);
+        assert_eq!(composer.text(), "one ");
+        // Nothing goes to the terminal clipboard.
+        assert_eq!(register.take_unsent(), None);
+        type_keys(&mut composer, "<Esc>u");
+        assert_eq!(composer.text(), "one two ");
+        type_keys(&mut composer, "u");
+        assert_eq!(composer.text(), "one two three");
+        type_keys(&mut composer, "$p");
+        assert_eq!(composer.text(), "one two threeyanked");
+    }
+
+    #[test]
+    fn a_word_deletion_does_nothing_in_normal_and_visual_mode() {
+        for typed in ["<Esc>", "<Esc>v"] {
+            let mut composer = inserting("foo bar", SharedRegister::default());
+            type_keys(&mut composer, typed);
+            assert_eq!(delete_word(&mut composer), [], "{typed}");
+            assert_eq!(composer.text(), "foo bar", "{typed}");
+        }
     }
 
     #[test]
@@ -722,9 +846,9 @@ mod tests {
     }
 
     /// Runs `effect` as the terminal does: `FocusComposer`, `ReplayKeys`,
-    /// `InsertNewline`, `RequestSubmit`, `ComposerNormal` and
-    /// `ClearComposer` go to the composers, which report to `msgs`. The
-    /// timer it starts.
+    /// `InsertNewline`, `RequestSubmit`, `ComposerNormal`,
+    /// `DeleteWordBefore` and `ClearComposer` go to the composers, which
+    /// report to `msgs`. The timer it starts.
     fn execute(composers: &mut Composers, effect: Effect, msgs: &mut Vec<Msg>) -> Option<TimerId> {
         match effect {
             Effect::Ui(UiEffect::StartTimer { id, .. }) => return Some(id),
@@ -750,6 +874,11 @@ mod tests {
             Effect::Ui(UiEffect::ComposerNormal(timeline)) => {
                 if let Some(composer) = composers.get_mut(&timeline) {
                     composer.enter_normal_mode(msgs);
+                }
+            }
+            Effect::Ui(UiEffect::DeleteWordBefore(timeline)) => {
+                if let Some(composer) = composers.get_mut(&timeline) {
+                    composer.delete_word_before(msgs);
                 }
             }
             Effect::Ui(UiEffect::ClearComposer(timeline)) => {
@@ -809,6 +938,19 @@ mod tests {
             (text_of(&composers), mode(&composers)),
             ("  ".to_owned(), EditorMode::Normal)
         );
+    }
+
+    #[test]
+    fn ctrl_w_and_alt_backspace_delete_words_in_insert_mode_only() {
+        let (mut app, mut composers) = composing("one<Space>two<Space>three");
+        run(&mut app, &mut composers, "a<C-w>");
+        assert_eq!(text_of(&composers), "one two ");
+        run(&mut app, &mut composers, "<A-BS>");
+        assert_eq!(text_of(&composers), "one ");
+        // In normal mode `<C-w>` is still the window prefix.
+        run(&mut app, &mut composers, "<Esc><C-w>h");
+        assert_eq!(text_of(&composers), "one ");
+        assert_eq!(app.focus(), Focus::RoomList);
     }
 
     #[test]

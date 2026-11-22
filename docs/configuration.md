@@ -469,6 +469,7 @@ arguments; any other argument ignores the binding with a warning. Actions on
 | `composer.leave` | | Moves the focus to the timeline. When the composer is empty, a reply or an edit ends first, as with `composer.cancel`; any text, even a space, stays with its reply or edit. `focus.timeline` leaves the reply or edit as it is. |
 | `composer.external_editor` | | Edits the composer's text in `$VISUAL` or `$EDITOR`. |
 | `composer.normal` | | Puts the composer's editor in normal mode, as `<Esc>` does in insert mode (the cursor moves back one character and `.` repeats the insert); a visual selection is dropped and a search stopped. In normal mode it does nothing. After `composer.send`, as in `"<CR>" = ["composer.send", "composer.normal"]`, the editor is in normal mode after sending, also when a blank text sends nothing. |
+| `composer.delete_word_before` | | In insert mode, deletes the word before the cursor and the blanks after it, split into words as the command line's `<C-w>` splits them (see [Keys](keys.md#line-editing)); at the start of a line it deletes the line break, joining the line to the one above. `u` in normal mode brings the deleted text back, and the register is not changed. In normal and visual mode it does nothing. |
 | `completion.next`, `completion.prev` | | Selects the next or previous member in the mention menu. |
 | `completion.accept` | | Inserts the selected mention. |
 | `completion.cancel` | | Closes the mention menu. |

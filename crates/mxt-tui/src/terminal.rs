@@ -359,6 +359,8 @@ impl Tui {
     ///   `Msg::EffectFailed`.
     /// - `ComposerNormal` puts the composer's editor in normal mode as
     ///   edtui's `<Esc>` does.
+    /// - `DeleteWordBefore` deletes the word before the composer's cursor
+    ///   in insert mode (see `Composer::delete_word_before`).
     /// - `Quit` sets `should_quit`.
     pub fn execute(&mut self, effect: UiEffect, now: Instant) -> Vec<Msg> {
         let mut msgs = Vec::new();
@@ -451,6 +453,11 @@ impl Tui {
             UiEffect::ComposerNormal(timeline) => {
                 if let Some(composer) = self.composers.get_mut(&timeline) {
                     composer.enter_normal_mode(&mut msgs);
+                }
+            }
+            UiEffect::DeleteWordBefore(timeline) => {
+                if let Some(composer) = self.composers.get_mut(&timeline) {
+                    composer.delete_word_before(&mut msgs);
                 }
             }
             UiEffect::Quit => self.should_quit = true,
