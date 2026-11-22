@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use super::timeline::{event, item, local, msg, opened, remote, reset, status};
 use super::*;
 use crate::action::FocusMode;
@@ -1087,21 +1089,34 @@ fn opening_another_room_or_losing_the_open_room_closes_what_belongs_to_it() {
     assert_eq!(app.confirmation(), None);
 }
 
-#[test]
-fn the_emoji_picker_lists_reacted_and_common_emoji_first_and_toggles_one() {
-    let reacted = |key: &str, mine: bool| ReactionGroup {
+fn reacted(key: &str, mine: bool) -> ReactionGroup {
+    ReactionGroup {
         key: key.into(),
         count: 1,
         mine,
-    };
+    }
+}
+/// The keys of the open picker's first `n` items.
+fn first_keys(app: &App, n: usize) -> Vec<PickerKey> {
+    let items = &app.picker().unwrap().items[..n];
+    items.iter().map(|item| item.key.clone()).collect()
+}
+fn reaction_keys<const N: usize>(keys: [&str; N]) -> Vec<PickerKey> {
+    keys.map(|key| PickerKey::Reaction(key.into())).to_vec()
+}
+
+#[test]
+fn the_emoji_picker_lists_the_shown_reactions_then_common_emoji_and_toggles_one() {
     let mut app = opened();
     reset(
         &mut app,
         vec![with(msg(1), |item| {
-            // ❤ without its variation selector, as some clients send it.
+            // ❤ without its variation selector, as some clients send it,
+            // and a key that is no emoji.
             item.reactions = vec![
-                reacted("🎉", true),
                 reacted("👍", false),
+                reacted("🎉", true),
+                reacted("lol", false),
                 reacted("\u{2764}", true),
             ];
         })],
@@ -1116,27 +1131,41 @@ fn the_emoji_picker_lists_reacted_and_common_emoji_first_and_toggles_one() {
         }
     );
     assert_eq!(app.mode_label(None), "PICKER");
-    let first: Vec<PickerKey> = picker.items[..9].iter().map(|i| i.key.clone()).collect();
-    // The common reactions, then every other emoji in `emojis` order.
+    // The reactions as the timeline shows them, the user's own among them,
+    // each with its own key; then the other common reactions, then every
+    // other emoji in `emojis` order.
     let first_other = emoji::all().next().unwrap().as_str();
     assert_eq!(
-        first,
-        [
-            "🎉",
-            "\u{2764}",
+        first_keys(&app, 10),
+        reaction_keys([
             "👍",
+            "🎉",
+            "lol",
+            "\u{2764}",
             "😂",
             "😮",
             "😢",
             "👀",
             "🙏",
             first_other
-        ]
-        .map(|key| PickerKey::Reaction(key.into()))
+        ])
     );
-    assert_eq!(picker.items[1].label, ":heart: ❤️");
-    assert_eq!(picker.items.len(), emoji::all().count());
+    let picker = app.picker().unwrap();
+    assert_eq!(picker.items[2].label, "lol");
+    assert_eq!(picker.items[3].label, ":heart: ❤️");
+    // Each emoji once: the shown ones are not listed again.
+    let labels: HashSet<&str> = picker.items.iter().map(|i| i.label.as_str()).collect();
+    assert_eq!(labels.len(), picker.items.len());
+    assert_eq!(picker.items.len(), emoji::all().count() + 1);
 
+    // `<CR>` toggles the first shown reaction, `<C-n><CR>` the second.
+    assert_eq!(keys(&mut app, "<CR>"), vec![toggle(1, "👍")]);
+    keys(&mut app, "+");
+    assert_eq!(keys(&mut app, "<C-n><CR>"), vec![toggle(1, "🎉")]);
+    keys(&mut app, "+");
+    assert_eq!(keys(&mut app, "<C-n><C-n><CR>"), vec![toggle(1, "lol")]);
+
+    keys(&mut app, "+");
     // Typed keys go to the query, not to the timeline bindings.
     keys(&mut app, "jk");
     assert_eq!(app.picker().unwrap().query.text(), "jk");
@@ -1171,6 +1200,20 @@ fn the_emoji_picker_lists_reacted_and_common_emoji_first_and_toggles_one() {
     assert_eq!(keys(&mut app, "<Esc>"), vec![]);
     assert!(app.picker().is_none());
     assert_eq!(app.timeline_cursor(), Some(0));
+}
+
+#[test]
+fn the_emoji_picker_without_reactions_lists_the_common_emoji_first() {
+    let mut app = opened();
+    reset(&mut app, vec![msg(1)]);
+    keys(&mut app, "+");
+    let first_other = emoji::all().next().unwrap().as_str();
+    assert_eq!(
+        first_keys(&app, 9),
+        reaction_keys(["👍", "❤️", "😂", "😮", "😢", "🎉", "👀", "🙏", first_other])
+    );
+    assert_eq!(app.picker().unwrap().items.len(), emoji::all().count());
+    assert_eq!(keys(&mut app, "<CR>"), vec![toggle(1, "👍")]);
 }
 
 fn toggle(n: u32, key: &str) -> Effect {

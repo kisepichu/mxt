@@ -8,6 +8,13 @@ marked **Breaking:**.
 
 ## [Unreleased]
 
+### Changed
+
+- The emoji picker lists the reactions already on the message first, in
+  the order shown under it, so `+<CR>` toggles the first one and
+  `+<C-n><CR>` the second; your other reactions, the common ones and every
+  emoji follow as before.
+
 ## [0.1.5] - 2026-11-23
 
 ### Added

@@ -235,7 +235,7 @@ editors' own `/` shows only the current match, while you type it.
 | `e` | `message.edit` | edit your own text message (the composer must be empty) |
 | `dd` | `message.delete` | delete your own message, after `y` |
 | `yy` | `message.yank` | copy the message's text |
-| `+` | `message.react` | react with the emoji picker; an emoji you already chose removes your reaction |
+| `+` | `message.react` | react with the emoji picker, which lists the reactions under the message first; an emoji you already chose removes your reaction |
 | `gx` | `message.open` | open the link, or download and open the attachment |
 | `gd` | `message.goto_reply` | go to the message this one replies to |
 | `R` | `message.resend` | send a message marked `failed` again |
@@ -243,6 +243,13 @@ editors' own `/` shows only the current match, while you type it.
 
 A message that failed for a passing reason, such as a lost connection, also
 goes out by itself once the sync is back; `R` is for the others.
+
+The emoji picker lists, before you type, the reactions already on the
+message in the order they are shown under it, yours among them, so `+<CR>`
+toggles the first one and `+<C-n><CR>` the second; then the common
+reactions and every other emoji, each once. Typing searches shortcodes and
+names. Up to mxt 0.1.5, your own reactions came first, then the common
+ones.
 
 `t` did nothing in the timeline before mxt had threads. It is in
 `timeline`, which comes before `normal`, so if your configuration binds
