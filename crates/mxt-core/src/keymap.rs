@@ -343,7 +343,9 @@ const DEFAULTS: &[(&[TableId], &str, Action)] = &[
         Action::CommandLineHistoryNext,
     ),
     (&[TableId::MessageView], "q", Action::ViewClose),
-    (&[TableId::MessageView], "<Esc>", Action::ViewClose),
+    // vim's `<Esc>` ends visual mode; in normal mode it closes the view.
+    // mxt has no macros, so `q` closes it in visual mode too.
+    (&[TableId::MessageView], "<Esc>", Action::ViewLeave),
 ];
 
 /// The effective map of each input context, precomputed from the default

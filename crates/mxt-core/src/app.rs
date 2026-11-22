@@ -145,10 +145,15 @@ pub struct App {
     /// for it, `composer.normal` sets it to normal while the composer has
     /// focus, as the tui adapter leaves insert, visual or search mode for
     /// it, and `composer.clear` sets visual to normal while the composer has
-    /// focus, as the tui adapter drops the selection for it. Other mode
-    /// changes before the next key are unknown to the core, such as a
-    /// released `a` in `composer.normal` that starts insert mode: keys
-    /// resolved again after it still use the mode reported last.
+    /// focus, as the tui adapter drops the selection for it. `view.leave`
+    /// sets visual to normal while a view is open, as the tui adapter
+    /// leaves the view's visual mode for it, and opening a view
+    /// (`message.view`, `help.commands`, `help.keymap`, `status.messages`)
+    /// sets it to normal, as the tui adapter opens the view's editor in
+    /// normal mode. Other mode changes before the next key are unknown to
+    /// the core, such as a released `a` in `composer.normal` that starts
+    /// insert mode: keys resolved again after it still use the mode
+    /// reported last.
     editor: Option<EditorMode>,
     rooms: RoomList,
     /// The room list cursor, once a cursor action, a search or opening a room
@@ -782,6 +787,7 @@ impl App {
             Action::RoomJoin { target } => self.join(target, effects),
             Action::MessageView => self.view_message(effects),
             Action::ViewClose => self.close_view(effects),
+            Action::ViewLeave => self.leave_view(effects),
             Action::HelpCommands => self.view_help(help_text(COMMANDS), effects),
             Action::HelpKeymap => self.view_help(keymap_text(&self.keymap), effects),
             Action::StatusMessages => self.view_help(self.messages_text(), effects),

@@ -521,6 +521,7 @@ arguments; any other argument ignores the binding with a warning. Actions on
 | `thread.open` | | Shows the thread of the message under the timeline cursor in place of the timeline, or starts a thread on a message without replies; in a thread it only focuses the timeline. Not for a message that is still being sent, nor for a deleted message without replies. See [Threads](keys.md#threads), also for its read receipts. |
 | `thread.close` | | Shows the timeline again in place of the thread, with the cursor on the thread's root. Without a thread it does nothing. |
 | `view.close` | | Closes the message view, also when it shows `:help`, `:map` or `:messages`. |
+| `view.leave` | | In the message view's visual mode, goes back to normal mode with the cursor where it is, as `<Esc>` does in vim; otherwise closes the view, as `view.close` does. The default `<Esc>` in `message_view`, where `q` stays `view.close`. |
 | `help.commands` | | Shows the commands with a one-line description each in the full-screen view, as `:help` does. |
 | `help.keymap` | | Shows the bindings of each keymap table after your configuration in the full-screen view, as `:map` does: `keys -> action` or `keys -> action (arguments)`, with `<leader>` written as its key. |
 | `status.messages` | | Shows the status line's recent messages, oldest first, in the full-screen view, as `:messages` does. |

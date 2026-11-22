@@ -434,6 +434,90 @@ fn message_view_opens_and_closes() {
 }
 
 #[test]
+fn escape_leaves_the_views_visual_mode_and_closes_the_view_in_normal_mode() {
+    let mut app = opened();
+    reset(&mut app, vec![msg(1)]);
+    keys(&mut app, "<CR>");
+    assert_eq!(
+        keys_in(&mut app, "<Esc>", Some(EditorMode::Visual)),
+        vec![Effect::Ui(UiEffect::ViewNormal)]
+    );
+    assert!(app.view_open());
+    assert_eq!(
+        keys_in(&mut app, "<Esc>", Some(EditorMode::Normal)),
+        vec![Effect::Ui(UiEffect::CloseView)]
+    );
+    assert!(!app.view_open());
+    // mxt has no macros: `q` closes the view in visual mode too.
+    keys(&mut app, "<CR>");
+    assert_eq!(
+        keys_in(&mut app, "q", Some(EditorMode::Visual)),
+        vec![Effect::Ui(UiEffect::CloseView)]
+    );
+    assert!(!app.view_open());
+}
+
+#[test]
+fn a_user_binding_of_escape_in_the_view_wins_in_visual_mode() {
+    let leave_twice = Binding::new(vec![Action::ViewLeave, Action::ViewLeave]).unwrap();
+    let mut app = app_with(vec![
+        // The behaviour before `view.leave`.
+        (
+            TableId::MessageView,
+            seq("<Esc>"),
+            Binding::single(Action::ViewClose),
+        ),
+        (TableId::MessageView, seq("<C-c>"), leave_twice),
+    ]);
+    keys(&mut app, "<CR>");
+    reset(&mut app, vec![msg(1)]);
+    keys(&mut app, "<CR>");
+    assert_eq!(
+        keys_in(&mut app, "<Esc>", Some(EditorMode::Visual)),
+        vec![Effect::Ui(UiEffect::CloseView)]
+    );
+    // The second `view.leave` runs in the normal mode the first left.
+    keys(&mut app, "<CR>");
+    assert_eq!(
+        keys_in(&mut app, "<C-c>", Some(EditorMode::Visual)),
+        vec![
+            Effect::Ui(UiEffect::ViewNormal),
+            Effect::Ui(UiEffect::CloseView)
+        ]
+    );
+    assert!(!app.view_open());
+}
+
+#[test]
+fn keys_resolved_after_opening_a_view_from_the_composers_visual_mode_use_normal_mode() {
+    // The tui opens the view's editor in normal mode. `<Esc>` ends the `K`
+    // waiting for `KK` and is resolved afresh in `message_view`: in normal
+    // mode `view.leave` closes the view, where in visual mode it would
+    // leave the editor's visual mode.
+    let mut app = app_with(vec![
+        (
+            TableId::Normal,
+            seq("K"),
+            Binding::single(Action::HelpKeymap),
+        ),
+        (TableId::Normal, seq("KK"), Binding::single(Action::Nop)),
+    ]);
+    keys(&mut app, "<CR>i");
+    let effects = no_timers(keys_in(&mut app, "K<Esc>", Some(EditorMode::Visual)));
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [
+                Effect::Ui(UiEffect::OpenView(_)),
+                Effect::Ui(UiEffect::CloseView)
+            ]
+        ),
+        "{effects:?}"
+    );
+    assert!(!app.view_open());
+}
+
+#[test]
 fn yy_yields_the_plain_text() {
     let mut app = opened();
     let bold = Style {

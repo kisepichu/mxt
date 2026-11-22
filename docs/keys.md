@@ -302,7 +302,11 @@ nothing in insert mode; `"<C-w>" = "nop"` and `"<A-BS>" = "nop"` in
 | `picker` | `<CR>` / `<Esc>` | `picker.accept` / `picker.cancel` |
 | `command_line` | `<CR>` / `<Esc>` / `<Tab>` | `command_line.execute` / `command_line.cancel` / `command_line.complete` |
 | `command_line` | `<Up>` / `<Down>` | `command_line.history_prev` / `command_line.history_next` (see [History](#history)) |
-| `message_view` | `q`, `<Esc>` | `view.close` |
+| `message_view` | `q` | `view.close` |
+| `message_view` | `<Esc>` | `view.leave`: in visual mode back to normal mode, otherwise `view.close` |
+
+Up to mxt 0.1.4, `<Esc>` closed the message view in visual mode too;
+`"<Esc>" = "view.close"` in `[keymap.message_view]` keeps it that way.
 
 ### Actions without a default key
 
@@ -558,8 +562,11 @@ The composer:
 The message view (`<CR>` on a message) holds the message's text in an
 editor, so motions, `/` search, visual selection and yanks work on messages
 taller than the screen. `i` and other edits work too, but are discarded when
-the view closes. `q` and `<Esc>` close it in normal and visual mode. `:help`,
-`:map` and `:messages` show their text in the same view.
+the view closes. `q` closes it in normal and visual mode, and `<Esc>` in
+normal mode; in visual mode `<Esc>` goes back to normal mode with the cursor
+where it is, as in vim, so after `V`, `<Esc>v` starts a selection of
+characters. `:help`, `:map` and `:messages` show their text in the same
+view.
 
 In both editors, in insert and normal mode, `<Up>` on the first line goes to
 the start of the text and `<Down>` on the last line to its end, as in a text

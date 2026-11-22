@@ -338,7 +338,8 @@ impl Tui {
     ///   is open, otherwise to the composer that last got the focus. Either
     ///   editor reports a refused register as `Msg::EditorRefused`.
     /// - `OpenView` replaces the message view and `CloseView` drops it with
-    ///   its edits. `ShowImage` decodes the image for the view (see
+    ///   its edits; `ViewNormal` puts its editor in normal mode as edtui's
+    ///   `<Esc>` does. `ShowImage` decodes the image for the view (see
     ///   [`Images::insert`]); a failure becomes `Msg::EffectFailed`. Without
     ///   previews it does nothing (the core does not fetch images then).
     /// - `ShowPreview` hands the image to the previews' worker, and
@@ -423,6 +424,11 @@ impl Tui {
                 error: "Not opening the link: only http and https links are opened".to_owned(),
             }),
             UiEffect::CloseView => self.close_view(),
+            UiEffect::ViewNormal => {
+                if let Some(view) = &mut self.view {
+                    view.editor.enter_normal_mode();
+                }
+            }
             UiEffect::Yank(text) => self.register.copy(text),
             UiEffect::FocusComposer { timeline, mode } => {
                 self.composers.focus(timeline, mode, &mut msgs);
