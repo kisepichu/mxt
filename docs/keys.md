@@ -18,11 +18,13 @@ mxt 0.1.2 did nothing. The leader and the longer bindings work as before.
   unless it says otherwise (see [Sort keys](configuration.md#sort-keys)).
   Opening a room, with `<CR>` or any other way of opening it (`]u`, `[u`,
   the room picker, `:open`, `:join`, the jump list), puts the cursor on
-  it. The first time that room then moves in the list because of a change
-  to it, while the cursor is still on it (it sorts as read as it opens,
-  you read it, a message arrives in it, it is renamed), the cursor goes
-  to the room that came right after it, or to the room before it if it
-  was the last, as in a mail inbox: with
+  it; opening the room that is already open only moves the focus to its
+  timeline, and the cursor stays where it is. The first time the opened
+  room then moves in the list because of a change to it, while the cursor
+  is still on it (it sorts as read as it opens, you read it, a message
+  arrives in it, it is renamed), the cursor goes to the room that came
+  right after it, or to the room before it if it was the last, as in a
+  mail inbox: with
   `sort = "mentions, notify, unread, read"`, `<CR>` or `]u` opens the top
   room, it drops out of its group, and the cursor is on the next one; with
   `sort = "read"`, `<CR>` on an unread room leaves it in place, reading it

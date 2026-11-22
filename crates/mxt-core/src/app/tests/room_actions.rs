@@ -512,6 +512,8 @@ fn under_unread_the_open_room_moves_among_the_read_rooms() {
         no_timers(keys(&mut app, "]u")),
         vec![unsubscribe(C), subscribe(A)]
     );
+    assert_eq!(order(&app), [D, A, B, C]);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (D, Some(0)));
 
     // !a sorts as read once open too, and its receipt clears it.
     app.update(Msg::Timeline {

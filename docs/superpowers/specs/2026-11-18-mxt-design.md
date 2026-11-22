@@ -507,8 +507,8 @@ covered by unit tests.
   open room (`RoomList::open`): opening a room places the previously open
   room and then the opened one again; opening puts the room list's cursor
   on the opened room, and that room's first move of its own (not a shift
-  by another room) takes the cursor to the room after it (see "Room
-  list").
+  by another room) while the cursor is still on it takes the cursor to the
+  room next to it (see "Room list").
 - Room keys are shared with the SDK's default recipient strategy
   (`CollectStrategy::AllDevices`), which does not refuse to send when another
   user's identity changes.
@@ -1042,12 +1042,14 @@ group, and moved the cursor with the room it opened.
   it. One exception (added after 0.1.4), so that the cursor goes to "the
   next one after where it was", as in a mail inbox: opening a room by any
   path (`<CR>`, `]u`, `[u`, any `room.open` binding, the room picker,
-  `:open`, `:join`, the jump list) puts the cursor on it, and the first
-  time the open room then moves in the list while the cursor is still on
-  it, the cursor goes to the room that came right after it in the order
-  before the move, or to the room before it when it was the last (the
-  rule's "the cursor stays when the list has only that room" needs no
-  case: a room alone in the list never moves by a change of its own).
+  `:open`, `:join`, the jump list) puts the cursor on it (opening the room
+  that is already open only moves the focus to its timeline, and the
+  cursor stays where it is), and the first time the open room then moves
+  in the list while the cursor is still on it, the cursor goes to the
+  room that came right after it in the order before the move, or to the
+  room before it when it was the last (the rule's "the cursor stays when
+  the list has only that room" needs no case: a room alone in the list
+  never moves by a change of its own).
   From then on the cursor is on another room and follows that room, as
   every cursor does, so later moves of the open room never take the
   cursor along. A move is a change of the room's index caused by a
