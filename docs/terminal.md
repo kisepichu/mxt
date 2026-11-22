@@ -43,7 +43,9 @@ text on the terminal's clipboard with the OSC 52 escape sequence, which also
 works over SSH. The terminal must accept OSC 52 clipboard writes; some turn
 them off or ask first, so check its settings if yanks do not arrive. Inside
 tmux, OSC 52 reaches the outer terminal only with `set -g set-clipboard on`.
-This has been checked over SSH from WezTerm on macOS.
+This has been checked over SSH from WezTerm on macOS. A deletion or a yank
+after `"_` in the editors (`"_dd`) reaches neither the clipboard nor mxt's
+register ([Keys](keys.md#the-editors)).
 
 mxt never reads the clipboard. `p` in the editors pastes mxt's own register,
 which holds the last yank. Pasting with the terminal (its paste shortcut, or

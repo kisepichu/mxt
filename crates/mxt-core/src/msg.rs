@@ -17,7 +17,8 @@ pub enum EditorMode {
     /// Normal or visual mode while a key waits for the next one: `f`, `t`
     /// or `r` for its character, an operator (`d`, `c`, `y`) for the rest
     /// of its command, a text object's `i` or `a` for the object, `g` for
-    /// `gg`. The next key goes to the editor without the keymap. Only keys
+    /// `gg`, `"` for the register's name; and after `"_` until its command
+    /// ends. The next key goes to the editor without the keymap. Only keys
     /// carry it; the status line shows the editor's own mode.
     AwaitingChar,
 }
@@ -127,6 +128,10 @@ pub enum Msg {
         timeline: TimelineId,
         query: Option<String>,
     },
+    /// An editor, the composer's or the message view's, refused a key, for
+    /// the status line as an error, not logged: a register other than the
+    /// black hole register `"_`.
+    EditorRefused(String),
     /// The room's members, answering `MatrixEffect::LoadMembers`.
     MembersLoaded {
         room: RoomId,

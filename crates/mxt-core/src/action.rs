@@ -76,6 +76,9 @@ pub enum Action {
     /// before the cursor with the blanks after it, as the line editor's
     /// `<C-w>` does; at the start of a line, the line break.
     ComposerDeleteWordBefore,
+    /// Empties the shown timeline's composer as one change that `u` undoes,
+    /// keeping its reply or edit.
+    ComposerClear,
     CompletionNext,
     CompletionPrev,
     CompletionAccept,
@@ -192,6 +195,7 @@ impl Action {
             "composer.external_editor" => Action::ComposerExternalEditor,
             "composer.normal" => Action::ComposerNormal,
             "composer.delete_word_before" => Action::ComposerDeleteWordBefore,
+            "composer.clear" => Action::ComposerClear,
             "completion.next" => Action::CompletionNext,
             "completion.prev" => Action::CompletionPrev,
             "completion.accept" => Action::CompletionAccept,
@@ -265,6 +269,7 @@ impl Action {
             Action::ComposerExternalEditor => "composer.external_editor",
             Action::ComposerNormal => "composer.normal",
             Action::ComposerDeleteWordBefore => "composer.delete_word_before",
+            Action::ComposerClear => "composer.clear",
             Action::CompletionNext => "completion.next",
             Action::CompletionPrev => "completion.prev",
             Action::CompletionAccept => "completion.accept",
@@ -660,6 +665,7 @@ mod tests {
             "composer.external_editor",
             "composer.normal",
             "composer.delete_word_before",
+            "composer.clear",
             "completion.next",
             "completion.prev",
             "completion.accept",

@@ -16,6 +16,11 @@
 //! the first line and `<Down>` on the last, where edtui's `MoveUp` and
 //! `MoveDown` stop: they go to the start and the end of the text, as in a
 //! text field (design, "Terminal adapter and the composer").
+//!
+//! In normal and visual mode `"` names a register, as in vim, and only the
+//! black hole register `"_` exists: the next command writes neither the
+//! register nor the terminal clipboard. Other names are refused with
+//! `Msg::EditorRefused` (design, "Input routing").
 
 use std::cmp::Ordering;
 
@@ -26,23 +31,27 @@ use edtui::actions::{
 use edtui::events::{KeyEventRegister, KeyInput};
 use edtui::{EditorEventHandler, EditorState, EditorTheme, EditorView, Index2, Lines, RowIndex};
 use mxt_core::keys::{Key, KeyCode, Modifiers};
-use mxt_core::msg::EditorMode;
+use mxt_core::msg::{EditorMode, Msg};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Block;
 use unicode_segmentation::UnicodeSegmentation as _;
 
-use crate::clipboard::SharedRegister;
+use crate::clipboard::{EditorRegister, SharedRegister};
 use crate::view::grapheme_width;
 
 /// The columns edtui draws a tab with (its default).
 const TAB_WIDTH: usize = 2;
 
+/// The status line error for a register other than `"_`.
+const ONLY_BLACK_HOLE: &str = "Only the black hole register \"_ is supported";
+
 /// What edtui runs for the keys of [`Command`]. The switch to search mode
-/// tells [`Editor::feed`] that the key started a command rather than
-/// continued one (`d` then `f`); `feed` switches back at once. This relies
-/// on two things edtui 0.11.8 does, to check again when edtui changes:
+/// tells [`Editor::feed_key`] that the key started a command rather than
+/// continued one (`d` then `f`); `feed_key` switches back at once. This
+/// relies on two things edtui 0.11.8 does, to check again when edtui
+/// changes:
 /// - edtui runs a key's action only when the key completes a sequence, so
 ///   a key that continues one never runs `MARK`
 ///   (`operators_keep_edtui_df_and_dt_and_drop_d_capital_f`);
@@ -54,6 +63,9 @@ const MARK: SwitchMode = SwitchMode(edtui::EditorMode::Search);
 pub(crate) struct Editor {
     pub(crate) state: EditorState,
     keys: EditorEventHandler,
+    /// The handle every editor state of this editor copies through. Its
+    /// black hole flag, set by `"_`, is the one record of that state.
+    register: EditorRegister,
     /// A key waiting for the next one, which gets it without the keymap. It
     /// counts only in normal and visual mode, where it was typed.
     pending: Option<Pending>,
@@ -64,14 +76,20 @@ pub(crate) struct Editor {
 impl Editor {
     /// In normal mode with the cursor at the start.
     pub(crate) fn new(text: &str, register: SharedRegister) -> Editor {
-        let mut state = EditorState::new(Lines::from(text));
-        state.set_clipboard(register);
+        let register = register.for_editor();
         Editor {
-            state,
+            state: state_holding(text, register.clone()),
             keys: key_handler(),
+            register,
             pending: None,
             last_find: None,
         }
+    }
+
+    /// A new editor state holding `text`, in normal mode with the cursor at
+    /// the start, which copies through this editor's handle.
+    pub(crate) fn fresh_state(&self, text: &str) -> EditorState {
+        state_holding(text, self.register.clone())
     }
 
     pub(crate) fn mode(&self) -> EditorMode {
@@ -85,29 +103,36 @@ impl Editor {
 
     /// The mode the core resolves the next key in: `AwaitingChar` while a
     /// key waits for the next one, which then goes to the editor without
-    /// the keymap (`f:`, `r<Esc>`, `d]`, `ci[`, `g]`).
+    /// the keymap (`f:`, `r<Esc>`, `d]`, `ci[`, `g]`, `"_`), and after `"_`
+    /// until its command ends (`"_dd`).
     pub(crate) fn key_mode(&self) -> EditorMode {
-        match self.waiting() {
-            None => self.mode(),
-            Some(_) => EditorMode::AwaitingChar,
+        let black_hole = self.register.black_hole() && self.normal_or_visual();
+        if black_hole || self.waiting().is_some() {
+            EditorMode::AwaitingChar
+        } else {
+            self.mode()
         }
     }
 
     fn waiting(&self) -> Option<Pending> {
-        self.pending.filter(|_| {
-            matches!(
-                self.state.mode,
-                edtui::EditorMode::Normal | edtui::EditorMode::Visual
-            )
-        })
+        self.pending.filter(|_| self.normal_or_visual())
     }
 
-    /// Cancels a key waiting for the next one, mxt's (`f`, `r`) or edtui's
-    /// (`d`, `ci`, `df`), for a change of the editor's mode or text without
-    /// a key (`FocusComposer`, `LoadComposer`): the key must not take one
-    /// typed later.
+    fn normal_or_visual(&self) -> bool {
+        matches!(
+            self.state.mode,
+            edtui::EditorMode::Normal | edtui::EditorMode::Visual
+        )
+    }
+
+    /// Cancels a key waiting for the next one, mxt's (`f`, `r`, `"`) or
+    /// edtui's (`d`, `ci`, `df`), and a `"_` waiting for its command, for a
+    /// change of the editor's mode or text without a key (`FocusComposer`,
+    /// `LoadComposer`, a paste): the key must not take one typed later, nor
+    /// `"_` drop a later copy.
     pub(crate) fn cancel_pending(&mut self) {
         self.pending = None;
+        self.register.set_black_hole(false);
         // edtui cannot cancel its keys from outside; a new handler has
         // nothing waiting.
         self.keys = key_handler();
@@ -126,8 +151,26 @@ impl Editor {
         }
     }
 
-    /// A key the core passed on. Keys edtui has no code for are left out.
-    pub(crate) fn feed(&mut self, key: Key) {
+    /// A key the core passed on (see [`Editor::feed_key`]); a register
+    /// other than `"_` reports `Msg::EditorRefused` to `msgs`.
+    ///
+    /// After `"_` the editor's copies go nowhere until its command ends,
+    /// that is until a key leaves nothing waiting, whichever way the key
+    /// was handled: an edtui command, also one that writes nothing (`"_j`),
+    /// mxt's `f`, `t` or `r` with its character, a dropped key, a key edtui
+    /// has no code for (`"_<F1>`), `<Up>` or `<Down>` at an edge. The `_`
+    /// that sets the flag leaves it for the next key. `.` is a command of
+    /// its own: after `"_dd` it writes, and `"_.` does not.
+    pub(crate) fn feed(&mut self, key: Key, msgs: &mut Vec<Msg>) {
+        let armed = self.register.black_hole();
+        self.feed_key(key, msgs);
+        if armed && self.waiting().is_none() {
+            self.register.set_black_hole(false);
+        }
+    }
+
+    /// One key. Keys edtui has no code for are left out.
+    fn feed_key(&mut self, key: Key, msgs: &mut Vec<Msg>) {
         let waiting = self.waiting();
         self.pending = None;
         if waiting.is_none() && self.move_to_edge(key) {
@@ -147,6 +190,15 @@ impl Editor {
                 }
             }
             Some(Pending::Drop) => return,
+            Some(Pending::Register) => {
+                // vim's register names are characters; `"<Esc>` cancels.
+                match key.text() {
+                    Some('_') => self.register.set_black_hole(true),
+                    Some(_) => msgs.push(Msg::EditorRefused(ONLY_BLACK_HOLE.to_owned())),
+                    None => {}
+                }
+                return;
+            }
             Some(Pending::Find { backward, till }) => {
                 if let Some(target) = char_arg(key) {
                     let find = Find {
@@ -246,6 +298,12 @@ impl Editor {
                 self.pending = Some(Pending::Drop);
             }
             Command::Replace => self.pending = Some(Pending::Replace),
+            // Named again, the register replaces the one before, as in vim:
+            // a `"_` before this `"` no longer counts.
+            Command::Register => {
+                self.register.set_black_hole(false);
+                self.pending = Some(Pending::Register);
+            }
             Command::Repeat { reverse } => {
                 if let Some(find) = self.last_find {
                     let backward = find.backward != reverse;
@@ -382,6 +440,13 @@ impl Editor {
     }
 }
 
+/// A new editor state holding `text` that copies through `register`.
+fn state_holding(text: &str, register: EditorRegister) -> EditorState {
+    let mut state = EditorState::new(Lines::from(text));
+    state.set_clipboard(register);
+    state
+}
+
 /// Inserts `text` at the cursor, a `\n` starting a new line, with the
 /// cursor after it, as typing it in insert mode would: with edtui's
 /// `InsertChar`, which records the text for `.` in an insert session. The
@@ -420,6 +485,10 @@ enum Command {
     Step { forward: bool },
     /// `r`, waiting for the character (in visual mode, to drop it).
     Replace,
+    /// `"`, waiting for the register's name. edtui binds no key sequence
+    /// that starts with `"` (it has `ci"`, `di"` and visual `i"`), so `"`
+    /// did nothing before, and `_` moved to the first non-blank.
+    Register,
 }
 
 impl Command {
@@ -452,6 +521,7 @@ impl Command {
             KeyCode::Char('h') | KeyCode::Left => Command::Step { forward: false },
             KeyCode::Char('l') | KeyCode::Right => Command::Step { forward: true },
             KeyCode::Char('r') => Command::Replace,
+            KeyCode::Char('"') => Command::Register,
             _ => return None,
         };
         Some(command)
@@ -482,6 +552,9 @@ enum Pending {
     /// `dF`, `yf`, `gt`, `ca`, `yi`, visual `a`, visual `r` and the like,
     /// which edtui does not have: the key is dropped.
     Drop,
+    /// `"`: `_` names the black hole register, another character is
+    /// refused, and any other key cancels.
+    Register,
 }
 
 /// What waits after `key`, which edtui got in `mode` while `waiting` waited
@@ -524,8 +597,8 @@ fn key_handler() -> EditorEventHandler {
     keys.key_handler
         .remove(&KeyEventRegister::n(vec![KeyInput::ctrl('e')]));
     // Over edtui's `f`, `t`, `h`, `l`, `<Left>` and `<Right>`, so each key
-    // has one implementation.
-    let candidates = "fFtT;,hlr"
+    // has one implementation, and `"`, which edtui does not bind alone.
+    let candidates = "fFtT;,hlr\""
         .chars()
         .map(Key::char)
         .chain([KeyCode::Left, KeyCode::Right].map(|code| Key::new(code, Modifiers::default())));
@@ -726,8 +799,6 @@ pub(crate) mod tests {
     fn fed_keys_move_search_and_yank() {
         let register = SharedRegister::default();
         let mut editor = Editor::new("first line\nSecond line", register.clone());
-        let feed =
-            |editor: &mut Editor, text| keys(text).into_iter().for_each(|key| editor.feed(key));
         feed(&mut editor, "G");
         assert_eq!(editor.state.cursor.row, 1);
         feed(&mut editor, "gg/Sec");
@@ -742,8 +813,13 @@ pub(crate) mod tests {
         Editor::new(text, SharedRegister::default())
     }
 
-    fn feed(editor: &mut Editor, text: &str) {
-        keys(text).into_iter().for_each(|key| editor.feed(key));
+    /// Feeds the keys in `text`; what the editor reported.
+    fn feed(editor: &mut Editor, text: &str) -> Vec<Msg> {
+        let mut msgs = Vec::new();
+        keys(text)
+            .into_iter()
+            .for_each(|key| editor.feed(key, &mut msgs));
+        msgs
     }
 
     /// The cursor's column after each of `steps`.
@@ -811,7 +887,7 @@ pub(crate) mod tests {
     fn finds_extend_a_visual_selection() {
         let register = SharedRegister::default();
         let mut editor = Editor::new("abc日本語", register.clone());
-        let mut yanked = register.clone();
+        let mut yanked = register.for_editor();
         feed(&mut editor, "vf本y");
         assert_eq!(yanked.get_text(), "abc日本");
         // `Tc` from the end.
@@ -1189,8 +1265,9 @@ pub(crate) mod tests {
     #[test]
     fn visual_mode_k_j_and_a_waiting_key_leave_up_and_down_to_edtui() {
         // edtui's visual `<Up>` and `<Down>` stop at the first and the last
-        // line.
-        let mut editor = holding("ab\ncd");
+        // line. The last line is longer, so normal mode's `<Down>` would go
+        // to `(1, 2)`.
+        let mut editor = holding("ab\ncde");
         feed(&mut editor, "lv<Up>");
         assert_eq!(editor.state.cursor, Index2::new(0, 1));
         feed(&mut editor, "j<Down>");
@@ -1201,6 +1278,122 @@ pub(crate) mod tests {
         assert_eq!(after(&mut editor, (1, 0), "j"), Index2::new(1, 0));
         // The key after `g` goes to edtui, which drops it with the `g`.
         assert_eq!(after(&mut editor, (0, 1), "g<Up>"), Index2::new(0, 1));
+    }
+
+    /// An editor holding `text`, and its register holding `before`, which
+    /// has gone to the terminal clipboard.
+    fn with_register(text: &str) -> (Editor, SharedRegister) {
+        let register = SharedRegister::default();
+        register.copy("before".to_owned());
+        register.take_unsent();
+        (Editor::new(text, register.clone()), register)
+    }
+
+    /// The register's text, and whether a copy waits for the terminal
+    /// clipboard.
+    fn copied(register: &SharedRegister) -> (String, bool) {
+        let text = register.for_editor().get_text();
+        (text, register.take_unsent().is_some())
+    }
+
+    fn before() -> (String, bool) {
+        ("before".to_owned(), false)
+    }
+
+    #[test]
+    fn commands_after_the_black_hole_register_change_the_text_and_write_nothing() {
+        for (typed, plain) in [
+            (r#""_dd"#, "dd"),
+            (r#"w"_diw"#, "wdiw"),
+            (r#""_cwX<Esc>"#, "cwX<Esc>"),
+            (r#"w"_D"#, "wD"),
+            (r#""_yy"#, "yy"),
+            // edtui's `x` writes no register.
+            (r#""_x"#, "x"),
+            (r#"ve"_d"#, "ved"),
+            (r#"ve"_cX<Esc>"#, "vecX<Esc>"),
+        ] {
+            let (mut editor, register) = with_register("one two\nthree");
+            feed(&mut editor, plain);
+            let expected = text(&editor);
+            assert_eq!(copied(&register).1, plain != "x", "{plain}");
+
+            let (mut editor, register) = with_register("one two\nthree");
+            assert_eq!(feed(&mut editor, typed), [], "{typed}");
+            assert_eq!(text(&editor), expected, "{typed}");
+            assert_eq!(copied(&register), before(), "{typed}");
+            assert_eq!(editor.key_mode(), EditorMode::Normal, "{typed}");
+        }
+    }
+
+    #[test]
+    fn the_black_hole_register_ends_with_its_command_however_the_key_ends() {
+        // After `"_`: a motion, mxt's find and replace with their
+        // character, a key edtui has no code for, and `<Up>` on the first
+        // line.
+        for command in ["j", "fe", "rx", "<F1>", "<Up>"] {
+            let (mut editor, register) = with_register("one\ntwo\nthree");
+            feed(&mut editor, r#""_"#);
+            assert_eq!(editor.key_mode(), EditorMode::AwaitingChar, "{command}");
+            feed(&mut editor, command);
+            assert_eq!(editor.key_mode(), EditorMode::Normal, "{command}");
+            feed(&mut editor, "dd");
+            assert!(copied(&register).1, "{command}");
+        }
+        // A paste ends it too.
+        let (mut editor, register) = with_register("one\ntwo");
+        feed(&mut editor, r#""_"#);
+        editor.paste("x");
+        assert_eq!(editor.key_mode(), EditorMode::Normal);
+        feed(&mut editor, "dd");
+        assert_eq!(copied(&register), ("\noxne".to_owned(), true));
+    }
+
+    #[test]
+    fn dot_after_black_hole_dd_writes_and_black_hole_dot_does_not() {
+        let (mut editor, register) = with_register("one\ntwo\nthree\nfour");
+        feed(&mut editor, r#""_dd"#);
+        feed(&mut editor, r#""_."#);
+        assert_eq!(text(&editor), "three\nfour");
+        assert_eq!(copied(&register), before());
+        feed(&mut editor, ".");
+        assert_eq!(text(&editor), "four");
+        assert_eq!(copied(&register), ("\nthree".to_owned(), true));
+    }
+
+    #[test]
+    fn other_registers_are_refused_and_change_nothing() {
+        let refused = || vec![Msg::EditorRefused(ONLY_BLACK_HOLE.to_owned())];
+        let (mut editor, register) = with_register("one\ntwo");
+        // Once, and the `a` appends nothing.
+        assert_eq!(feed(&mut editor, r#""a"#), refused());
+        assert_eq!(
+            (text(&editor).as_str(), editor.key_mode()),
+            ("one\ntwo", EditorMode::Normal)
+        );
+        feed(&mut editor, "dd");
+        assert_eq!(copied(&register), ("\none".to_owned(), true));
+        // `<Esc>` cancels silently, and a register named again replaces
+        // `"_`, as in vim.
+        assert_eq!(feed(&mut editor, r#""<Esc>"#), []);
+        assert_eq!(feed(&mut editor, r#""_"+"#), refused());
+        assert_eq!(editor.key_mode(), EditorMode::Normal);
+        feed(&mut editor, "yy");
+        assert!(copied(&register).1);
+    }
+
+    #[test]
+    fn the_black_hole_register_keeps_another_editors_copies() {
+        let register = SharedRegister::default();
+        let mut composer = Editor::new("one", register.clone());
+        let mut view = Editor::new("two", register.clone());
+        feed(&mut composer, r#""_d"#);
+        feed(&mut view, "yy");
+        let yanked = copied(&register);
+        assert!(yanked.1);
+        feed(&mut composer, "d");
+        assert_eq!(text(&composer), "");
+        assert_eq!(copied(&register), (yanked.0, false));
     }
 
     #[test]

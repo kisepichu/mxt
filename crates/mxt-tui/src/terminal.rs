@@ -335,7 +335,8 @@ impl Tui {
     ///
     /// - `StartTimer` schedules a deadline.
     /// - `ReplayKeys` and `Paste` go to the message view's editor while it
-    ///   is open, otherwise to the composer that last got the focus.
+    ///   is open, otherwise to the composer that last got the focus. Either
+    ///   editor reports a refused register as `Msg::EditorRefused`.
     /// - `OpenView` replaces the message view and `CloseView` drops it with
     ///   its edits. `ShowImage` decodes the image for the view (see
     ///   [`Images::insert`]); a failure becomes `Msg::EffectFailed`. Without
@@ -361,6 +362,8 @@ impl Tui {
     ///   edtui's `<Esc>` does.
     /// - `DeleteWordBefore` deletes the word before the composer's cursor
     ///   in insert mode (see `Composer::delete_word_before`).
+    /// - `EmptyComposer` empties the composer as one undo state (see
+    ///   `Composer::empty_text`).
     /// - `Quit` sets `should_quit`.
     pub fn execute(&mut self, effect: UiEffect, now: Instant) -> Vec<Msg> {
         let mut msgs = Vec::new();
@@ -373,7 +376,8 @@ impl Tui {
             }
             UiEffect::ReplayKeys(keys) => {
                 if let Some(view) = &mut self.view {
-                    keys.into_iter().for_each(|key| view.editor.feed(key));
+                    keys.into_iter()
+                        .for_each(|key| view.editor.feed(key, &mut msgs));
                 } else if let Some(composer) = self.composers.focused_mut() {
                     composer.replay(&keys, &mut msgs);
                 }
@@ -458,6 +462,11 @@ impl Tui {
             UiEffect::DeleteWordBefore(timeline) => {
                 if let Some(composer) = self.composers.get_mut(&timeline) {
                     composer.delete_word_before(&mut msgs);
+                }
+            }
+            UiEffect::EmptyComposer(timeline) => {
+                if let Some(composer) = self.composers.get_mut(&timeline) {
+                    composer.empty_text(&mut msgs);
                 }
             }
             UiEffect::Quit => self.should_quit = true,
