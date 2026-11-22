@@ -581,10 +581,10 @@ covered by unit tests.
 - `composer.normal` (`<C-c>` in insert mode, vim's insert-mode CTRL-C;
   added after 0.1.4) puts the shown timeline's composer in normal mode as
   edtui's own `<Esc>` does: the tui adapter gives edtui an `<Esc>` in
-  insert, visual and search mode (edtui `src/events/key.rs:143-150,
-  182-185`), so from insert mode the cursor moves one column left and `.`
+  insert, visual and search mode (edtui `src/events/key.rs:144-151,
+  183-186`), so from insert mode the cursor moves one column left and `.`
   repeats the insert as after `<Esc>` (`src/state.rs:119-128`,
-  `src/actions.rs:156-190`), a visual selection is dropped and a search
+  `src/actions.rs:158-192`), a visual selection is dropped and a search
   stopped; in normal mode it does nothing. A key waiting for the next one
   is cancelled, the mention menu closes, and while the composer has focus
   keys resolved afresh after it are resolved in normal mode. Like
@@ -715,9 +715,9 @@ covered by unit tests.
   - The black hole register (added after 0.1.4): `"` in the editors'
     normal and visual mode, with no key waiting, is mxt's. edtui binds no
     key sequence that starts with `"` in these modes (it appears only in
-    `ci"`, `di"` and visual `i"`, edtui `src/events/key.rs:585-588,
-    654-661, 719-726`), so before this `"` did nothing there and `_` moved
-    to the first non-blank (`src/events/key.rs:335-350`): `"_dd` deleted
+    `ci"`, `di"` and visual `i"`, edtui `src/events/key.rs:590-593,
+    659-666, 724-731`), so before this `"` did nothing there and `_` moved
+    to the first non-blank (`src/events/key.rs:336-351`): `"_dd` deleted
     the line into the register. The key after `"` goes to the editor
     without the keymap, as after `f`. `_` makes the next command write
     neither mxt's register nor the terminal's clipboard: the editor's
@@ -1258,7 +1258,7 @@ normal mode and the draft is kept. A user binding of `<Esc>` in
 `<C-c>`, `<C-w>` and `<A-BS>` in `composer.insert` were added after 0.1.4.
 They did nothing in the composer's insert mode before: edtui's vim keys
 bind none of them there, and its insert mode inserts only characters
-without ctrl or alt (edtui `src/events/key.rs:139-837, 1098-1158`).
+without ctrl or alt (edtui `src/events/key.rs:140-851, 1112-1172`).
 `composer.insert` falls back to no table, so these defaults hide no user
 binding: a binding of the same keys in `[keymap.composer.insert]`
 replaces them, and `"<C-c>" = "nop"` brings back the old behaviour. The
@@ -3330,7 +3330,10 @@ at `debug` by the worker (see "Error handling").
   spoilers drawn as `▒` whole and on all of their lines, the name in an
   image's line, the `(deleted)` line, an emote's lead left out), the
   cursor's message with bold added, the matches of a cut-off message left
-  out, and the message view's highlights in underline and bold.
+  out, and the message view's highlights in underline and bold; visual
+  `iW` and `y` yanking the WORD in the composer and the message view, and
+  `v` and `V` switching a selection between characters and lines from the
+  same anchor.
 - `mxt`: configuration loading from strings: each error and each warning
   with its position and text (the `<C-i>` and `<Tab>` duplicate in either
   order among them, and the `ui.room_list.sort` lists: each key alone,
@@ -3386,15 +3389,17 @@ lighter.
   dependencies are avoided, so no output hashes need maintenance, with one
   exception: edtui comes from mxt's fork, the `mxt` branch of
   `kisepichu/edtui` (edtui 0.11.8 with the cursor and line wrapping
-  measured by grapheme cluster and vim's character classes for word
-  motions, which upstream does not have yet; see "edtui differences from
+  measured by grapheme cluster, vim's character classes for word motions,
+  visual `iW`, and `v` and `V` switching the selection's kind in visual
+  mode, which upstream does not have yet; see "edtui differences from
   vim"). `Cargo.toml` pins it in `[patch.crates-io]` to a full commit hash,
   and `cargoLock.allowBuiltinFetchGit = true` lets nixpkgs fetch it with
   `builtins.fetchGit` by the commit in `Cargo.lock`, so it needs no output
   hash either. `fetchGit` fetches all refs, so a pinned commit must stay
   reachable: every fork commit mxt pins is tagged `mxt-<short hash>` in the
   fork, and neither the tags nor the `mxt` branch are rewritten (the branch
-  takes fork changes as new merge commits), so earlier mxt commits still
+  takes fork changes as new commits or merge commits on top), so earlier
+  mxt commits still
   build. `cargo deny check sources` allows only crates.io and that
   repository, and requires a git dependency to name a commit. Native inputs
   follow the SDK's needs (nixpkgs' iamb package, also built on
@@ -3564,16 +3569,20 @@ asking for the recovery key ("Startup").
   and do nothing; the character after `dF` or `yf` is dropped, as are the
   one after `r` in visual mode and the key after `gf`, `gF`, `gt` or `gT`
   (edtui's only `g` command is `gg`). edtui's text objects are `i` with
-  `w`, `W`, a quote or a bracket, after `d` and `c` and in visual mode
-  (there without
-  `iW`). It has no `a` objects and no `yi`: `da(`, `ya"`, `yi"` and visual
+  `w`, `W`, a quote or a bracket, after `d` and `c` and in visual mode.
+  It has no `a` objects and no `yi`: `da(`, `ya"`, `yi"` and visual
   `a(` do nothing, and the object's key is dropped. A text object edtui
   does not know (`dif`) drops its keys. mxt's edtui fork (see "Nix flake")
   draws the cursor and wraps lines by grapheme cluster, and groups
   characters for `w`, `e`, `b`, `dw`, `cw` and `iw` into vim's classes:
   kanji, hiragana and katakana are separate words, full-width punctuation
   is punctuation, and the ideographic space is a space; emoji count as
-  punctuation, where vim gives them a class of their own. Still needing
+  punctuation, where vim gives them a class of their own. The fork also
+  adds visual `iW`, and `v` and `V` in visual mode, which switch to a
+  character or a line selection from where the selection started (a `V`
+  selection keeps the cursor's column for that), the cursor staying, as in
+  vim; `v` in a character selection and `V` in a line selection keep it,
+  where vim leaves visual mode. Still needing
   edtui patches, or accepted for the first release: `x`, `r`, `a`,
   insert-mode arrows and visual selections that work on single characters
   inside a cluster, `e` stopping on the last character of a cluster (the

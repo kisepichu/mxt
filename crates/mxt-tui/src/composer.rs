@@ -1056,6 +1056,17 @@ mod tests {
     }
 
     #[test]
+    fn visual_iw_capital_w_then_y_in_the_composer_yanks_the_word() {
+        let (mut app, mut composers) = composing("see<Space>foo.bar(baz)<Space>now");
+        run(&mut app, &mut composers, "0wllviWy");
+        let composer = composers.get(&main_of("!a:example.org")).unwrap();
+        assert_eq!(composer.mode(), EditorMode::Normal);
+        assert_eq!(composers.register.for_editor().get_text(), "foo.bar(baz)");
+        assert!(composers.register.take_unsent().is_some());
+        assert_eq!(app.focus(), Focus::Composer);
+    }
+
+    #[test]
     fn operators_and_text_objects_never_run_the_default_unread_keys() {
         // `]u` and `[u` are in `normal`, where the composer's normal and
         // visual modes look too. The key after an operator, after a text
