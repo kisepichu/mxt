@@ -104,8 +104,9 @@ impl App {
         }
     }
 
-    /// `composer.send`, `composer.newline`, `composer.external_editor`: the
-    /// tui adapter acts on the shown timeline's editor.
+    /// `composer.send`, `composer.newline`, `composer.external_editor`,
+    /// `composer.normal`: the tui adapter acts on the shown timeline's
+    /// editor.
     pub(super) fn composer_effect(
         &self,
         effect: fn(TimelineId) -> UiEffect,
@@ -113,6 +114,18 @@ impl App {
     ) {
         if let Some(timeline) = self.shown_timeline() {
             effects.push(Effect::Ui(effect(timeline)));
+        }
+    }
+
+    /// `composer.normal`: the tui puts the shown timeline's editor in
+    /// normal mode, wherever the focus is. The mention menu closes, and
+    /// while the composer has focus, keys resolved again after it are
+    /// resolved in normal mode.
+    pub(super) fn composer_normal(&mut self, effects: &mut Vec<Effect>) {
+        self.composer_effect(UiEffect::ComposerNormal, effects);
+        self.cancel_completion();
+        if self.focus == Focus::Composer {
+            self.editor = Some(EditorMode::Normal);
         }
     }
 

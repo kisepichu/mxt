@@ -150,6 +150,13 @@ impl Composer {
         self.report(msgs);
     }
 
+    /// `ComposerNormal` (see [`Editor::enter_normal_mode`]). Normal mode has
+    /// no `@` token, so an open token is reported gone.
+    pub(crate) fn enter_normal_mode(&mut self, msgs: &mut Vec<Msg>) {
+        self.editor.enter_normal_mode();
+        self.report(msgs);
+    }
+
     /// `Paste` (see [`Editor::paste`]), reported once. A paste never opens
     /// the mention menu, not even with an `@` token at its end, and closes
     /// an open one; the next key looks for the token again.
@@ -302,6 +309,8 @@ fn token_start(line: &[char], col: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::*;
     use crate::editor::tests::keys;
     use edtui::system_editor;
@@ -689,39 +698,117 @@ mod tests {
         timer
     }
 
-    /// Runs `effects` as the terminal does: `FocusComposer`, `ReplayKeys`
-    /// and `InsertNewline` go to the composers, and what they report to the
-    /// core. The last timer started.
-    fn apply(app: &mut App, composers: &mut Composers, effects: Vec<Effect>) -> Option<TimerId> {
-        let mut msgs = Vec::new();
+    /// Runs `effects` as the event loop does: each goes to [`execute`], and
+    /// what the composers report goes to the core in order, whose effects
+    /// run in turn. The last timer started.
+    fn apply(
+        app: &mut App,
+        composers: &mut Composers,
+        mut effects: Vec<Effect>,
+    ) -> Option<TimerId> {
+        let mut queue = VecDeque::new();
         let mut timer = None;
-        for effect in effects {
-            match effect {
-                Effect::Ui(UiEffect::StartTimer { id, .. }) => timer = Some(id),
-                Effect::Ui(UiEffect::FocusComposer { timeline, mode }) => {
-                    composers.focus(timeline, mode, &mut msgs);
-                }
-                Effect::Ui(UiEffect::ReplayKeys(keys)) => {
-                    if let Some(composer) = composers.focused_mut() {
-                        composer.replay(&keys, &mut msgs);
-                    }
-                }
-                Effect::Ui(UiEffect::InsertNewline(timeline)) => {
-                    if let Some(composer) = composers.get_mut(&timeline) {
-                        composer.insert_newline(&mut msgs);
-                    }
-                }
-                _ => {}
+        loop {
+            let mut msgs = Vec::new();
+            for effect in effects {
+                timer = execute(composers, effect, &mut msgs).or(timer);
             }
+            queue.extend(msgs);
+            let Some(msg) = queue.pop_front() else {
+                return timer;
+            };
+            effects = app.update(msg);
         }
-        for msg in msgs {
-            app.update(msg);
+    }
+
+    /// Runs `effect` as the terminal does: `FocusComposer`, `ReplayKeys`,
+    /// `InsertNewline`, `RequestSubmit`, `ComposerNormal` and
+    /// `ClearComposer` go to the composers, which report to `msgs`. The
+    /// timer it starts.
+    fn execute(composers: &mut Composers, effect: Effect, msgs: &mut Vec<Msg>) -> Option<TimerId> {
+        match effect {
+            Effect::Ui(UiEffect::StartTimer { id, .. }) => return Some(id),
+            Effect::Ui(UiEffect::FocusComposer { timeline, mode }) => {
+                composers.focus(timeline, mode, msgs);
+            }
+            Effect::Ui(UiEffect::ReplayKeys(keys)) => {
+                if let Some(composer) = composers.focused_mut() {
+                    composer.replay(&keys, msgs);
+                }
+            }
+            Effect::Ui(UiEffect::InsertNewline(timeline)) => {
+                if let Some(composer) = composers.get_mut(&timeline) {
+                    composer.insert_newline(msgs);
+                }
+            }
+            Effect::Ui(UiEffect::RequestSubmit(timeline)) => {
+                if let Some(composer) = composers.get(&timeline) {
+                    let body = composer.text();
+                    msgs.push(Msg::Submit { timeline, body });
+                }
+            }
+            Effect::Ui(UiEffect::ComposerNormal(timeline)) => {
+                if let Some(composer) = composers.get_mut(&timeline) {
+                    composer.enter_normal_mode(msgs);
+                }
+            }
+            Effect::Ui(UiEffect::ClearComposer(timeline)) => {
+                if let Some(composer) = composers.get_mut(&timeline) {
+                    composer.clear();
+                }
+            }
+            _ => {}
         }
-        timer
+        None
     }
 
     fn text_of(composers: &Composers) -> String {
         composers.get(&main_of("!a:example.org")).unwrap().text()
+    }
+
+    #[test]
+    fn send_and_normal_leave_normal_mode_with_or_without_a_send() {
+        // `"<CR>" = ["composer.send", "composer.normal"]`.
+        let enter = KeySeq::parse("<CR>", &leader()).unwrap();
+        let both = Binding::new(vec![Action::ComposerSend, Action::ComposerNormal]).unwrap();
+        let keymap = Keymap::new(&leader(), [(TableId::ComposerInsert, enter, both)]);
+        let (mut app, mut composers) = composing_with(keymap, "hello");
+        let main = main_of("!a:example.org");
+        let mode = |composers: &Composers| composers.get(&main).unwrap().mode();
+
+        // The text is read in insert mode; the core's `ClearComposer`
+        // comes after the editor left it, and keeps normal mode.
+        run(&mut app, &mut composers, "a");
+        let key = keys("<CR>")[0];
+        let effects = app.update(Msg::Key {
+            key,
+            editor: Some(EditorMode::Insert),
+        });
+        let mut msgs = Vec::new();
+        for effect in effects {
+            execute(&mut composers, effect, &mut msgs);
+        }
+        let submit = Msg::Submit {
+            timeline: main.clone(),
+            body: "hello".to_owned(),
+        };
+        assert_eq!(msgs, [submit]);
+        assert_eq!(mode(&composers), EditorMode::Normal);
+        for msg in msgs {
+            let effects = app.update(msg);
+            apply(&mut app, &mut composers, effects);
+        }
+        assert_eq!(
+            (text_of(&composers), mode(&composers)),
+            (String::new(), EditorMode::Normal)
+        );
+
+        // A blank text is not sent and stays, in normal mode.
+        run(&mut app, &mut composers, "a<Space><Space><CR>");
+        assert_eq!(
+            (text_of(&composers), mode(&composers)),
+            ("  ".to_owned(), EditorMode::Normal)
+        );
     }
 
     #[test]

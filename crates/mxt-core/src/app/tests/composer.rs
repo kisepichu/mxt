@@ -246,6 +246,54 @@ fn composer_cancel_keeps_a_reply_text_and_clears_an_edit() {
 }
 
 #[test]
+fn ctrl_c_goes_to_normal_mode_in_insert_mode_and_ends_a_reply_in_normal_mode() {
+    // vim's insert-mode `<C-c>`, also with the mention menu open, whose
+    // table falls back to `composer.insert`: the menu closes, and the reply
+    // stays.
+    let mut app = opened();
+    reset(&mut app, vec![msg(1)]);
+    keys(&mut app, "r");
+    edited(&mut app, C, false);
+    members(&mut app, vec![member(ALICE, "Alice")]);
+    query(&mut app, Some("al"));
+    assert!(menu(&app).is_some());
+    assert_eq!(
+        insert(&mut app, "<C-c>"),
+        vec![ui(UiEffect::ComposerNormal(main_of(C)))]
+    );
+    assert_eq!(menu(&app), None);
+    assert_eq!(app.focus(), Focus::Composer);
+    assert_eq!(app.draft(&main_of(C)), Some(&Draft::Reply { to: event(1) }));
+    assert_eq!(normal(&mut app, "<C-c>"), vec![]);
+    assert_eq!(app.draft(&main_of(C)), Some(&Draft::New));
+}
+
+#[test]
+fn send_and_normal_run_in_order_and_keys_resolved_after_them_use_normal_mode() {
+    // `<Esc>` ends the `<CR>` waiting for `<CR><C-x>` and is resolved
+    // afresh: in `composer.normal` it is `composer.leave`, where insert
+    // mode would pass it to the editor.
+    let send_normal = Binding::new(vec![Action::ComposerSend, Action::ComposerNormal]).unwrap();
+    let mut app = app_with(vec![
+        (TableId::ComposerInsert, seq("<CR>"), send_normal),
+        (
+            TableId::ComposerInsert,
+            seq("<CR><C-x>"),
+            Binding::single(Action::Nop),
+        ),
+    ]);
+    keys(&mut app, "<CR>i");
+    assert_eq!(
+        insert(&mut app, "<CR><Esc>"),
+        vec![
+            ui(UiEffect::RequestSubmit(main_of(C))),
+            ui(UiEffect::ComposerNormal(main_of(C))),
+        ]
+    );
+    assert_eq!(app.focus(), Focus::Timeline);
+}
+
+#[test]
 fn composer_leave_ends_a_reply_without_text() {
     let mut app = opened();
     reset(&mut app, vec![msg(1)]);
