@@ -30,6 +30,7 @@ use crate::msg::{EditorMode, Msg, Pane, SyncState};
 use crate::resolver::{Resolved, Resolver, TimerId};
 use crate::room::Invite;
 use crate::rooms::RoomList;
+use crate::search::Needle;
 use crate::settings::Settings;
 use crate::timeline::{ItemRef, TimelineEntry};
 
@@ -189,6 +190,9 @@ pub struct App {
     histories: LineHistories,
     /// The pattern `search.next` and `search.prev` repeat.
     last_search: Option<String>,
+    /// The last pattern's needle while the timeline highlights its matches
+    /// (see `App::search_highlight`).
+    highlight: Option<Needle>,
     /// Per timeline, created when first used.
     composers: HashMap<TimelineId, Composer>,
     /// Per room, for the mention completion of all its composers. A room is
@@ -253,6 +257,7 @@ impl App {
             command_line: None,
             histories: LineHistories::default(),
             last_search: None,
+            highlight: None,
             composers: HashMap::new(),
             members: HashMap::new(),
             pending_sends: HashMap::new(),
@@ -819,6 +824,7 @@ impl App {
             Action::SearchStart => self.start_search(),
             Action::SearchNext => self.search_again(Direction::Forward, effects),
             Action::SearchPrev => self.search_again(Direction::Backward, effects),
+            Action::SearchClearHighlight => self.highlight = None,
             Action::JumpBack => self.jump(JumpDirection::Back, effects),
             Action::JumpForward => self.jump(JumpDirection::Forward, effects),
             Action::ThreadOpen => self.open_thread(effects),

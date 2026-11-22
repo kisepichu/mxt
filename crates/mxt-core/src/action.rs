@@ -107,6 +107,9 @@ pub enum Action {
     SearchStart,
     SearchNext,
     SearchPrev,
+    /// Hides the search highlight until the next search, as nvim's
+    /// `:nohlsearch` does.
+    SearchClearHighlight,
     /// To the older entry of the jump list, like nvim's `<C-o>`.
     JumpBack,
     /// To the newer entry of the jump list, like nvim's `<C-i>`.
@@ -219,6 +222,7 @@ impl Action {
             "search.start" => Action::SearchStart,
             "search.next" => Action::SearchNext,
             "search.prev" => Action::SearchPrev,
+            "search.clear_highlight" => Action::SearchClearHighlight,
             "jump.back" => Action::JumpBack,
             "jump.forward" => Action::JumpForward,
             "thread.open" => Action::ThreadOpen,
@@ -294,6 +298,7 @@ impl Action {
             Action::SearchStart => "search.start",
             Action::SearchNext => "search.next",
             Action::SearchPrev => "search.prev",
+            Action::SearchClearHighlight => "search.clear_highlight",
             Action::JumpBack => "jump.back",
             Action::JumpForward => "jump.forward",
             Action::ThreadOpen => "thread.open",
@@ -690,6 +695,7 @@ mod tests {
             "search.start",
             "search.next",
             "search.prev",
+            "search.clear_highlight",
             "jump.back",
             "jump.forward",
             "thread.open",

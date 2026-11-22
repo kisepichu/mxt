@@ -415,7 +415,8 @@ impl App {
     /// `message.view`: the item in the full-screen view. An image or a
     /// sticker shows its details (a sticker's body as its name), and its
     /// image is fetched unless previews are off; other items show their
-    /// text. An image or a sticker that is still a local echo is refused:
+    /// text, with the search's matches on it while the highlight is shown.
+    /// An image or a sticker that is still a local echo is refused:
     /// the adapter fetches media by remote event.
     pub(super) fn view_message(&mut self, effects: &mut Vec<Effect>) {
         let (Some(room), Some(item)) = (&self.open_room, self.timeline.cursor_item()) else {
@@ -443,7 +444,14 @@ impl App {
                 size: None,
                 dimensions: *dimensions,
             },
-            content => ViewContent::Text(content.plain_text()),
+            content => {
+                let text = content.plain_text();
+                let matches = match &self.highlight {
+                    Some(needle) => needle.find_in(&text),
+                    None => Vec::new(),
+                };
+                ViewContent::Text { text, matches }
+            }
         };
         let fetch = matches!(content, ViewContent::Image { .. })
             && self.settings.image_preview != ImagePreview::Off;
@@ -460,7 +468,11 @@ impl App {
     /// `help.commands`, `help.keymap` and `status.messages`: `text` in the
     /// full-screen view, in place of an open view.
     pub(super) fn view_help(&mut self, text: String, effects: &mut Vec<Effect>) {
-        effects.push(Effect::Ui(UiEffect::OpenView(ViewContent::Text(text))));
+        let content = ViewContent::Text {
+            text,
+            matches: Vec::new(),
+        };
+        effects.push(Effect::Ui(UiEffect::OpenView(content)));
         self.view = Some(View::Help);
     }
 
@@ -572,8 +584,9 @@ impl App {
     /// entries before the new room is drawn, the wait for a jump's message
     /// and `gd`'s question, the previews it wants (those in flight keep
     /// their slots until answered), a message view (a help view stays), the
-    /// picker, a confirmation, and the focus and mention menu of its
-    /// composer. Runs while the previous room is still the open one.
+    /// picker, a confirmation, the focus and mention menu of its composer,
+    /// and the search highlight, which the next search shows again. Runs
+    /// while the previous room is still the open one.
     pub(super) fn reset_timeline(&mut self, effects: &mut Vec<Effect>) {
         if let (Some(open), Some(room)) = (self.thread.take(), &self.open_room) {
             effects.push(Effect::Matrix(MatrixEffect::UnsubscribeThread {
@@ -586,6 +599,7 @@ impl App {
         self.jump_wait = None;
         self.reply_lookup = None;
         self.drop_wanted_previews();
+        self.highlight = None;
         if matches!(self.view, Some(View::Message(_))) {
             self.close_view(effects);
         }

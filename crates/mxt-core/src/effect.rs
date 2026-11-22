@@ -2,6 +2,7 @@
 
 use std::borrow::{Borrow, BorrowMut};
 use std::fmt;
+use std::ops::Range;
 
 use crate::action::FocusMode;
 use crate::ids::{EventId, RoomId, SendId, TimelineId, TxnId, UserId};
@@ -228,8 +229,14 @@ pub enum MatrixEffect {
 /// What the message view shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ViewContent {
-    /// The message's text for the scratch editor.
-    Text(String),
+    /// The text for the scratch editor: a message's or a help view's. A
+    /// message's has the byte ranges of the search's matches on it while
+    /// the highlight is shown (design, "Search and jumps"); a help view's
+    /// has none.
+    Text {
+        text: String,
+        matches: Vec<Range<usize>>,
+    },
     /// An image message or a sticker: its name (a sticker's body), size and
     /// dimensions, and the image once `UiEffect::ShowImage` brings it.
     Image {

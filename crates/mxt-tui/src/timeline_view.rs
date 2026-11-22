@@ -8,17 +8,21 @@
 //! item first, so the newest entry is back at the bottom when it fits. Only
 //! the entries around the cursor are laid out, so a long timeline costs no
 //! more per frame. With previews on, an image item reserves rows for its
-//! preview below its line (see [`crate::previews`]).
+//! preview below its line (see [`crate::previews`]). After a search, the
+//! matches of its pattern in the messages are marked (design, "Search and
+//! jumps").
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::iter;
+use std::ops::Range;
 
 use jiff::fmt::strtime;
 use jiff::tz::TimeZone;
 use mxt_core::app::{App, Focus};
 use mxt_core::ids::{TimelineId, Timestamp};
 use mxt_core::rich::{self, Block, Inline, RichText};
+use mxt_core::search::{self, Needle};
 use mxt_core::timeline::{
     ItemRef, MessageContent, ReactionGroup, ReplyPreview, SendState, ThreadSummary, TimelineEntry,
     TimelineItem,
@@ -45,6 +49,19 @@ const QUOTE: &str = "│ ";
 const CODE_BLOCK: Style = DIM;
 /// Columns between tab stops.
 const TAB_WIDTH: usize = 4;
+/// Each column of spoiler text.
+const SPOILER: char = '█';
+/// Each column of spoiler text that a search match touches (design, "Search
+/// and jumps"): reverse video or an underline would not show on `█`.
+const MATCHED_SPOILER: char = '▒';
+/// What image, file and sticker lines start with; the search marks the name
+/// after it.
+const IMAGE: &str = "[image: ";
+const FILE: &str = "[file: ";
+const STICKER: &str = "[sticker: ";
+/// The lines of messages without text, as their plain text has them.
+const REDACTED: &str = "(deleted)";
+const UNDECRYPTABLE: &str = "(unable to decrypt)";
 /// The newer-messages hint shows counts above this as `99+`.
 pub(crate) const MAX_SHOWN_NEWER: usize = 99;
 /// The fewest entries above and below the pane whose previews are fetched
@@ -156,6 +173,7 @@ impl TimelinePane {
         if width == 0 || height == 0 {
             return None;
         }
+        let cursor = app.timeline_cursor();
         let render = Render {
             entries,
             width,
@@ -164,8 +182,9 @@ impl TimelinePane {
             zone: &self.zone,
             thread_marks_after: app.thread_marks_after(),
             previews: previews.as_deref().map(Previews::layout),
+            highlight: app.search_highlight(),
+            cursor,
         };
-        let cursor = app.timeline_cursor();
         let window = render.lay_out(cursor, app.timeline_follows(), self.anchor.as_ref());
 
         let bar = match app.focus() {
@@ -389,6 +408,10 @@ struct Render<'a, 'p> {
     thread_marks_after: Option<Timestamp>,
     /// With previews on, the rows they take.
     previews: Option<PreviewLayout<'p>>,
+    /// `App::search_highlight`: its matches in the messages are marked.
+    highlight: Option<&'a Needle>,
+    /// The cursor's entry, whose matches are bold too.
+    cursor: Option<usize>,
 }
 
 impl<'a> Render<'a, '_> {
@@ -550,7 +573,7 @@ impl<'a> Render<'a, '_> {
     fn rows(&self, index: usize) -> Rows<'a> {
         match &self.entries[index] {
             TimelineEntry::Item(item) => {
-                let mut rows = self.item(item);
+                let mut rows = self.item(item, Some(index) == self.cursor);
                 if rows.lines.len() > self.height
                     && let Some(slot) = rows.preview.take()
                 {
@@ -619,19 +642,22 @@ impl<'a> Render<'a, '_> {
     }
 
     /// The header, the reply preview, the body, an image's or a sticker's
-    /// preview rows, the reactions, and a thread root's summary.
-    fn item(&self, item: &'a TimelineItem) -> Rows<'a> {
+    /// preview rows, the reactions, and a thread root's summary. With the
+    /// search highlight, the body's matches are marked, bold too in the
+    /// cursor's message (`cursor`).
+    fn item(&self, item: &'a TimelineItem, cursor: bool) -> Rows<'a> {
         let mut rows = vec![self.header(item)];
         if let Some(reply) = &item.reply {
             rows.push(reply_line(reply, self.width));
         }
         let mut body = Body::new(self.width, rows);
+        body.cursor = cursor;
         let mut preview = None;
         match &item.content {
-            MessageContent::Text { rich, .. } => body.rich(rich),
+            MessageContent::Text { rich, .. } => body.rich(rich, self.line_matches(&item.content)),
             MessageContent::Notice(text) => {
                 body.base = DIM;
-                body.rich(text);
+                body.rich(text, self.line_matches(&item.content));
             }
             MessageContent::Emote(text) => {
                 body.lead = vec![
@@ -639,43 +665,53 @@ impl<'a> Render<'a, '_> {
                     (Cow::Borrowed(item.sender_name.as_str()), PLAIN),
                     (Cow::Borrowed(" "), PLAIN),
                 ];
-                body.rich(text);
+                body.rich(text, self.line_matches(&item.content));
             }
             MessageContent::Image {
                 name, dimensions, ..
             } => {
                 let text = match dimensions {
-                    Some((width, height)) => format!("[image: {name} {width}x{height}]"),
-                    None => format!("[image: {name}]"),
+                    Some((width, height)) => format!("{IMAGE}{name} {width}x{height}]"),
+                    None => format!("{IMAGE}{name}]"),
                 };
-                body.line(vec![(Cow::Owned(text), PLAIN)]);
+                let matches = self.matches_in(name, IMAGE.len());
+                body.line(vec![Part::new(text, PLAIN)], &matches);
                 preview = self.reserve(&mut body, &item.id, *dimensions);
             }
             MessageContent::File { name, size, .. } => {
                 let text = match size {
-                    Some(size) => format!("[file: {name} {}]", file_size(*size)),
-                    None => format!("[file: {name}]"),
+                    Some(size) => format!("{FILE}{name} {}]", file_size(*size)),
+                    None => format!("{FILE}{name}]"),
                 };
-                body.line(vec![(Cow::Owned(text), PLAIN)]);
+                let matches = self.matches_in(name, FILE.len());
+                body.line(vec![Part::new(text, PLAIN)], &matches);
             }
             MessageContent::Sticker {
                 body: text,
                 dimensions,
             } => {
-                body.line(vec![(Cow::Owned(format!("[sticker: {text}]")), PLAIN)]);
+                let matches = self.matches_in(text, STICKER.len());
+                let line = format!("{STICKER}{text}]");
+                body.line(vec![Part::new(line, PLAIN)], &matches);
                 preview = self.reserve(&mut body, &item.id, *dimensions);
             }
-            MessageContent::Redacted => body.line(vec![(Cow::Borrowed("(deleted)"), DIM)]),
+            MessageContent::Redacted => {
+                let matches = self.matches_in(REDACTED, 0);
+                body.line(vec![Part::new(REDACTED, DIM)], &matches);
+            }
             MessageContent::Undecryptable => {
-                body.line(vec![(Cow::Borrowed("(unable to decrypt)"), DIM)]);
+                let matches = self.matches_in(UNDECRYPTABLE, 0);
+                body.line(vec![Part::new(UNDECRYPTABLE, DIM)], &matches);
             }
             MessageContent::Unsupported { kind } => {
-                body.line(vec![(Cow::Owned(format!("(unsupported: {kind})")), DIM)]);
+                let text = format!("(unsupported: {kind})");
+                let matches = self.matches_in(&text, 0);
+                body.line(vec![Part::new(text, DIM)], &matches);
             }
         }
         if !item.reactions.is_empty() {
             body.base = PLAIN;
-            body.line(reactions(&item.reactions));
+            body.line(reactions(&item.reactions), &[]);
         }
         let mut rows = body.rows;
         if let Some(summary) = &item.thread_summary {
@@ -706,6 +742,29 @@ impl<'a> Render<'a, '_> {
         let rows = usize::from(target.size.height);
         body.rows.extend(iter::repeat_n(Line::default(), rows));
         Some(slot)
+    }
+
+    /// The search's matches on each plain line of `content`'s rich text
+    /// (see `search::plain_line_matches`); none without the highlight.
+    fn line_matches(&self, content: &MessageContent) -> Vec<Vec<Range<usize>>> {
+        self.highlight.map_or_else(Vec::new, |needle| {
+            search::plain_line_matches(content, needle)
+        })
+    }
+
+    /// The search's matches in `text`, which its line has after `offset`
+    /// bytes, as the line's byte ranges; none without the highlight. `text`
+    /// is the item's plain text (design, "Search and jumps").
+    fn matches_in(&self, text: &str, offset: usize) -> Vec<Range<usize>> {
+        let Some(needle) = self.highlight else {
+            return Vec::new();
+        };
+        let mut matches = needle.find_in(text);
+        for range in &mut matches {
+            range.start += offset;
+            range.end += offset;
+        }
+        matches
     }
 
     /// A thread root's last row (design, "Threads"): `💬 N · <time>`, dim,
@@ -816,17 +875,17 @@ fn reply_line(reply: &ReplyPreview, width: usize) -> Line<'_> {
 }
 
 /// `key count` chips; the user's own reactions are bold.
-fn reactions(groups: &[ReactionGroup]) -> Vec<Piece<'_>> {
-    let mut pieces = Vec::with_capacity(groups.len() * 3);
+fn reactions(groups: &[ReactionGroup]) -> Vec<Part<'_>> {
+    let mut parts = Vec::with_capacity(groups.len() * 3);
     for (index, group) in groups.iter().enumerate() {
         if index > 0 {
-            pieces.push((Cow::Borrowed("  "), PLAIN));
+            parts.push(Part::new("  ", PLAIN));
         }
         let style = if group.mine { BOLD } else { PLAIN };
-        pieces.push((Cow::Borrowed(group.key.as_str()), style));
-        pieces.push((Cow::Owned(format!(" {}", group.count)), style));
+        parts.push(Part::new(group.key.as_str(), style));
+        parts.push(Part::new(format!(" {}", group.count), style));
     }
-    pieces
+    parts
 }
 
 /// `512 B`, `1.5 KiB`, `3.2 MiB`.
@@ -848,8 +907,29 @@ pub(crate) fn file_size(bytes: u64) -> String {
 /// Styled text of one line before wrapping.
 type Piece<'a> = (Cow<'a, str>, Style);
 
+/// Text of one line of a message as its plain text has it (design, "Search
+/// and jumps"), with its style. Spoiler text is drawn as blocks (see
+/// `hidden`).
+struct Part<'a> {
+    text: Cow<'a, str>,
+    style: Style,
+    spoiler: bool,
+}
+
+impl<'a> Part<'a> {
+    /// Text that is no spoiler.
+    fn new(text: impl Into<Cow<'a, str>>, style: Style) -> Part<'a> {
+        Part {
+            text: text.into(),
+            style,
+            spoiler: false,
+        }
+    }
+}
+
 /// Builds the rows of a message body: rich text wrapped to the width, after
-/// the prefixes of the quotes and lists it is in.
+/// the prefixes of the quotes and lists it is in, with the search's matches
+/// marked.
 struct Body<'a> {
     width: usize,
     rows: Vec<Line<'a>>,
@@ -859,6 +939,12 @@ struct Body<'a> {
     lead: Vec<Piece<'a>>,
     /// Outermost first.
     prefixes: Vec<Prefix>,
+    /// The search's matches on the rich text's plain lines that are still
+    /// to come (see `search::plain_line_matches`): the rich text's lines
+    /// follow its plain lines one by one.
+    matches: std::vec::IntoIter<Vec<Range<usize>>>,
+    /// Whether the body is the cursor's message, whose matches are bold too.
+    cursor: bool,
 }
 
 enum Prefix {
@@ -878,13 +964,18 @@ impl<'a> Body<'a> {
             base: PLAIN,
             lead: Vec::new(),
             prefixes: Vec::new(),
+            matches: Vec::new().into_iter(),
+            cursor: false,
         }
     }
 
-    fn rich(&mut self, text: &'a RichText) {
+    /// The lines of `text`, one per line of its plain text, with `matches`
+    /// on each (see `search::plain_line_matches`).
+    fn rich(&mut self, text: &'a RichText, matches: Vec<Vec<Range<usize>>>) {
+        self.matches = matches.into_iter();
         self.blocks(&text.blocks);
         if !self.lead.is_empty() {
-            self.line(Vec::new());
+            self.line(Vec::new(), &[]);
         }
     }
 
@@ -898,7 +989,7 @@ impl<'a> Body<'a> {
         match block {
             Block::Paragraph(inlines) => {
                 for line in paragraph_lines(inlines) {
-                    self.line(line);
+                    self.plain_line(line);
                 }
             }
             Block::Code { runs, .. } => {
@@ -906,16 +997,24 @@ impl<'a> Body<'a> {
                 for run in runs {
                     for (index, part) in run.text.split('\n').enumerate() {
                         if index > 0 {
-                            self.line(std::mem::take(&mut line));
+                            self.plain_line(std::mem::take(&mut line));
                         }
                         if !part.is_empty() {
-                            line.push((shown(part, run.spoiler), CODE_BLOCK));
+                            line.push(Part {
+                                text: Cow::Borrowed(part),
+                                style: CODE_BLOCK,
+                                spoiler: run.spoiler,
+                            });
                         }
                     }
                 }
-                self.line(line);
+                self.plain_line(line);
             }
             Block::Quote(blocks) => self.nested(Prefix::Quote, blocks),
+            // No row, where the plain text has an empty line.
+            Block::List { items, .. } if items.is_empty() => {
+                self.matches.next();
+            }
             Block::List {
                 ordered,
                 start,
@@ -940,17 +1039,23 @@ impl<'a> Body<'a> {
     fn nested(&mut self, prefix: Prefix, blocks: &'a [Block]) {
         self.prefixes.push(prefix);
         if blocks.is_empty() {
-            self.line(Vec::new());
+            self.plain_line(Vec::new());
         }
         self.blocks(blocks);
         self.prefixes.pop();
     }
 
-    /// One line of text, wrapped after the prefixes.
-    fn line(&mut self, mut pieces: Vec<Piece<'a>>) {
-        if !self.lead.is_empty() {
-            pieces.splice(0..0, std::mem::take(&mut self.lead));
-        }
+    /// The next plain line of the rich text, with its matches.
+    fn plain_line(&mut self, parts: Vec<Part<'a>>) {
+        let matches = self.matches.next().unwrap_or_default();
+        self.line(parts, &matches);
+    }
+
+    /// One line of text with the search's `matches` on it, byte ranges in
+    /// the text of `parts`, wrapped after the prefixes.
+    fn line(&mut self, parts: Vec<Part<'a>>, matches: &[Range<usize>]) {
+        let mut pieces = std::mem::take(&mut self.lead);
+        push_parts(&mut pieces, parts, matches, self.cursor);
         let prefix_width: usize = self.prefixes.iter().map(Prefix::width).sum();
         let width = self.width.saturating_sub(prefix_width).max(1);
         for row in wrap(pieces, width) {
@@ -965,6 +1070,113 @@ impl<'a> Body<'a> {
             self.rows.push(Line::from(spans));
         }
     }
+}
+
+/// Appends `parts` to `pieces` as they are drawn, with the search's
+/// `matches` (byte ranges in the text of `parts`) in their style (design,
+/// "Search and jumps"): text is split at the matches' edges, and a run of
+/// spoiler text, drawn as `█`, is drawn whole as `▒` in its own style when
+/// a match touches it. In the cursor's message (`cursor`) these are bold
+/// too.
+fn push_parts<'a>(
+    pieces: &mut Vec<Piece<'a>>,
+    mut parts: Vec<Part<'a>>,
+    matches: &[Range<usize>],
+    cursor: bool,
+) {
+    pieces.reserve(parts.len());
+    let mut start = 0;
+    let mut index = 0;
+    while let Some(part) = parts.get_mut(index) {
+        if !part.spoiler {
+            let text = std::mem::take(&mut part.text);
+            let len = text.len();
+            push_split(pieces, text, part.style, start, matches, cursor);
+            start += len;
+            index += 1;
+            continue;
+        }
+        let run = parts[index..].iter().take_while(|part| part.spoiler);
+        let (count, len) = run.fold((0, 0), |(count, len), part| {
+            (count + 1, len + part.text.len())
+        });
+        let end = start + len;
+        let touched = matches
+            .iter()
+            .any(|range| range.start < end && range.end > start);
+        for part in &parts[index..index + count] {
+            let (block, style) = match (touched, cursor) {
+                (false, _) => (SPOILER, part.style),
+                (true, false) => (MATCHED_SPOILER, part.style),
+                (true, true) => (MATCHED_SPOILER, part.style.add_modifier(Modifier::BOLD)),
+            };
+            pieces.push((Cow::Owned(hidden(&part.text, block)), style));
+        }
+        start = end;
+        index += count;
+    }
+}
+
+/// Pushes `text` in `style`, which starts at byte `start` of its line, cut
+/// at the edges of the `matches` on it, which are in the match style.
+fn push_split<'a>(
+    pieces: &mut Vec<Piece<'a>>,
+    text: Cow<'a, str>,
+    style: Style,
+    start: usize,
+    matches: &[Range<usize>],
+    cursor: bool,
+) {
+    let end = start + text.len();
+    // The text before `cut` is pushed.
+    let mut cut = 0;
+    for range in matches
+        .iter()
+        .filter(|range| range.start < end && range.end > start)
+    {
+        let from = range.start.max(start) - start;
+        let to = range.end.min(end) - start;
+        // Ranges fall on character boundaries; one that does not (the plain
+        // text and the drawn text would differ) is left unmarked.
+        if from < cut || !text.is_char_boundary(from) || !text.is_char_boundary(to) {
+            continue;
+        }
+        if from > cut {
+            pieces.push((slice(&text, cut..from), style));
+        }
+        pieces.push((slice(&text, from..to), matched(style, cursor)));
+        cut = to;
+    }
+    if cut == 0 {
+        pieces.push((text, style));
+    } else if cut < text.len() {
+        pieces.push((slice(&text, cut..text.len()), style));
+    }
+}
+
+/// The bytes `range` of `text`, borrowed when `text` is.
+fn slice<'a>(text: &Cow<'a, str>, range: Range<usize>) -> Cow<'a, str> {
+    match text {
+        Cow::Borrowed(text) => Cow::Borrowed(&text[range]),
+        Cow::Owned(text) => Cow::Owned(text[range].to_owned()),
+    }
+}
+
+/// The style of matched text in `style` (design, "Search and jumps"):
+/// reverse video added, or for text that is reversed already (inline
+/// code) taken off and an underline added; bold too in the cursor's
+/// message.
+fn matched(mut style: Style, cursor: bool) -> Style {
+    if style.add_modifier.contains(Modifier::REVERSED) {
+        style.add_modifier.remove(Modifier::REVERSED);
+        style.add_modifier.insert(Modifier::UNDERLINED);
+    } else {
+        style.add_modifier.insert(Modifier::REVERSED);
+    }
+    if cursor {
+        style.add_modifier.insert(Modifier::BOLD);
+    }
+    style
 }
 
 impl Prefix {
@@ -992,7 +1204,7 @@ impl Prefix {
 
 /// The lines of a paragraph: line breaks and newlines in the text start a
 /// new line.
-fn paragraph_lines(inlines: &[Inline]) -> Vec<Vec<Piece<'_>>> {
+fn paragraph_lines(inlines: &[Inline]) -> Vec<Vec<Part<'_>>> {
     let mut lines = vec![Vec::new()];
     for inline in inlines {
         let (text, style, spoiler) = match inline {
@@ -1016,33 +1228,27 @@ fn paragraph_lines(inlines: &[Inline]) -> Vec<Vec<Piece<'_>>> {
             if part.is_empty() {
                 continue;
             }
-            let part = shown(part, spoiler);
             if let Some(line) = lines.last_mut() {
-                line.push((part, style));
+                line.push(Part {
+                    text: Cow::Borrowed(part),
+                    style,
+                    spoiler,
+                });
             }
         }
     }
     lines
 }
 
-/// `text`, or for spoiler text, blocks in its place (see `hidden`).
-fn shown(text: &str, spoiler: bool) -> Cow<'_, str> {
-    if spoiler {
-        Cow::Owned(hidden(text))
-    } else {
-        Cow::Borrowed(text)
-    }
-}
-
-/// Spoiler text as blocks of the same width; the message view shows the
+/// Spoiler text as `block`s of the same width; the message view shows the
 /// text. Tabs stay, so they take as many columns as in the text.
-fn hidden(text: &str) -> String {
+fn hidden(text: &str, block: char) -> String {
     let mut blocks = String::with_capacity(text.len());
     for (index, run) in text.split('\t').enumerate() {
         if index > 0 {
             blocks.push('\t');
         }
-        blocks.extend(std::iter::repeat_n('█', text_width(run)));
+        blocks.extend(std::iter::repeat_n(block, text_width(run)));
     }
     blocks
 }
@@ -1282,7 +1488,16 @@ mod tests {
             zone,
             thread_marks_after: None,
             previews: None,
+            highlight: None,
+            cursor: None,
         }
+    }
+
+    /// The rows of the body of `rich` at `width` columns.
+    fn body_rows(rich: &RichText, width: usize) -> Vec<String> {
+        let mut body = Body::new(width, Vec::new());
+        body.rich(rich, Vec::new());
+        body.rows.iter().map(ToString::to_string).collect()
     }
 
     /// One frame on a pane of `HEIGHT` rows: the entries laid out as
@@ -1434,12 +1649,11 @@ mod tests {
                 spoiler: false,
             },
         ];
-        let lines = paragraph_lines(&inlines);
-        let parts: Vec<&str> = lines[0].iter().map(|(part, _)| part.as_ref()).collect();
-        assert_eq!(
-            parts,
-            ["████", "████", "██████", "█████", "@Alice", ":cat:"]
-        );
+        // Each as blocks of its width.
+        let rich = RichText {
+            blocks: vec![Block::Paragraph(inlines.to_vec())],
+        };
+        assert_eq!(body_rows(&rich, 40), ["███████████████████@Alice:cat:"]);
     }
 
     #[test]
@@ -1456,14 +1670,7 @@ mod tests {
                     .collect(),
             }],
         };
-        let rows = |rich: &RichText| -> Vec<String> {
-            let mut body = Body::new(WIDTH, Vec::new());
-            body.rich(rich);
-            body.rows
-                .iter()
-                .map(|row| row.spans.iter().map(|span| span.content.as_ref()).collect())
-                .collect()
-        };
+        let rows = |rich: &RichText| body_rows(rich, WIDTH);
         // A code block in a spoiler.
         let block = "let x;\n\n\tx";
         assert_eq!(rows(&code(&[(block, true)])), ["██████", "", "    █"]);
@@ -2130,5 +2337,347 @@ mod tests {
         }
         let (last, newest) = last_visible(&app, &mut screen);
         assert_eq!(last, newest);
+    }
+
+    /// A message from alice with `content`.
+    fn with_content(content: MessageContent) -> TimelineEntry {
+        let mut entry = remote(0, 1);
+        if let TimelineEntry::Item(item) = &mut entry {
+            item.content = content;
+        }
+        entry
+    }
+
+    fn plain_text(text: &str) -> MessageContent {
+        MessageContent::Text {
+            body: text.to_owned(),
+            rich: RichText::plain(text),
+        }
+    }
+
+    /// Rich text of `blocks`.
+    fn rich_text(blocks: Vec<Block>) -> MessageContent {
+        MessageContent::Text {
+            body: String::new(),
+            rich: RichText { blocks },
+        }
+    }
+
+    fn styled(text: &str, style: rich::Style) -> Inline {
+        Inline::Text {
+            text: text.to_owned(),
+            style,
+        }
+    }
+
+    /// Each grapheme cluster of `line` with its style.
+    fn cells(line: &Line) -> Vec<(String, Style)> {
+        line.spans
+            .iter()
+            .flat_map(|span| {
+                let clusters = span.content.graphemes(true);
+                clusters.map(move |cluster| (cluster.to_owned(), span.style))
+            })
+            .collect()
+    }
+
+    /// The body rows of a message of `content` on a pane of 40 by 40, after
+    /// a search for `pattern`, as the cursor's message with `cursor`: each
+    /// row's grapheme clusters with their styles.
+    fn searched(
+        content: MessageContent,
+        pattern: Option<&str>,
+        cursor: bool,
+    ) -> Vec<Vec<(String, Style)>> {
+        let entries = [with_content(content)];
+        let needle = pattern.map(Needle::new);
+        let zone = TimeZone::UTC;
+        let render = Render {
+            width: 40,
+            highlight: needle.as_ref(),
+            cursor: cursor.then_some(0),
+            ..render(&entries, 40, &zone)
+        };
+        // Without the header.
+        render.rows(0).lines[1..].iter().map(cells).collect()
+    }
+
+    /// The clusters of `row` whose style has `modifier`, and a space for
+    /// each column of the others, without the spaces at the end.
+    fn marked(row: &[(String, Style)], modifier: Modifier) -> String {
+        let mut marked = String::new();
+        for (cluster, style) in row {
+            if style.add_modifier.contains(modifier) {
+                marked.push_str(cluster);
+            } else {
+                marked.extend(iter::repeat_n(' ', grapheme_width(cluster)));
+            }
+        }
+        marked.trim_end().to_owned()
+    }
+
+    #[test]
+    fn matches_are_reversed_and_keep_the_text_s_style() {
+        let rows = searched(plain_text("hello world"), Some("WORLD"), false);
+        assert_eq!(text(&rows[0]), "hello world");
+        assert_eq!(marked(&rows[0], Modifier::REVERSED), "      world");
+        let rows = searched(plain_text("hello world"), None, false);
+        assert_eq!(marked(&rows[0], Modifier::REVERSED), "");
+        // Across a bold span and a plain one.
+        let bold = rich::Style {
+            bold: true,
+            ..rich::Style::default()
+        };
+        let spans = vec![
+            styled("hel", bold),
+            styled("lo world", rich::Style::default()),
+        ];
+        let rows = searched(rich_text(vec![Block::Paragraph(spans)]), Some("llo"), false);
+        assert_eq!(marked(&rows[0], Modifier::REVERSED), "  llo");
+        assert_eq!(marked(&rows[0], Modifier::BOLD), "hel");
+        // Wide characters, and an emoji with its skin tone, whole.
+        let content = plain_text("日本語のテキスト 👍🏽 ok");
+        let rows = searched(content.clone(), Some("テキ"), false);
+        assert_eq!(marked(&rows[0], Modifier::REVERSED), "        テキ");
+        let rows = searched(content, Some("👍"), false);
+        let thumb = format!("{}👍🏽", " ".repeat(17));
+        assert_eq!(marked(&rows[0], Modifier::REVERSED), thumb);
+    }
+
+    #[test]
+    fn matches_in_quotes_and_lists_leave_their_prefixes_out() {
+        let milk = || {
+            vec![Block::Paragraph(vec![styled(
+                "milk",
+                rich::Style::default(),
+            )])]
+        };
+        let list = rich_text(vec![Block::List {
+            ordered: false,
+            start: 1,
+            items: vec![milk()],
+        }]);
+        let rows = searched(list, Some("milk"), false);
+        assert_eq!(text(&rows[0]), "- milk");
+        assert_eq!(marked(&rows[0], Modifier::REVERSED), "  milk");
+        let quote = rich_text(vec![Block::Quote(milk())]);
+        let rows = searched(quote.clone(), Some("milk"), false);
+        assert_eq!(text(&rows[0]), "│ milk");
+        assert_eq!(marked(&rows[0], Modifier::REVERSED), "  milk");
+        // A match that starts in the plain text's `> ` marks its part after
+        // it.
+        let rows = searched(quote, Some("> m"), false);
+        assert_eq!(marked(&rows[0], Modifier::REVERSED), "  m");
+        // An empty list has no row but a line in the plain text, so the
+        // lines after it keep their own matches.
+        let mut blocks = vec![Block::List {
+            ordered: false,
+            start: 1,
+            items: Vec::new(),
+        }];
+        blocks.extend(milk());
+        let rows = searched(rich_text(blocks), Some("milk"), false);
+        assert_eq!(marked(&rows[0], Modifier::REVERSED), "milk");
+    }
+
+    #[test]
+    fn matches_in_inline_code_are_underlined_instead() {
+        let plain = rich::Style::default();
+        let code = rich::Style {
+            code: true,
+            ..plain
+        };
+        let spans = vec![
+            styled("run ", plain),
+            styled("cat file", code),
+            styled(" now", plain),
+        ];
+        let rows = searched(rich_text(vec![Block::Paragraph(spans)]), Some("cat"), false);
+        assert_eq!(text(&rows[0]), "run cat file now");
+        // The rest of the code stays reversed.
+        assert_eq!(marked(&rows[0], Modifier::REVERSED), "        file");
+        assert_eq!(marked(&rows[0], Modifier::UNDERLINED), "    cat");
+    }
+
+    #[test]
+    fn the_name_on_image_file_and_sticker_lines_is_marked() {
+        let image = MessageContent::Image {
+            name: "image.png".to_owned(),
+            size: None,
+            dimensions: Some((64, 64)),
+        };
+        let file = MessageContent::File {
+            name: "file.txt".to_owned(),
+            size: Some(2048),
+            mime: None,
+        };
+        let sticker = MessageContent::Sticker {
+            body: "sticker".to_owned(),
+            dimensions: None,
+        };
+        let cases = [
+            (image, "image", "[image: image.png 64x64]", IMAGE),
+            (file, "file", "[file: file.txt 2.0 KiB]", FILE),
+            (sticker, "sticker", "[sticker: sticker]", STICKER),
+        ];
+        for (content, pattern, line, opening) in cases {
+            let rows = searched(content, Some(pattern), false);
+            assert_eq!(text(&rows[0]), line);
+            // Not the word in the opening.
+            let name = format!("{}{pattern}", " ".repeat(opening.len()));
+            assert_eq!(marked(&rows[0], Modifier::REVERSED), name);
+        }
+    }
+
+    #[test]
+    fn lines_without_text_are_marked_and_an_emote_s_lead_is_not() {
+        let rows = searched(MessageContent::Redacted, Some("DEL"), false);
+        assert_eq!(marked(&rows[0], Modifier::REVERSED), " del");
+        assert_eq!(marked(&rows[0], Modifier::DIM), "(deleted)");
+        let emote = MessageContent::Emote(RichText::plain("waves at Alice"));
+        let rows = searched(emote, Some("alice"), false);
+        assert_eq!(text(&rows[0]), "* alice waves at Alice");
+        let alice = format!("{}Alice", " ".repeat(17));
+        assert_eq!(marked(&rows[0], Modifier::REVERSED), alice);
+    }
+
+    #[test]
+    fn a_spoiler_with_a_match_is_drawn_whole_as_light_shade_in_its_style() {
+        let plain = rich::Style::default();
+        let spoiler = rich::Style {
+            spoiler: true,
+            ..plain
+        };
+        let bold = rich::Style {
+            bold: true,
+            ..spoiler
+        };
+        let content = rich_text(vec![Block::Paragraph(vec![
+            styled("see ", plain),
+            styled("secret ", spoiler),
+            styled("plot", bold),
+            styled(" and ", plain),
+            styled("other", spoiler),
+        ])]);
+        let rows = searched(content.clone(), None, false);
+        assert_eq!(text(&rows[0]), "see ███████████ and █████");
+        let rows = searched(content.clone(), Some("plot"), false);
+        assert_eq!(text(&rows[0]), "see ▒▒▒▒▒▒▒▒▒▒▒ and █████");
+        assert_eq!(marked(&rows[0], Modifier::BOLD), "           ▒▒▒▒");
+        assert_eq!(marked(&rows[0], Modifier::REVERSED), "");
+        let rows = searched(content, Some("other"), false);
+        assert_eq!(text(&rows[0]), "see ███████████ and ▒▒▒▒▒");
+    }
+
+    #[test]
+    fn the_cursor_s_message_has_its_matches_bold_too() {
+        let plain = rich::Style::default();
+        let code = rich::Style {
+            code: true,
+            ..plain
+        };
+        let spoiler = rich::Style {
+            spoiler: true,
+            ..plain
+        };
+        let image = MessageContent::Image {
+            name: "cat.png".to_owned(),
+            size: None,
+            dimensions: None,
+        };
+        let cases = [
+            (plain_text("hello world"), "world"),
+            (
+                rich_text(vec![Block::Paragraph(vec![
+                    styled("run ", plain),
+                    styled("cat file", code),
+                ])]),
+                "cat",
+            ),
+            (
+                rich_text(vec![Block::Paragraph(vec![
+                    styled("see ", plain),
+                    styled("plot", spoiler),
+                ])]),
+                "plot",
+            ),
+            (image, "cat"),
+            (MessageContent::Redacted, "del"),
+        ];
+        for (content, pattern) in cases {
+            let unsearched = searched(content.clone(), None, true);
+            let elsewhere = searched(content.clone(), Some(pattern), false);
+            let at_cursor = searched(content, Some(pattern), true);
+            assert_ne!(elsewhere, unsearched, "{pattern}");
+            let before = unsearched.iter().flatten();
+            let cells = before
+                .zip(elsewhere.iter().flatten())
+                .zip(at_cursor.iter().flatten());
+            for ((before, elsewhere), at_cursor) in cells {
+                // The cells the search changed, bold too.
+                let (text, style) = elsewhere.clone();
+                let style = if before == elsewhere {
+                    style
+                } else {
+                    style.add_modifier(Modifier::BOLD)
+                };
+                assert_eq!(at_cursor, &(text, style), "{pattern}");
+            }
+        }
+    }
+
+    #[test]
+    fn matches_in_the_cut_off_part_of_a_tall_message_are_not_drawn() {
+        let body = format!("{}needle", "text\n".repeat(29));
+        let entries = [with_content(plain_text(&body))];
+        let needle = Needle::new("needle");
+        let zone = TimeZone::UTC;
+        let rows_on = |height| -> Vec<Vec<(String, Style)>> {
+            let render = Render {
+                highlight: Some(&needle),
+                cursor: Some(0),
+                ..render(&entries, height, &zone)
+            };
+            render.rows(0).lines.iter().map(cells).collect()
+        };
+        let rows = rows_on(HEIGHT);
+        assert_eq!(text(&rows[HEIGHT - 1]), "[+22 lines]");
+        let reversed = |row: &Vec<(String, Style)>| marked(row, Modifier::REVERSED);
+        assert!(rows.iter().map(reversed).all(|row| row.is_empty()));
+        // A pane that holds the whole message shows the match.
+        let rows = rows_on(40);
+        assert_eq!(reversed(&rows[30]), "needle");
+    }
+
+    /// The text drawn in reverse video above the composer, without the
+    /// cursor bar.
+    fn reversed(screen: &Screen) -> String {
+        let area = screen.terminal.backend().buffer().area;
+        let mut text = String::new();
+        for y in 0..area.height - 3 {
+            for x in 0..area.width {
+                let cell = screen.cell(x, y);
+                if cell.modifier.contains(Modifier::REVERSED) && cell.symbol() != " " {
+                    text.push_str(cell.symbol());
+                }
+            }
+        }
+        text
+    }
+
+    #[test]
+    fn a_search_highlights_the_messages_on_the_pane_until_noh() {
+        let (mut app, mut screen) = open((1..10).map(view::message).collect());
+        assert_eq!(reversed(&screen), "");
+        press(&mut app, "/MESSAGE<CR>");
+        screen.draw(&app, None);
+        // The four messages on the pane.
+        assert_eq!(reversed(&screen), "message".repeat(4));
+        press(&mut app, ":noh<CR>");
+        screen.draw(&app, None);
+        assert_eq!(reversed(&screen), "");
+        press(&mut app, "n");
+        screen.draw(&app, None);
+        assert_eq!(reversed(&screen), "message".repeat(4));
     }
 }

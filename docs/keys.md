@@ -205,6 +205,18 @@ the room names in the room list and at the text of the loaded messages in the
 timeline, ignoring case, and wraps around; an empty search repeats the last
 one. There is no search on the server.
 
+After `/`, `n` or `N`, in either pane, every match of the pattern in the
+messages on the timeline's pane is shown in reverse video, as nvim's
+`hlsearch` does, and the matches in the message under the cursor are bold
+too. In inline code, which is drawn reversed, a match is underlined instead,
+and a spoiler that holds a match is drawn as `▒` instead of `█`. `:noh` (or
+`:nohlsearch`) hides the highlight until the next search, and so does
+opening another room; opening or closing a thread keeps it. The room list's
+names are not highlighted. Matches in the cut-off part of a tall message
+(`[+N lines]`) are not shown, so open the message with `<CR>`: its view
+underlines them in bold, and a visual selection there stays reversed. The
+editors' own `/` shows only the current match, while you type it.
+
 ### `room_list`
 
 | Key | Action | |
@@ -308,6 +320,7 @@ use the commands below:
 | `help.commands`, the command list | `:help` |
 | `help.keymap`, the bindings of each table | `:map` |
 | `status.messages`, the status line's recent messages | `:messages` |
+| `search.clear_highlight`, which hides the search highlight until the next search | `:noh`, `:nohlsearch` |
 | `app.quit` | `:q` |
 
 `room.mark_read` marks the room under the cursor (in the room list) or the
@@ -460,13 +473,15 @@ after `:join`, and emoji shortcodes after `:react` (`:react thu` offers
 | `:help` | Lists the commands, each with its usage and a one-line description, in the full-screen view. |
 | `:map` | Lists the bindings of each keymap table after your configuration, as `keys -> action (arguments)`, in the full-screen view. A table shows its own bindings, not those of the table it falls back to, and a removed default shows as `nop`. |
 | `:messages` | Lists the status line's messages of this run, oldest first, in the full-screen view: the last 200, errors and other messages alike, and at startup each warning about the configuration (see [Configuration](configuration.md#errors-and-warnings)) before the message that counts them. `G` goes to the newest. |
+| `:noh`, `:nohlsearch` | Hides the search highlight until the next search (see [`room_list` and `timeline`](#room_list-and-timeline)). |
 | `:q` | Quits. |
 
-`:mute`, `:unmute`, `:recover`, `:help`, `:map`, `:messages` and `:q` take
-no argument, `:open`, `:join` and `:upload` without one show their usage,
-and `:react`'s argument is optional. `:react` acts on the open room's
-timeline cursor also while the room list has focus, whereas `:mute` and
-`:unmute` there act on the room under the room list's cursor.
+`:mute`, `:unmute`, `:recover`, `:help`, `:map`, `:messages`, `:noh`,
+`:nohlsearch` and `:q` take no argument, `:open`, `:join` and `:upload`
+without one show their usage, and `:react`'s argument is optional.
+`:react` acts on the open room's timeline cursor also while the room list
+has focus, whereas `:mute` and `:unmute` there act on the room under the
+room list's cursor.
 
 ### Joining rooms and direct messages
 

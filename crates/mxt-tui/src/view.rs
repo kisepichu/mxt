@@ -1,8 +1,9 @@
 //! Layout and drawing, from the core state (design, "Layout", "Room names",
 //! "Unread badges"). Colors come only from the 16-color palette.
 
-use std::ops::RangeInclusive;
+use std::ops::{Range, RangeInclusive};
 
+use edtui::{Highlight, Index2};
 use mxt_core::app::{App, CommandLine, Focus, LineKind, StatusKind};
 use mxt_core::effect::ViewContent;
 use mxt_core::msg::{EditorMode, SyncState};
@@ -139,10 +140,13 @@ pub(crate) struct View {
 }
 
 impl View {
-    /// An image's details are its name, then its size and dimensions.
+    /// An image's details are its name, then its size and dimensions. A
+    /// text's search matches are underlined and bold (design, "Search and
+    /// jumps"): the editor draws a selection reversed, and a selection's
+    /// style replaces a highlight's.
     pub(crate) fn new(content: ViewContent, register: SharedRegister) -> View {
-        let (text, image) = match content {
-            ViewContent::Text(text) => (text, None),
+        let (text, matches, image) = match content {
+            ViewContent::Text { text, matches } => (text, matches, None),
             ViewContent::Image {
                 item,
                 name,
@@ -159,13 +163,14 @@ impl View {
                 } else {
                     format!("{name}\n{}", details.join(GAP))
                 };
-                (text, Some(item))
+                (text, Vec::new(), Some(item))
             }
         };
-        View {
-            editor: Editor::new(&text, register),
-            image,
-        }
+        let mut editor = Editor::new(&text, register);
+        editor
+            .state
+            .set_highlights(match_highlights(&text, &matches));
+        View { editor, image }
     }
 
     /// Whether the view is an image's.
@@ -193,6 +198,38 @@ impl View {
         }
         self.editor.draw(frame, details, block, true);
     }
+}
+
+/// The search's matches in `text`, byte ranges on character boundaries
+/// from left to right (as `Needle::find_in` gives them), as edtui
+/// highlights, underlined and bold: rows and columns in characters, as
+/// edtui's lines hold the text, each to its last character inclusive.
+fn match_highlights(text: &str, matches: &[Range<usize>]) -> Vec<Highlight> {
+    let style = Style::new().add_modifier(Modifier::UNDERLINED | Modifier::BOLD);
+    let mut highlights = Vec::with_capacity(matches.len());
+    let mut matches = matches.iter().peekable();
+    let mut start = None;
+    let (mut row, mut col) = (0, 0);
+    for (index, c) in text.char_indices() {
+        let Some(range) = matches.peek() else {
+            break;
+        };
+        if index == range.start {
+            start = Some(Index2::new(row, col));
+        }
+        if index + c.len_utf8() == range.end {
+            if let Some(start) = start.take() {
+                highlights.push(Highlight::new(start, Index2::new(row, col), style));
+            }
+            matches.next();
+        }
+        if c == '\n' {
+            (row, col) = (row + 1, 0);
+        } else {
+            col += 1;
+        }
+    }
+    highlights
 }
 
 /// The first and last visible items of the panes, inclusive; `None` for a
@@ -1075,6 +1112,14 @@ pub(crate) mod tests {
         }
     }
 
+    /// The view of message 3's text, without matches.
+    fn message_3() -> ViewContent {
+        ViewContent::Text {
+            text: "message 3".to_owned(),
+            matches: Vec::new(),
+        }
+    }
+
     #[test]
     fn the_status_line_shows_the_message_view_editor_mode() {
         let mut app = app();
@@ -1083,10 +1128,7 @@ pub(crate) mod tests {
         press(&mut app, "<CR>");
         assert!(app.view_open());
         let mut screen = Screen::new();
-        let mut view = View::new(
-            ViewContent::Text("message 3".to_owned()),
-            SharedRegister::default(),
-        );
+        let mut view = View::new(message_3(), SharedRegister::default());
         screen.draw(&app, Some(&mut view));
         assert!(
             screen.bottom_line().starts_with(" VIEW NORMAL "),
@@ -1134,10 +1176,7 @@ pub(crate) mod tests {
             press(&mut app, "<CR>");
             app.update(reset("!a:example.org", 1..4));
             press(&mut app, "<CR>");
-            let mut view = View::new(
-                ViewContent::Text("message 3".to_owned()),
-                SharedRegister::default(),
-            );
+            let mut view = View::new(message_3(), SharedRegister::default());
             assert!(!type_in_view(&mut app, &mut view, typed), "{typed}");
             assert!(app.view_open(), "{typed}");
             assert!(type_in_view(&mut app, &mut view, "q"), "{typed}");
@@ -1152,12 +1191,54 @@ pub(crate) mod tests {
         app.update(reset("!a:example.org", 1..4));
         press(&mut app, "<CR>");
         let register = SharedRegister::default();
-        let text = ViewContent::Text("message 3".to_owned());
-        let mut view = View::new(text, register.clone());
+        let mut view = View::new(message_3(), register.clone());
         type_in_view(&mut app, &mut view, r#""_yy"#);
         assert_eq!(register.take_unsent(), None);
         type_in_view(&mut app, &mut view, "yy");
         assert!(register.take_unsent().is_some());
+    }
+
+    #[test]
+    fn the_message_view_underlines_matches_in_bold_and_a_selection_reverses_them() {
+        let mut app = app();
+        press(&mut app, "<CR>");
+        app.update(reset("!a:example.org", 1..4));
+        press(&mut app, "<CR>");
+        let mut screen = Screen::new();
+        // `テキ` and `match`, by bytes.
+        let content = ViewContent::Text {
+            text: "日本のテキスト\nmatch".to_owned(),
+            matches: vec![9..15, 22..27],
+        };
+        let mut view = View::new(content, SharedRegister::default());
+        screen.draw(&app, Some(&mut view));
+        let matched = Modifier::UNDERLINED | Modifier::BOLD;
+        // After a column of padding; two columns for each wide character.
+        let cells = [
+            (5, 0, false),
+            (7, 0, true),
+            (9, 0, true),
+            (11, 0, false),
+            (1, 1, true),
+            (5, 1, true),
+            (6, 1, false),
+        ];
+        for (x, y, is_match) in cells {
+            let modifier = screen.cell(x, y).modifier;
+            assert_eq!(modifier.contains(matched), is_match, "{x} {y}");
+            assert!(!modifier.contains(Modifier::REVERSED), "{x} {y}");
+        }
+        // A visual selection over `match` looks like one.
+        keys("jve")
+            .into_iter()
+            .for_each(|key| view.editor.feed(key, &mut Vec::new()));
+        screen.draw(&app, Some(&mut view));
+        for x in 1..=5 {
+            let modifier = screen.cell(x, 1).modifier;
+            assert!(modifier.contains(Modifier::REVERSED), "{x}");
+            assert!(!modifier.contains(matched), "{x}");
+        }
+        assert!(screen.cell(7, 0).modifier.contains(matched));
     }
 
     #[test]
