@@ -31,6 +31,7 @@ use crate::image_view::Images;
 use crate::input::{key_from_crossterm, pasted_text};
 use crate::opener::Opener;
 use crate::overlay::Overlays;
+use crate::previews::{ImageRows, Limits, Previews};
 use crate::timeline_view::{TimeFormat, TimelinePane};
 use crate::timers::Timers;
 use crate::view::{self, Panes, RoomListLayout, View};
@@ -62,6 +63,9 @@ pub struct Tui {
     /// `None` with `ui.image_preview = "off"`, where the terminal is never
     /// asked for its graphics protocol.
     images: Option<Images>,
+    /// The timeline's previews, once [`Tui::enable_previews`] turned them
+    /// on.
+    previews: Option<Previews>,
     opener: Opener,
     composers: Composers,
     overlays: Overlays,
@@ -117,6 +121,7 @@ impl Tui {
                     view: None,
                     repaint: false,
                     images,
+                    previews: None,
                     opener: Opener::new(opener),
                     composers: Composers::new(register.clone()),
                     overlays: Overlays::default(),
@@ -144,16 +149,40 @@ impl Tui {
         self.room_list_layout = layout;
     }
 
+    /// Turns on previews in the timeline (design, "Images in the
+    /// timeline"), at most `rows` rows tall, in the message view's graphics
+    /// protocol; nothing without one (`ui.image_preview = "off"`). A worker
+    /// thread decodes and encodes them and calls `wake` after each, so that
+    /// the event loop draws a frame. Fails, leaving previews off, when the
+    /// thread cannot start.
+    pub fn enable_previews(
+        &mut self,
+        rows: ImageRows,
+        wake: Box<dyn Fn() + Send>,
+    ) -> io::Result<()> {
+        let Some(images) = &self.images else {
+            return Ok(());
+        };
+        let previews = Previews::new(rows, images.preview_encoder(), Limits::DEFAULT, wake)?;
+        self.previews = Some(previews);
+        Ok(())
+    }
+
     /// Sends the last copy to the terminal clipboard if it has not reached
-    /// it yet, draws the frame (on a cleared screen after an image that
-    /// tmux stores, see `Tui::close_view`), and returns `Msg::Viewport`
-    /// for the room list when its visible range changed since the last
-    /// draw, and for the timeline when its visible range is not the one the
-    /// core has (see `timeline_report`). An image that failed to encode
-    /// while drawing becomes `Msg::EffectFailed`, once per image. Fails once
-    /// the terminal has been restored, which while the UI runs only the
-    /// panic hook does, so a panic in any task ends the event loop instead
-    /// of drawing onto the main screen.
+    /// it yet, takes the previews the worker finished, draws the frame (on
+    /// a cleared screen after an image that tmux stores, see
+    /// `Tui::close_view`), and returns `Msg::Viewport` for the room list when
+    /// its visible range changed since the last draw, for the timeline when
+    /// its visible range is not the one the core has (see
+    /// `timeline_report`), and `Msg::PreviewsWanted` when the list of
+    /// previews to fetch changed. A frame that leaves out or moves a tmux
+    /// sixel preview is drawn without tmux's sixel, then again on a cleared
+    /// screen with it (see `Previews::finish_frame`), so that each is sent
+    /// once. An image that failed to encode while drawing becomes
+    /// `Msg::EffectFailed`, once per image. Fails once the terminal has
+    /// been restored, which while the UI runs only the panic hook does, so a
+    /// panic in any task ends the event loop instead of drawing onto the
+    /// main screen.
     pub fn draw(&mut self, app: &App) -> io::Result<Vec<Msg>> {
         if !ACTIVE.load(Ordering::SeqCst) {
             return Err(io::Error::other("the terminal was restored after a panic"));
@@ -163,36 +192,21 @@ impl Tui {
             backend.write_all(sequence.as_bytes())?;
             backend.flush()?;
         }
-        if std::mem::take(&mut self.repaint) {
-            repaint(&mut self.terminal)?;
+        if let Some(previews) = &mut self.previews {
+            previews.take_done();
         }
-        let Tui {
-            terminal,
-            room_list,
-            room_list_layout,
-            timeline,
-            view,
-            images,
-            composers,
-            overlays,
-            ..
-        } = self;
-        let composer = app
-            .shown_timeline()
-            .and_then(|shown| composers.get_mut(&shown));
-        let mut visible = view::Visible::default();
-        terminal.draw(|frame| {
-            let panes = Panes {
-                room_list,
-                room_list_layout: *room_list_layout,
-                timeline,
-                view: view.as_mut(),
-                images: images.as_mut(),
-                composer,
-                overlays,
-            };
-            visible = view::draw(frame, app, panes);
-        })?;
+        if std::mem::take(&mut self.repaint) {
+            self.repaint_screen()?;
+        }
+        let mut visible = self.draw_frame(app)?;
+        if self.previews.as_mut().is_some_and(Previews::finish_frame) {
+            self.repaint_screen()?;
+            visible = self.draw_frame(app)?;
+            // On the cleared screen no placement can go.
+            if let Some(previews) = &mut self.previews {
+                previews.finish_frame();
+            }
+        }
 
         let mut msgs = Vec::new();
         if let Some((first, last)) = visible.room_list
@@ -206,10 +220,58 @@ impl Tui {
             });
         }
         msgs.extend(timeline_report(app, visible.timeline));
+        msgs.extend(self.previews.as_mut().and_then(Previews::take_report));
         if let Some(error) = self.images.as_mut().and_then(Images::take_failure) {
             msgs.push(cannot_show(error));
         }
         Ok(msgs)
+    }
+
+    /// One frame of `app`.
+    fn draw_frame(&mut self, app: &App) -> io::Result<view::Visible> {
+        let Tui {
+            terminal,
+            room_list,
+            room_list_layout,
+            timeline,
+            view,
+            images,
+            previews,
+            composers,
+            overlays,
+            ..
+        } = self;
+        if let Some(previews) = previews {
+            previews.begin_frame();
+        }
+        let composer = app
+            .shown_timeline()
+            .and_then(|shown| composers.get_mut(&shown));
+        let mut visible = view::Visible::default();
+        terminal.draw(|frame| {
+            let panes = Panes {
+                room_list,
+                room_list_layout: *room_list_layout,
+                timeline,
+                view: view.as_mut(),
+                images: images.as_mut(),
+                previews: previews.as_mut(),
+                composer,
+                overlays,
+            };
+            visible = view::draw(frame, app, panes);
+        })?;
+        Ok(visible)
+    }
+
+    /// Clears the screen, which drops every image, and makes the next draw
+    /// write every cell (see [`repaint`]).
+    fn repaint_screen(&mut self) -> io::Result<()> {
+        repaint(&mut self.terminal)?;
+        if let Some(previews) = &mut self.previews {
+            previews.screen_cleared();
+        }
+        Ok(())
     }
 
     /// The next terminal event, `None` once the input has ended. Safe to
@@ -228,8 +290,8 @@ impl Tui {
     /// otherwise the shown timeline's composer's while it has focus. Focus
     /// events become `Msg::TerminalFocus`. A resize produces nothing (the
     /// loop redraws after every event anyway) but takes tmux's cell size
-    /// again for images (see [`Images::resized`]). Mouse events are not
-    /// enabled.
+    /// again for images (see [`Images::resized`]), the previews' too. Mouse
+    /// events are not enabled.
     pub fn handle_event(&mut self, app: &App, event: Event) -> Vec<Msg> {
         let msg = match event {
             Event::Key(event) => key_from_crossterm(event).map(|key| Msg::Key {
@@ -246,6 +308,9 @@ impl Tui {
             Event::Resize(..) => {
                 if let Some(images) = &mut self.images {
                     images.resized();
+                    if let Some(previews) = &mut self.previews {
+                        previews.set_encoder(images.preview_encoder());
+                    }
                 }
                 None
             }
@@ -274,6 +339,9 @@ impl Tui {
     ///   its edits. `ShowImage` decodes the image for the view (see
     ///   [`Images::insert`]); a failure becomes `Msg::EffectFailed`. Without
     ///   previews it does nothing (the core does not fetch images then).
+    /// - `ShowPreview` hands the image to the previews' worker, and
+    ///   `PreviewFailed` leaves the item its text line; both do nothing
+    ///   without previews.
     /// - `OpenPath` and `OpenUrl` run `files.opener` (see
     ///   [`Opener::open`]), `OpenUrl` only for `http://` and `https://`
     ///   URLs. A refusal or a failure to start it becomes `Msg::EffectFailed`.
@@ -328,6 +396,16 @@ impl Tui {
                 };
                 if let Err(error) = shown {
                     msgs.push(cannot_show(error));
+                }
+            }
+            UiEffect::ShowPreview { item, bytes } => {
+                if let Some(previews) = &mut self.previews {
+                    previews.show(item, bytes);
+                }
+            }
+            UiEffect::PreviewFailed(item) => {
+                if let Some(previews) = &mut self.previews {
+                    previews.fail(item);
                 }
             }
             UiEffect::OpenPath(path) => msgs.extend(open(&self.opener, &path)),
@@ -409,6 +487,7 @@ impl Tui {
         };
         self.events = None;
         let terminal = &mut self.terminal;
+        let previews = &mut self.previews;
         // edtui's request is made right before its `open`, which takes it,
         // so a failure here does not leave it pending.
         let edited = execute!(
@@ -423,6 +502,11 @@ impl Tui {
             let restored = if ACTIVE.load(Ordering::SeqCst) {
                 execute!(io::stdout(), EnableFocusChange, EnableBracketedPaste, Hide)
                     .and_then(|()| repaint(terminal))
+                    .inspect(|()| {
+                        if let Some(previews) = previews {
+                            previews.screen_cleared();
+                        }
+                    })
             } else {
                 crossterm::terminal::disable_raw_mode()
                     .and_then(|()| execute!(io::stdout(), LeaveAlternateScreen))
@@ -514,7 +598,9 @@ fn restore_terminal() -> io::Result<()> {
 /// every cell. `Terminal::clear` would ask for the cursor position; a
 /// resize of the full-screen viewport to the terminal's size does the same
 /// without asking, and also catches a resize while the screen was away.
-fn repaint<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error> {
+pub(crate) fn repaint<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+) -> Result<(), B::Error> {
     let size = terminal.size()?;
     terminal.resize(size.into())
 }

@@ -295,6 +295,9 @@ impl App {
             Msg::Downloaded { path } => self.downloaded(path, &mut effects),
             Msg::ImageFetched { item, bytes } => self.image_fetched(item, bytes, &mut effects),
             Msg::ImageUnavailable { item, reason } => self.image_unavailable(&item, &reason),
+            // Nothing fetches previews yet, so the tui adapter's list has no
+            // queue to go to (design, "Images in the timeline").
+            Msg::PreviewsWanted { .. } => {}
             Msg::Recovered => self.recovered(),
             Msg::ConfigWarnings { warnings } => self.config_warnings(warnings),
             Msg::Invites(invites) => self.invites = invites,
