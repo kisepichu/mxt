@@ -8,6 +8,8 @@ marked **Breaking:**.
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-23
+
 ### Added
 
 - The `notify` sort key for `ui.room_list.sort` puts the rooms that notify
@@ -358,7 +360,8 @@ The first release.
   prebuilt binaries for x86_64 Linux and Apple Silicon macOS on GitHub
   Releases, which `mise use -g github:kisepichu/mxt` installs.
 
-[Unreleased]: https://github.com/kisepichu/mxt/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/kisepichu/mxt/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/kisepichu/mxt/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/kisepichu/mxt/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/kisepichu/mxt/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/kisepichu/mxt/compare/v0.1.1...v0.1.2
