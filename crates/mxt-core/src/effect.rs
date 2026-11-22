@@ -238,6 +238,16 @@ pub enum UiEffect {
         item: ItemRef,
         bytes: MediaBytes,
     },
+    /// The fetched image of `item` for its preview in the timeline (design,
+    /// "Images in the timeline"), which the tui adapter decodes off the UI
+    /// thread.
+    ShowPreview {
+        item: ItemRef,
+        bytes: MediaBytes,
+    },
+    /// The preview of `item` could not be fetched: the item shows its text
+    /// line alone until the shown timeline changes.
+    PreviewFailed(ItemRef),
     /// Run `files.opener` with the path of a downloaded file appended.
     OpenPath(String),
     /// Run `files.opener` with the URL appended.

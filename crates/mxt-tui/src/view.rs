@@ -21,7 +21,8 @@ use crate::clipboard::SharedRegister;
 use crate::composer::Composer;
 use crate::editor::Editor;
 use crate::image_view::Images;
-use crate::overlay::Overlays;
+use crate::overlay::{self, Overlays};
+use crate::previews::Previews;
 use crate::timeline_view::{MAX_SHOWN_NEWER, TimelinePane, file_size, newer_items};
 
 /// Terminals narrower than this give the room list a third of their width,
@@ -121,6 +122,8 @@ pub(crate) struct Panes<'a> {
     /// The decoded images, if there is a picker for the terminal's graphics
     /// protocol.
     pub(crate) images: Option<&'a mut Images>,
+    /// The timeline's previews, once `Tui::enable_previews` turned them on.
+    pub(crate) previews: Option<&'a mut Previews>,
     /// The shown timeline's composer, once it had focus.
     pub(crate) composer: Option<&'a mut Composer>,
     pub(crate) overlays: &'a mut Overlays,
@@ -205,10 +208,12 @@ pub(crate) struct Visible {
 /// focused editor, the picker's query or the bottom line's prompt, whichever
 /// is drawn last. In `SECRET` mode the bottom line is the masked recovery
 /// key prompt, drawn from the key's length and cursor in grapheme clusters
-/// only.
+/// only. The overlays' areas are known before the timeline is drawn, so that
+/// it leaves out the previews they would cover.
 pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
     let [main, bottom] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
+    let picker_area = app.picker().map(|_| overlay::picker_area(main));
     let mut visible = Visible::default();
     let mut composer = panes.composer;
     let focused = app.focus() == Focus::Composer && composer.is_some();
@@ -240,7 +245,19 @@ pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
                 let [timeline, composer_area] =
                     Layout::vertical([Constraint::Fill(1), Constraint::Length(height)])
                         .areas(right);
-                visible.timeline = draw_timeline(frame, timeline, app, panes.timeline);
+                let menu = app.mention_menu();
+                let menu_area = menu.and_then(|(members, _)| {
+                    overlay::mention_menu_area(composer_area, timeline, members.len())
+                });
+                let covered: Vec<Rect> = picker_area.into_iter().chain(menu_area).collect();
+                visible.timeline = draw_timeline(
+                    frame,
+                    timeline,
+                    app,
+                    panes.timeline,
+                    panes.previews,
+                    &covered,
+                );
                 let newer = visible
                     .timeline
                     .map_or(0, |(_, last)| newer_items(app.timeline(), last));
@@ -252,7 +269,7 @@ pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
                     focused,
                     newer,
                 );
-                if let Some((members, selected)) = app.mention_menu() {
+                if let Some((members, selected)) = menu {
                     panes.overlays.draw_mention_menu(
                         frame,
                         composer_area,
@@ -262,7 +279,9 @@ pub(crate) fn draw(frame: &mut Frame, app: &App, panes: Panes) -> Visible {
                     );
                 }
             } else {
-                visible.timeline = draw_timeline(frame, right, app, panes.timeline);
+                let covered: Vec<Rect> = picker_area.into_iter().collect();
+                visible.timeline =
+                    draw_timeline(frame, right, app, panes.timeline, panes.previews, &covered);
             }
             let search = composer
                 .as_deref()
@@ -517,12 +536,14 @@ fn name_width(name: &RoomName) -> usize {
 
 /// The open room's displayed name as a header, a thread's title row while
 /// a thread is shown in place of the timeline, and the shown timeline's
-/// entries below.
+/// entries below, with their previews except under `covered`.
 fn draw_timeline(
     frame: &mut Frame,
     area: Rect,
     app: &App,
     pane: &mut TimelinePane,
+    previews: Option<&mut Previews>,
+    covered: &[Rect],
 ) -> Option<(usize, usize)> {
     let block = Block::new().padding(ENTRIES_PADDING);
     let row = |top: u16| Rect {
@@ -548,7 +569,7 @@ fn draw_timeline(
         height: area.height - top,
         ..area
     };
-    pane.draw(frame, entries, app)
+    pane.draw(frame, entries, app, previews, covered)
 }
 
 /// A thread's title row (design, "Threads"): `Thread · ` dim, the root's
@@ -860,17 +881,22 @@ pub(crate) mod tests {
     pub(crate) fn app() -> App {
         let mut app = no_rooms();
         for (id, at) in [("!a:example.org", 20), ("!b:example.org", 10)] {
-            app.update(Msg::RoomUpserted(RoomSummary {
-                id: RoomId::new(id),
-                name: name(None, id),
-                kind: RoomKind::Group,
-                unread: UnreadCounts::default(),
-                mode: NotificationMode::Default,
-                latest_activity: Some(Timestamp::from_millis(at)),
-                last_read: None,
-            }));
+            app.update(upsert(id, at));
         }
         app
+    }
+
+    /// The group `id` in the room list, last active at `at` milliseconds.
+    pub(crate) fn upsert(id: &str, at: u64) -> Msg {
+        Msg::RoomUpserted(RoomSummary {
+            id: RoomId::new(id),
+            name: name(None, id),
+            kind: RoomKind::Group,
+            unread: UnreadCounts::default(),
+            mode: NotificationMode::Default,
+            latest_activity: Some(Timestamp::from_millis(at)),
+            last_read: None,
+        })
     }
 
     /// The app with `rooms` listed in this order, as `!0:example.org` and
@@ -930,6 +956,10 @@ pub(crate) mod tests {
         room_list_layout: RoomListLayout,
         timeline: TimelinePane,
         overlays: Overlays,
+        pub(crate) previews: Option<Previews>,
+        /// Whether the last frame must be drawn again on a cleared screen
+        /// (see `Previews::finish_frame`).
+        pub(crate) again: bool,
     }
 
     impl Screen {
@@ -939,18 +969,28 @@ pub(crate) mod tests {
 
         /// A terminal `width` columns wide and 12 rows high.
         pub(crate) fn sized(width: u16, room_list_layout: RoomListLayout) -> Screen {
+            Screen::of(width, 12, room_list_layout)
+        }
+
+        /// A terminal of `width` by `height`.
+        pub(crate) fn of(width: u16, height: u16, room_list_layout: RoomListLayout) -> Screen {
             Screen {
-                terminal: Terminal::new(TestBackend::new(width, 12)).unwrap(),
+                terminal: Terminal::new(TestBackend::new(width, height)).unwrap(),
                 room_list: ListState::default(),
                 room_list_layout,
                 timeline: TimelinePane::new(),
                 overlays: Overlays::default(),
+                previews: None,
+                again: false,
             }
         }
 
         /// One frame, with the message view while it is open.
         pub(crate) fn draw(&mut self, app: &App, view: Option<&mut View>) -> Visible {
             let mut visible = Visible::default();
+            if let Some(previews) = &mut self.previews {
+                previews.begin_frame(app);
+            }
             self.terminal
                 .draw(|frame| {
                     let panes = Panes {
@@ -959,13 +999,24 @@ pub(crate) mod tests {
                         timeline: &mut self.timeline,
                         view,
                         images: None,
+                        previews: self.previews.as_mut(),
                         composer: None,
                         overlays: &mut self.overlays,
                     };
                     visible = draw(frame, app, panes);
                 })
                 .unwrap();
+            self.again = self.previews.as_mut().is_some_and(Previews::finish_frame);
             visible
+        }
+
+        /// Clears the screen, as `Tui::draw` does before drawing a frame
+        /// again.
+        pub(crate) fn repaint(&mut self) {
+            crate::terminal::repaint(&mut self.terminal).unwrap();
+            if let Some(previews) = &mut self.previews {
+                previews.screen_cleared();
+            }
         }
 
         /// Row `y` as drawn, without the cells wide characters cover.
@@ -1000,7 +1051,7 @@ pub(crate) mod tests {
             (self.bottom_line().trim_end().to_owned(), cursor.x)
         }
 
-        fn cell(&self, x: u16, y: u16) -> &Cell {
+        pub(crate) fn cell(&self, x: u16, y: u16) -> &Cell {
             &self.terminal.backend().buffer()[(x, y)]
         }
 

@@ -28,8 +28,7 @@ pub(crate) struct Overlays {
 }
 
 impl Overlays {
-    /// The candidates in a box whose bottom border sits on the row above
-    /// `composer`, its text in line with the composer's, inside `bounds`.
+    /// The candidates in the box of [`mention_menu_area`].
     pub(crate) fn draw_mention_menu(
         &mut self,
         frame: &mut Frame,
@@ -38,18 +37,10 @@ impl Overlays {
         members: &[Member],
         selected: usize,
     ) {
-        let above = composer.y.saturating_sub(bounds.y);
-        let len = u16::try_from(members.len()).unwrap_or(u16::MAX);
-        let rows = len.min(MENU_ROWS).min(above.saturating_sub(2));
-        if rows == 0 {
+        let Some(area) = mention_menu_area(composer, bounds, members.len()) else {
             return;
-        }
-        let area = Rect {
-            x: composer.x + 1,
-            y: composer.y - rows - 2,
-            width: composer.width.saturating_sub(2).min(MENU_WIDTH),
-            height: rows + 2,
         };
+        let rows = area.height - 2;
         let block = Block::bordered().border_style(DIM);
         let inner = block.inner(area);
         frame.render_widget(Clear, area);
@@ -86,13 +77,10 @@ impl Overlays {
         }
     }
 
-    /// A centered box over `bounds`: the query line with the terminal
-    /// cursor, then the items.
+    /// The query line with the terminal cursor, then the items, in the box
+    /// of [`picker_area`].
     pub(crate) fn draw_picker(&mut self, frame: &mut Frame, bounds: Rect, picker: &Picker) {
-        let area = bounds.centered(
-            Constraint::Length(bounds.width.min(PICKER_WIDTH)),
-            Constraint::Length(bounds.height.min(PICKER_HEIGHT)),
-        );
+        let area = picker_area(bounds);
         let title = match picker.kind {
             PickerKind::Emoji { .. } => " Reaction ",
             PickerKind::Rooms { .. } => " Room ",
@@ -140,6 +128,32 @@ impl Overlays {
             );
         }
     }
+}
+
+/// The mention menu's box for `len` candidates, at most `MENU_ROWS` of
+/// them: its bottom border on the row above `composer`, its text in line
+/// with the composer's, inside `bounds`; `None` without room for a row.
+/// The frame computes it before drawing the timeline, which leaves out the
+/// previews it would cover.
+pub(crate) fn mention_menu_area(composer: Rect, bounds: Rect, len: usize) -> Option<Rect> {
+    let above = composer.y.saturating_sub(bounds.y);
+    let len = u16::try_from(len).unwrap_or(u16::MAX);
+    let rows = len.min(MENU_ROWS).min(above.saturating_sub(2));
+    (rows > 0).then(|| Rect {
+        x: composer.x + 1,
+        y: composer.y - rows - 2,
+        width: composer.width.saturating_sub(2).min(MENU_WIDTH),
+        height: rows + 2,
+    })
+}
+
+/// A picker's box, centered over `bounds`. The frame computes it before
+/// drawing the timeline, which leaves out the previews it would cover.
+pub(crate) fn picker_area(bounds: Rect) -> Rect {
+    bounds.centered(
+        Constraint::Length(bounds.width.min(PICKER_WIDTH)),
+        Constraint::Length(bounds.height.min(PICKER_HEIGHT)),
+    )
 }
 
 /// The item's label, cut to fit, and its badge right-aligned in the room

@@ -7,10 +7,12 @@
 //! pane taller than in the last frame shows its new rows below the cursor
 //! item first, so the newest entry is back at the bottom when it fits. Only
 //! the entries around the cursor are laid out, so a long timeline costs no
-//! more per frame.
+//! more per frame. With previews on, an image item reserves rows for its
+//! preview below its line (see [`crate::previews`]).
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::iter;
 
 use jiff::fmt::strtime;
 use jiff::tz::TimeZone;
@@ -27,6 +29,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::previews::{Placed, PreviewLayout, Previews, Target};
 use crate::view::{BOLD, DIM, ERROR, PLAIN, fit, grapheme_width, text_width};
 
 /// `ui.time_format` when the configuration has none.
@@ -44,6 +47,9 @@ const CODE_BLOCK: Style = DIM;
 const TAB_WIDTH: usize = 4;
 /// The newer-messages hint shows counts above this as `99+`.
 pub(crate) const MAX_SHOWN_NEWER: usize = 99;
+/// The fewest entries above and below the pane whose previews are fetched
+/// ahead (design, "Fetching").
+const MIN_MARGIN: usize = 5;
 
 /// A checked `ui.time_format`, the `strftime`-style format of the item
 /// headers' times.
@@ -115,12 +121,17 @@ impl TimelinePane {
     }
 
     /// Draws the shown timeline's entries into `area` and returns the first
-    /// and last entry indices with a visible row.
+    /// and last entry indices with a visible row. With `previews`, image
+    /// items reserve rows for their previews, the kept previews are drawn
+    /// unless they meet a rectangle of `covered` (the overlays drawn over
+    /// the pane), and the targets on and around the pane are laid out.
     pub(crate) fn draw(
         &mut self,
         frame: &mut Frame,
         area: Rect,
         app: &App,
+        previews: Option<&mut Previews>,
+        covered: &[Rect],
     ) -> Option<(usize, usize)> {
         // Compared without building the shown `TimelineId` on every frame.
         let same = match &self.shown {
@@ -134,6 +145,9 @@ impl TimelinePane {
         let entries = app.timeline();
         if entries.is_empty() {
             self.anchor = None;
+            if let Some(previews) = previews {
+                previews.set_targets(app, Vec::new());
+            }
             return None;
         }
         // The cursor bar and a space on the left, a space on the right.
@@ -149,6 +163,7 @@ impl TimelinePane {
             time_format: &self.time_format.0,
             zone: &self.zone,
             thread_marks_after: app.thread_marks_after(),
+            previews: previews.as_deref().map(Previews::layout),
         };
         let cursor = app.timeline_cursor();
         let window = render.lay_out(cursor, app.timeline_follows(), self.anchor.as_ref());
@@ -160,7 +175,7 @@ impl TimelinePane {
         let buffer = frame.buffer_mut();
         let mut y = window.top;
         for (index, rows) in (window.first..).zip(&window.rows) {
-            for row in rows {
+            for row in &rows.lines {
                 if let Ok(row_y) = u16::try_from(y)
                     && row_y < area.height
                 {
@@ -175,7 +190,22 @@ impl TimelinePane {
         }
 
         self.anchor = render.anchor(&window, cursor);
-        window.visible(render.pane_rows())
+        let pane_rows = render.pane_rows();
+        let visible = window.visible(pane_rows);
+        let targets = previews.as_deref().map(|previews| match visible {
+            Some(range) => previews.choose_targets(window.on_pane(pane_rows), render.margin(range)),
+            None => Vec::new(),
+        });
+        if let (Some(previews), Some(targets)) = (previews, targets) {
+            let column = Rect {
+                x: area.x + 2,
+                width: area.width - 3,
+                ..area
+            };
+            previews.draw(buffer, column, window.placed(), covered);
+            previews.set_targets(app, targets);
+        }
+        visible
     }
 }
 
@@ -197,7 +227,7 @@ pub(crate) fn newer_items(entries: &[TimelineEntry], last: usize) -> usize {
 /// Consecutive entries and their rows, placed on the pane's rows.
 struct Window<'a> {
     first: usize,
-    rows: VecDeque<Vec<Line<'a>>>,
+    rows: VecDeque<Rows<'a>>,
     /// The pane row of the first entry's first row; negative when that row
     /// is above the pane.
     top: isize,
@@ -207,8 +237,8 @@ struct Window<'a> {
 
 impl<'a> Window<'a> {
     /// The window of the entry at `index` with its first row at `top`.
-    fn new(index: usize, rows: Vec<Line<'a>>, top: isize) -> Window<'a> {
-        let len = rows_isize(&rows);
+    fn new(index: usize, rows: Rows<'a>, top: isize) -> Window<'a> {
+        let len = rows.height();
         Window {
             first: index,
             rows: VecDeque::from([rows]),
@@ -225,13 +255,13 @@ impl<'a> Window<'a> {
         self.top + self.len
     }
 
-    fn push_back(&mut self, rows: Vec<Line<'a>>) {
-        self.len += rows_isize(&rows);
+    fn push_back(&mut self, rows: Rows<'a>) {
+        self.len += rows.height();
         self.rows.push_back(rows);
     }
 
-    fn push_front(&mut self, rows: Vec<Line<'a>>) {
-        let len = rows_isize(&rows);
+    fn push_front(&mut self, rows: Rows<'a>) {
+        let len = rows.height();
         self.first -= 1;
         self.top -= len;
         self.len += len;
@@ -244,17 +274,12 @@ impl<'a> Window<'a> {
 
     fn len_of(&self, index: usize) -> Option<isize> {
         let rows = self.rows.get(index.checked_sub(self.first)?)?;
-        Some(rows_isize(rows))
+        Some(rows.height())
     }
 
     fn top_of(&self, index: usize) -> Option<isize> {
         let before = index.checked_sub(self.first)?;
-        let above: isize = self
-            .rows
-            .iter()
-            .take(before)
-            .map(|rows| rows_isize(rows))
-            .sum();
+        let above: isize = self.rows.iter().take(before).map(Rows::height).sum();
         (before < self.rows.len()).then_some(self.top + above)
     }
 
@@ -263,9 +288,9 @@ impl<'a> Window<'a> {
     fn trim(&mut self, height: isize) {
         while self.rows.len() > 1
             && let Some(rows) = self.rows.front()
-            && self.top + rows_isize(rows) <= 0
+            && self.top + rows.height() <= 0
         {
-            let len = rows_isize(rows);
+            let len = rows.height();
             self.rows.pop_front();
             self.first += 1;
             self.top += len;
@@ -273,9 +298,9 @@ impl<'a> Window<'a> {
         }
         while self.rows.len() > 1
             && let Some(rows) = self.rows.back()
-            && self.bottom() - rows_isize(rows) >= height
+            && self.bottom() - rows.height() >= height
         {
-            self.len -= rows_isize(rows);
+            self.len -= rows.height();
             self.rows.pop_back();
         }
     }
@@ -285,7 +310,7 @@ impl<'a> Window<'a> {
         let mut y = self.top;
         let mut range: Option<(usize, usize)> = None;
         for (index, rows) in (self.first..).zip(&self.rows) {
-            let len = rows_isize(rows);
+            let len = rows.height();
             if len > 0 && y + len > 0 && y < height {
                 range = Some((range.map_or(index, |(first, _)| first), index));
             }
@@ -293,10 +318,67 @@ impl<'a> Window<'a> {
         }
         range
     }
+
+    /// The previews' slots, each with its entry's top row and rows.
+    fn slots(&self) -> impl Iterator<Item = (isize, isize, &Slot<'a>)> {
+        let mut y = self.top;
+        self.rows.iter().filter_map(move |rows| {
+            let (top, len) = (y, rows.height());
+            y += len;
+            rows.preview.as_ref().map(|slot| (top, len, slot))
+        })
+    }
+
+    /// Where the previews go on the pane.
+    fn placed(&self) -> impl Iterator<Item = Placed<'a>> {
+        self.slots().map(|(top, _, slot)| Placed {
+            item: slot.item,
+            top: top + isize::try_from(slot.offset).unwrap_or(isize::MAX),
+            target: slot.target,
+        })
+    }
+
+    /// The targets of the remote items among the entries with a row on the
+    /// pane's `height` rows, top to bottom.
+    fn on_pane(&self, height: isize) -> impl Iterator<Item = (&'a ItemRef, Target)> {
+        self.slots()
+            .filter(move |&(top, len, slot)| {
+                len > 0 && top + len > 0 && top < height && matches!(slot.item, ItemRef::Remote(_))
+            })
+            .map(|(_, _, slot)| (slot.item, slot.target))
+    }
+}
+
+/// An entry's rows, and where its preview goes among them.
+struct Rows<'a> {
+    lines: Vec<Line<'a>>,
+    preview: Option<Slot<'a>>,
+}
+
+impl<'a> Rows<'a> {
+    fn plain(lines: Vec<Line<'a>>) -> Rows<'a> {
+        Rows {
+            lines,
+            preview: None,
+        }
+    }
+
+    fn height(&self) -> isize {
+        isize::try_from(self.lines.len()).unwrap_or(isize::MAX)
+    }
+}
+
+/// The blank rows an image item reserves for its preview: from `offset`,
+/// as many as `target`'s height.
+#[derive(Clone, Copy)]
+struct Slot<'a> {
+    item: &'a ItemRef,
+    offset: usize,
+    target: Target,
 }
 
 /// Renders entries for one frame.
-struct Render<'a> {
+struct Render<'a, 'p> {
     entries: &'a [TimelineEntry],
     width: usize,
     height: usize,
@@ -305,9 +387,11 @@ struct Render<'a> {
     /// `App::thread_marks_after`: thread roots whose latest reply is newer
     /// are marked unread.
     thread_marks_after: Option<Timestamp>,
+    /// With previews on, the rows they take.
+    previews: Option<PreviewLayout<'p>>,
 }
 
-impl<'a> Render<'a> {
+impl<'a> Render<'a, '_> {
     fn pane_rows(&self) -> isize {
         isize::try_from(self.height).unwrap_or(isize::MAX)
     }
@@ -414,7 +498,7 @@ impl<'a> Render<'a> {
             let rows = self.rows(index);
             let below = isize::try_from(*below).unwrap_or(isize::MAX);
             let last_height = isize::try_from(*last_height).unwrap_or(isize::MAX);
-            let top = height.min(last_height) - below - rows_isize(&rows);
+            let top = height.min(last_height) - below - rows.height();
             Window::new(index, rows, top)
         } else {
             return self.at_bottom(cursor);
@@ -428,7 +512,7 @@ impl<'a> Render<'a> {
         while cursor < window.first {
             if window.top < -height {
                 let rows = self.rows(cursor);
-                let top = self.top_with_lead(cursor, rows_isize(&rows));
+                let top = self.top_with_lead(cursor, rows.height());
                 return Window::new(cursor, rows, top);
             }
             window.push_front(self.rows(window.first - 1));
@@ -439,7 +523,7 @@ impl<'a> Render<'a> {
     /// The window of the entry at `index` with its last row at the bottom.
     fn at_bottom(&self, index: usize) -> Window<'a> {
         let rows = self.rows(index);
-        let top = self.pane_rows() - rows_isize(&rows);
+        let top = self.pane_rows() - rows.height();
         Window::new(index, rows, top)
     }
 
@@ -459,47 +543,86 @@ impl<'a> Render<'a> {
         lead.min(self.pane_rows() - len)
     }
 
-    /// The rows of the entry at `index`. An item taller than the pane is cut
-    /// with `[+N lines]` as its last row; a thread root keeps its summary
-    /// row below the marker, on a pane with a row for both.
-    fn rows(&self, index: usize) -> Vec<Line<'a>> {
+    /// The rows of the entry at `index`. An item that would be taller than
+    /// the pane with its preview has none. An item taller than the pane is
+    /// cut with `[+N lines]` as its last row; a thread root keeps its
+    /// summary row below the marker, on a pane with a row for both.
+    fn rows(&self, index: usize) -> Rows<'a> {
         match &self.entries[index] {
             TimelineEntry::Item(item) => {
                 let mut rows = self.item(item);
-                if rows.len() > self.height {
+                if rows.lines.len() > self.height
+                    && let Some(slot) = rows.preview.take()
+                {
+                    let end = slot.offset + usize::from(slot.target.size.height);
+                    rows.lines.drain(slot.offset..end);
+                }
+                let lines = &mut rows.lines;
+                if lines.len() > self.height {
                     // `item` ends with the summary row.
                     let summary = if item.thread_summary.is_some() && self.height > 1 {
-                        rows.pop()
+                        lines.pop()
                     } else {
                         None
                     };
                     let kept = self.height - 1 - usize::from(summary.is_some());
-                    let hidden = rows.len() - kept;
-                    rows.truncate(kept);
-                    rows.push(Line::styled(format!("[+{hidden} lines]"), DIM));
-                    rows.extend(summary);
+                    let hidden = lines.len() - kept;
+                    lines.truncate(kept);
+                    lines.push(Line::styled(format!("[+{hidden} lines]"), DIM));
+                    lines.extend(summary);
                 }
                 rows
             }
             TimelineEntry::DateDivider(timestamp) => {
                 let date = self.format(*timestamp, DATE_FORMAT);
-                vec![rule(&date, DIM, self.width)]
+                Rows::plain(vec![rule(&date, DIM, self.width)])
             }
-            TimelineEntry::ReadMarker => {
-                vec![rule(READ_MARKER, Style::new().fg(Color::Red), self.width)]
-            }
-            TimelineEntry::Hidden => Vec::new(),
+            TimelineEntry::ReadMarker => Rows::plain(vec![rule(
+                READ_MARKER,
+                Style::new().fg(Color::Red),
+                self.width,
+            )]),
+            TimelineEntry::Hidden => Rows::plain(Vec::new()),
         }
     }
 
-    /// The header, the reply preview, the body, the reactions, and a thread
-    /// root's summary.
-    fn item(&self, item: &'a TimelineItem) -> Vec<Line<'a>> {
+    /// The targets around the entries `first` to `last`, those with a row on
+    /// the pane (design, "Fetching"): among as many entries again above and
+    /// below them, at least `MIN_MARGIN` each way, by distance from the
+    /// pane, below first.
+    fn margin(&self, (first, last): (usize, usize)) -> impl Iterator<Item = (&'a ItemRef, Target)> {
+        let reach = (last - first + 1).max(MIN_MARGIN);
+        (1..=reach)
+            .flat_map(move |distance| [Some(last + distance), first.checked_sub(distance)])
+            .flatten()
+            .filter(|&index| index < self.entries.len())
+            .filter_map(|index| self.target(index))
+    }
+
+    /// The target of the preview of the remote image item at `index`,
+    /// unless its preview failed or the item with it would not fit the pane.
+    fn target(&self, index: usize) -> Option<(&'a ItemRef, Target)> {
+        let TimelineEntry::Item(item) = &self.entries[index] else {
+            return None;
+        };
+        if !matches!(item.id, ItemRef::Remote(_))
+            || !matches!(item.content, MessageContent::Image { .. })
+        {
+            return None;
+        }
+        let slot = self.rows(index).preview?;
+        Some((slot.item, slot.target))
+    }
+
+    /// The header, the reply preview, the body, an image's preview rows,
+    /// the reactions, and a thread root's summary.
+    fn item(&self, item: &'a TimelineItem) -> Rows<'a> {
         let mut rows = vec![self.header(item)];
         if let Some(reply) = &item.reply {
             rows.push(reply_line(reply, self.width));
         }
         let mut body = Body::new(self.width, rows);
+        let mut preview = None;
         match &item.content {
             MessageContent::Text { rich, .. } => body.rich(rich),
             MessageContent::Notice(text) => {
@@ -522,6 +645,20 @@ impl<'a> Render<'a> {
                     None => format!("[image: {name}]"),
                 };
                 body.line(vec![(Cow::Owned(text), PLAIN)]);
+                // Blank rows, which the preview is drawn over once kept.
+                let width = u16::try_from(self.width).unwrap_or(u16::MAX);
+                if let Some(target) = self
+                    .previews
+                    .and_then(|layout| layout.target(&item.id, *dimensions, width))
+                {
+                    preview = Some(Slot {
+                        item: &item.id,
+                        offset: body.rows.len(),
+                        target,
+                    });
+                    let rows = usize::from(target.size.height);
+                    body.rows.extend(iter::repeat_n(Line::default(), rows));
+                }
             }
             MessageContent::File { name, size, .. } => {
                 let text = match size {
@@ -549,7 +686,10 @@ impl<'a> Render<'a> {
         if let Some(summary) = &item.thread_summary {
             rows.push(self.thread_row(item.timestamp, summary));
         }
-        rows
+        Rows {
+            lines: rows,
+            preview,
+        }
     }
 
     /// A thread root's last row (design, "Threads"): `💬 N · <time>`, dim,
@@ -626,10 +766,6 @@ fn owned_line<'a>(segments: &[(&str, Style)], width: usize) -> Line<'a> {
             .map(|span| Span::styled(span.content.into_owned(), span.style))
             .collect::<Vec<_>>(),
     )
-}
-
-fn rows_isize(rows: &[Line]) -> isize {
-    isize::try_from(rows.len()).unwrap_or(isize::MAX)
 }
 
 /// `── label ──` across `width` columns.
@@ -1028,11 +1164,15 @@ mod tests {
     use std::num::NonZeroU32;
 
     use super::*;
+    use crate::image_view::PreviewEncoder;
+    use crate::previews::{ImageRows, Limits};
     use crate::view::RoomListLayout;
     use crate::view::tests::{self as view, Screen, app, press};
     use mxt_core::ids::{EventId, RoomId, TimelineId, TxnId, UserId};
     use mxt_core::msg::Msg;
     use mxt_core::timeline::TimelineDiff;
+    use ratatui::layout::Size;
+    use ratatui_image::FontSize;
 
     const WIDTH: usize = 20;
     const HEIGHT: usize = 10;
@@ -1113,7 +1253,11 @@ mod tests {
             .collect()
     }
 
-    fn render<'a>(entries: &'a [TimelineEntry], height: usize, zone: &'a TimeZone) -> Render<'a> {
+    fn render<'a>(
+        entries: &'a [TimelineEntry],
+        height: usize,
+        zone: &'a TimeZone,
+    ) -> Render<'a, 'static> {
         Render {
             entries,
             width: WIDTH,
@@ -1121,6 +1265,7 @@ mod tests {
             time_format: DEFAULT_TIME_FORMAT,
             zone,
             thread_marks_after: None,
+            previews: None,
         }
     }
 
@@ -1536,13 +1681,80 @@ mod tests {
     fn an_item_taller_than_the_pane_ends_in_the_count_of_hidden_rows() {
         let entries = [remote(0, 30)];
         let zone = TimeZone::UTC;
-        let rows = render(&entries, HEIGHT, &zone).rows(0);
+        let rows = render(&entries, HEIGHT, &zone).rows(0).lines;
         assert_eq!(rows.len(), HEIGHT);
         // The header and 30 rows of text, of which 22 do not fit.
         assert_eq!(rows[HEIGHT - 1].to_string(), "[+22 lines]");
         // As the cursor item, it fills the pane.
         let (placed, _) = lay_out(&entries, 0, false, None);
         assert_eq!(placed, [(0, 0, 10)]);
+    }
+
+    /// An image message of `id`, 4000 by 3000 pixels.
+    fn photo(id: ItemRef) -> TimelineEntry {
+        let mut entry = message(id, 1);
+        if let TimelineEntry::Item(item) = &mut entry {
+            item.content = MessageContent::Image {
+                name: "photo.jpg".to_owned(),
+                size: None,
+                dimensions: Some((4000, 3000)),
+            };
+        }
+        entry
+    }
+
+    /// The rows' text, and where the preview goes: its first row and size.
+    fn with_preview(rows: Rows) -> (Vec<String>, Option<(usize, Size)>) {
+        let lines = rows.lines.iter().map(ToString::to_string).collect();
+        let preview = rows.preview.map(|slot| (slot.offset, slot.target.size));
+        (lines, preview)
+    }
+
+    #[test]
+    fn an_image_item_reserves_its_preview_s_rows_below_its_line() {
+        let failed = ItemRef::Remote(EventId::new("$failed:example.org"));
+        let entries = [
+            photo(ItemRef::Remote(EventId::new("$photo:example.org"))),
+            photo(failed.clone()),
+            photo(ItemRef::Local(TxnId::new("echo"))),
+        ];
+        let mut previews = Previews::new(
+            ImageRows::default(),
+            PreviewEncoder::TmuxSixel(FontSize::new(10, 20)),
+            Limits::DEFAULT,
+            Box::new(|| {}),
+        )
+        .unwrap();
+        previews.fail(failed);
+        let zone = TimeZone::UTC;
+        let render = Render {
+            width: 60,
+            previews: Some(previews.layout()),
+            ..render(&entries, 20, &zone)
+        };
+        let line = "[image: photo.jpg 4000x3000]";
+        // 8 rows and 22 columns of 10 by 20 pixels hold 213 by 160 pixels.
+        let (rows, preview) = with_preview(render.rows(0));
+        assert_eq!(rows.len(), 10);
+        assert_eq!(rows[1], line);
+        assert!(rows[2..].iter().all(String::is_empty), "{rows:?}");
+        assert_eq!(preview, Some((2, Size::new(22, 8))));
+        // A failed preview leaves the line alone.
+        let (rows, preview) = with_preview(render.rows(1));
+        assert_eq!((rows.len(), preview), (2, None));
+        // A local echo reserves the rows too.
+        let (rows, preview) = with_preview(render.rows(2));
+        assert_eq!((rows.len(), preview), (10, Some((2, Size::new(22, 8)))));
+        // On a pane of 6 rows the item with its preview would not fit.
+        let short = Render {
+            height: 6,
+            ..render
+        };
+        let (rows, preview) = with_preview(short.rows(0));
+        assert_eq!(
+            (rows, preview),
+            (vec!["00:00 alice".to_owned(), line.to_owned()], None)
+        );
     }
 
     fn at(time: &str) -> Timestamp {
@@ -1574,7 +1786,7 @@ mod tests {
             thread_marks_after: marks_after.map(at),
             ..render(&entries, HEIGHT, &zone)
         };
-        let row = render.rows(0).pop().unwrap();
+        let row = render.rows(0).lines.pop().unwrap();
         row.spans
             .iter()
             .map(|span| (span.content.to_string(), span.style))
@@ -1630,7 +1842,7 @@ mod tests {
                 thread_marks_after: Some(at("2026-11-22T14:00:00Z")),
                 ..render(&entries, height, &zone)
             };
-            let rows = render.rows(0);
+            let rows = render.rows(0).lines;
             rows.iter().map(ToString::to_string).collect::<Vec<_>>()
         };
         let rows = rows_on(HEIGHT);
