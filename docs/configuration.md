@@ -246,6 +246,9 @@ keywords only. `"unread"`, `filter = "unread"` and the default `]u` and
 rooms too:
 
 ```toml
+[account]
+user_id = "@alice:example.org"
+
 [ui]
 room_list = { sort = "mentions, notify, unread, read" }
 
