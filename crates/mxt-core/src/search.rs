@@ -35,40 +35,42 @@ impl Needle {
         if self.0.is_empty() {
             return Vec::new();
         }
+        let mut lowered = String::with_capacity(text.len());
+        lowered.extend(text.chars().flat_map(char::to_lowercase));
+        let mut found = lowered.match_indices(self.0.as_str()).peekable();
+        // Most texts do not match: the maps below are built only for those
+        // that do.
+        if found.peek().is_none() {
+            return Vec::new();
+        }
         // For each character, where its lowercase form starts in `lowered`
         // and where the character starts in `text`.
-        let mut lowered = String::with_capacity(text.len());
-        let mut starts: Vec<(usize, usize)> = Vec::with_capacity(text.len());
-        for (index, c) in text.char_indices() {
-            starts.push((lowered.len(), index));
-            lowered.extend(c.to_lowercase());
-        }
+        let starts: Vec<(usize, usize)> = text
+            .char_indices()
+            .scan(0, |lowered_len, (index, c)| {
+                let start = *lowered_len;
+                *lowered_len += c.to_lowercase().map(char::len_utf8).sum::<usize>();
+                Some((start, index))
+            })
+            .collect();
         // The character whose lowercase form holds the byte `at`: every
         // lowercase form has a character, so the forms start in order.
         let char_at = |at: usize| starts.partition_point(|&(start, _)| start <= at) - 1;
-        let found: Vec<Range<usize>> = lowered
-            .match_indices(self.0.as_str())
-            .map(|(start, matched)| {
-                let first = char_at(start);
-                let last = char_at(start + matched.len() - 1);
-                let end = starts.get(last + 1).map_or(text.len(), |&(_, index)| index);
-                starts[first].1..end
-            })
-            .collect();
-        if found.is_empty() {
-            return found;
-        }
         let boundaries: Vec<usize> = text
             .grapheme_indices(true)
             .map(|(index, _)| index)
             .chain(iter::once(text.len()))
             .collect();
-        let mut ranges: Vec<Range<usize>> = Vec::with_capacity(found.len());
-        for range in found {
+        let mut ranges: Vec<Range<usize>> = Vec::new();
+        for (start, matched) in found {
+            // The characters the match touches.
+            let first = starts[char_at(start)].1;
+            let last = char_at(start + matched.len() - 1);
+            let end = starts.get(last + 1).map_or(text.len(), |&(_, index)| index);
             // The start of the cluster that holds the first byte, and the
             // end of the one that holds the last.
-            let start = boundaries[boundaries.partition_point(|&at| at <= range.start) - 1];
-            let end = boundaries[boundaries.partition_point(|&at| at < range.end)];
+            let start = boundaries[boundaries.partition_point(|&at| at <= first) - 1];
+            let end = boundaries[boundaries.partition_point(|&at| at < end)];
             match ranges.last_mut() {
                 Some(last) if start <= last.end => last.end = last.end.max(end),
                 _ => ranges.push(start..end),

@@ -209,12 +209,14 @@ After `/`, `n` or `N`, in either pane, every match of the pattern in the
 messages on the timeline's pane is shown in reverse video, as nvim's
 `hlsearch` does, and the matches in the message under the cursor are bold
 too. In inline code, which is drawn reversed, a match is underlined instead,
-and a spoiler that holds a match is drawn as `▒` instead of `█`. `:noh` (or
-`:nohlsearch`) hides the highlight until the next search, and so does
-opening another room; opening or closing a thread keeps it. The room list's
-names are not highlighted. Matches in the cut-off part of a tall message
-(`[+N lines]`) are not shown, so open the message with `<CR>`: its view
-underlines them in bold, and a visual selection there stays reversed. The
+and a spoiler that holds a match is drawn as `▒` instead of `█`, on all of
+its lines. `:noh` (or `:nohlsearch`) hides the highlight until the next
+search, and so does opening another room; opening or closing a thread keeps
+it. The room list's names are not highlighted. Matches in the cut-off part
+of a tall message (`[+N lines]`) are not shown, so open the message with
+`<CR>`: its view underlines them in bold, and a visual selection there stays
+reversed. The view keeps the marks it opened with: clearing the highlight
+while it is open, or editing its text, leaves them where they were. The
 editors' own `/` shows only the current match, while you type it.
 
 ### `room_list`

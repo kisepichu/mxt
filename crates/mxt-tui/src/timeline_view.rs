@@ -59,9 +59,6 @@ const MATCHED_SPOILER: char = '▒';
 const IMAGE: &str = "[image: ";
 const FILE: &str = "[file: ";
 const STICKER: &str = "[sticker: ";
-/// The lines of messages without text, as their plain text has them.
-const REDACTED: &str = "(deleted)";
-const UNDECRYPTABLE: &str = "(unable to decrypt)";
 /// The newer-messages hint shows counts above this as `99+`.
 pub(crate) const MAX_SHOWN_NEWER: usize = 99;
 /// The fewest entries above and below the pane whose previews are fetched
@@ -185,7 +182,7 @@ impl TimelinePane {
             highlight: app.search_highlight(),
             cursor,
         };
-        let window = render.lay_out(cursor, app.timeline_follows(), self.anchor.as_ref());
+        let window = render.lay_out(app.timeline_follows(), self.anchor.as_ref());
 
         let bar = match app.focus() {
             Focus::Timeline => Span::styled(" ", Style::new().add_modifier(Modifier::REVERSED)),
@@ -208,7 +205,7 @@ impl TimelinePane {
             }
         }
 
-        self.anchor = render.anchor(&window, cursor);
+        self.anchor = render.anchor(&window);
         let pane_rows = render.pane_rows();
         let visible = window.visible(pane_rows);
         let targets = previews.as_deref().map(|previews| match visible {
@@ -410,7 +407,8 @@ struct Render<'a, 'p> {
     previews: Option<PreviewLayout<'p>>,
     /// `App::search_highlight`: its matches in the messages are marked.
     highlight: Option<&'a Needle>,
-    /// The cursor's entry, whose matches are bold too.
+    /// The cursor's entry: it stays on the pane, and its matches are bold
+    /// too.
     cursor: Option<usize>,
 }
 
@@ -420,17 +418,17 @@ impl<'a> Render<'a, '_> {
     }
 
     /// Places the entries around the cursor.
-    fn lay_out(&self, cursor: Option<usize>, follows: bool, anchor: Option<&Anchor>) -> Window<'a> {
+    fn lay_out(&self, follows: bool, anchor: Option<&Anchor>) -> Window<'a> {
         let height = self.pane_rows();
         let last = self.entries.len() - 1;
-        let mut window = match cursor.filter(|_| !follows) {
+        let mut window = match self.cursor.filter(|_| !follows) {
             Some(cursor) => self.around(cursor, anchor),
             // Following: the newest entry at the bottom.
             None => self.at_bottom(last),
         };
 
         // The cursor item fully on the pane; its rows never exceed the pane.
-        if let Some(cursor) = cursor
+        if let Some(cursor) = self.cursor
             && let (Some(top), Some(len)) = (window.top_of(cursor), window.len_of(cursor))
         {
             if top < 0 {
@@ -464,8 +462,8 @@ impl<'a> Render<'a, '_> {
 
     /// The anchor for the next frame: the end, or the cursor item and the
     /// rows below it.
-    fn anchor(&self, window: &Window, cursor: Option<usize>) -> Option<Anchor> {
-        let cursor = cursor?;
+    fn anchor(&self, window: &Window) -> Option<Anchor> {
+        let cursor = self.cursor?;
         let TimelineEntry::Item(item) = &self.entries[cursor] else {
             return None;
         };
@@ -695,16 +693,10 @@ impl<'a> Render<'a, '_> {
                 body.line(vec![Part::new(line, PLAIN)], &matches);
                 preview = self.reserve(&mut body, &item.id, *dimensions);
             }
-            MessageContent::Redacted => {
-                let matches = self.matches_in(REDACTED, 0);
-                body.line(vec![Part::new(REDACTED, DIM)], &matches);
-            }
-            MessageContent::Undecryptable => {
-                let matches = self.matches_in(UNDECRYPTABLE, 0);
-                body.line(vec![Part::new(UNDECRYPTABLE, DIM)], &matches);
-            }
-            MessageContent::Unsupported { kind } => {
-                let text = format!("(unsupported: {kind})");
+            MessageContent::Redacted
+            | MessageContent::Undecryptable
+            | MessageContent::Unsupported { .. } => {
+                let text = item.content.plain_text();
                 let matches = self.matches_in(&text, 0);
                 body.line(vec![Part::new(text, DIM)], &matches);
             }
@@ -914,6 +906,9 @@ struct Part<'a> {
     text: Cow<'a, str>,
     style: Style,
     spoiler: bool,
+    /// For spoiler text: whether a search match touches its run (see
+    /// `mark_spoilers`), which is then drawn as `▒`.
+    matched: bool,
 }
 
 impl<'a> Part<'a> {
@@ -923,6 +918,7 @@ impl<'a> Part<'a> {
             text: text.into(),
             style,
             spoiler: false,
+            matched: false,
         }
     }
 }
@@ -939,10 +935,6 @@ struct Body<'a> {
     lead: Vec<Piece<'a>>,
     /// Outermost first.
     prefixes: Vec<Prefix>,
-    /// The search's matches on the rich text's plain lines that are still
-    /// to come (see `search::plain_line_matches`): the rich text's lines
-    /// follow its plain lines one by one.
-    matches: std::vec::IntoIter<Vec<Range<usize>>>,
     /// Whether the body is the cursor's message, whose matches are bold too.
     cursor: bool,
 }
@@ -964,7 +956,6 @@ impl<'a> Body<'a> {
             base: PLAIN,
             lead: Vec::new(),
             prefixes: Vec::new(),
-            matches: Vec::new().into_iter(),
             cursor: false,
         }
     }
@@ -972,13 +963,67 @@ impl<'a> Body<'a> {
     /// The lines of `text`, one per line of its plain text, with `matches`
     /// on each (see `search::plain_line_matches`).
     fn rich(&mut self, text: &'a RichText, matches: Vec<Vec<Range<usize>>>) {
-        self.matches = matches.into_iter();
-        self.blocks(&text.blocks);
+        let mut steps = Steps {
+            steps: Vec::new(),
+            matches: matches.into_iter(),
+        };
+        steps.blocks(&text.blocks);
+        mark_spoilers(&mut steps.steps);
+        for step in steps.steps {
+            match step {
+                Step::Enter(prefix) => self.prefixes.push(prefix),
+                Step::Leave => {
+                    self.prefixes.pop();
+                }
+                Step::Line(parts, matches) => self.line(parts, &matches),
+            }
+        }
         if !self.lead.is_empty() {
             self.line(Vec::new(), &[]);
         }
     }
 
+    /// One line of text with the search's `matches` on it, byte ranges in
+    /// the text of `parts`, wrapped after the prefixes.
+    fn line(&mut self, parts: Vec<Part<'a>>, matches: &[Range<usize>]) {
+        let mut pieces = std::mem::take(&mut self.lead);
+        push_parts(&mut pieces, parts, matches, self.cursor);
+        let prefix_width: usize = self.prefixes.iter().map(Prefix::width).sum();
+        let width = self.width.saturating_sub(prefix_width).max(1);
+        for row in wrap(pieces, width) {
+            let mut spans = Vec::with_capacity(self.prefixes.len() + row.len());
+            for prefix in &mut self.prefixes {
+                spans.push(prefix.span());
+            }
+            spans.extend(
+                row.into_iter()
+                    .map(|(text, style)| Span::styled(text, self.base.patch(style))),
+            );
+            self.rows.push(Line::from(spans));
+        }
+    }
+}
+
+/// A step of drawing rich text: one of its plain lines, with its parts and
+/// the search's matches on it (see `search::plain_line_matches`), or where
+/// a quote or a list item around the lines starts or ends.
+enum Step<'a> {
+    Enter(Prefix),
+    Leave,
+    Line(Vec<Part<'a>>, Vec<Range<usize>>),
+}
+
+/// The steps of rich text, in order. They are all known before the first is
+/// drawn, so a spoiler's run is marked on every line it is on (see
+/// `mark_spoilers`).
+struct Steps<'a> {
+    steps: Vec<Step<'a>>,
+    /// The search's matches on the plain lines still to come: the rich
+    /// text's lines follow its plain lines one by one.
+    matches: std::vec::IntoIter<Vec<Range<usize>>>,
+}
+
+impl<'a> Steps<'a> {
     fn blocks(&mut self, blocks: &'a [Block]) {
         for block in blocks {
             self.block(block);
@@ -989,7 +1034,7 @@ impl<'a> Body<'a> {
         match block {
             Block::Paragraph(inlines) => {
                 for line in paragraph_lines(inlines) {
-                    self.plain_line(line);
+                    self.line(line);
                 }
             }
             Block::Code { runs, .. } => {
@@ -997,18 +1042,19 @@ impl<'a> Body<'a> {
                 for run in runs {
                     for (index, part) in run.text.split('\n').enumerate() {
                         if index > 0 {
-                            self.plain_line(std::mem::take(&mut line));
+                            self.line(std::mem::take(&mut line));
                         }
                         if !part.is_empty() {
                             line.push(Part {
                                 text: Cow::Borrowed(part),
                                 style: CODE_BLOCK,
                                 spoiler: run.spoiler,
+                                matched: false,
                             });
                         }
                     }
                 }
-                self.plain_line(line);
+                self.line(line);
             }
             Block::Quote(blocks) => self.nested(Prefix::Quote, blocks),
             // No row, where the plain text has an empty line.
@@ -1037,83 +1083,91 @@ impl<'a> Body<'a> {
     }
 
     fn nested(&mut self, prefix: Prefix, blocks: &'a [Block]) {
-        self.prefixes.push(prefix);
+        self.steps.push(Step::Enter(prefix));
         if blocks.is_empty() {
-            self.plain_line(Vec::new());
+            self.line(Vec::new());
         }
         self.blocks(blocks);
-        self.prefixes.pop();
+        self.steps.push(Step::Leave);
     }
 
-    /// The next plain line of the rich text, with its matches.
-    fn plain_line(&mut self, parts: Vec<Part<'a>>) {
+    /// The next plain line, with its matches.
+    fn line(&mut self, parts: Vec<Part<'a>>) {
         let matches = self.matches.next().unwrap_or_default();
-        self.line(parts, &matches);
+        self.steps.push(Step::Line(parts, matches));
     }
+}
 
-    /// One line of text with the search's `matches` on it, byte ranges in
-    /// the text of `parts`, wrapped after the prefixes.
-    fn line(&mut self, parts: Vec<Part<'a>>, matches: &[Range<usize>]) {
-        let mut pieces = std::mem::take(&mut self.lead);
-        push_parts(&mut pieces, parts, matches, self.cursor);
-        let prefix_width: usize = self.prefixes.iter().map(Prefix::width).sum();
-        let width = self.width.saturating_sub(prefix_width).max(1);
-        for row in wrap(pieces, width) {
-            let mut spans = Vec::with_capacity(self.prefixes.len() + row.len());
-            for prefix in &mut self.prefixes {
-                spans.push(prefix.span());
+/// Marks the spoiler text whose run a search match touches
+/// (`Part::matched`), so that all of the run's blocks turn to `▒` (design,
+/// "Search and jumps"). A run goes on across lines, so no line of a spoiler
+/// shows which of them holds the match: line breaks, blank lines and the
+/// edges of blocks, quotes and list items do not end it, text that is no
+/// spoiler does.
+fn mark_spoilers(steps: &mut [Step<'_>]) {
+    // The step and part indices of the run's parts so far, and whether a
+    // match touches the run.
+    let mut run = Vec::new();
+    let mut touched = false;
+    let mut marked = Vec::new();
+    for (step, line) in steps.iter().enumerate() {
+        let Step::Line(parts, matches) = line else {
+            continue;
+        };
+        let mut start = 0;
+        for (index, part) in parts.iter().enumerate() {
+            let end = start + part.text.len();
+            if part.spoiler {
+                run.push((step, index));
+                touched |= matches
+                    .iter()
+                    .any(|range| range.start < end && range.end > start);
+            } else if touched {
+                marked.append(&mut run);
+                touched = false;
+            } else {
+                run.clear();
             }
-            spans.extend(
-                row.into_iter()
-                    .map(|(text, style)| Span::styled(text, self.base.patch(style))),
-            );
-            self.rows.push(Line::from(spans));
+            start = end;
+        }
+    }
+    if touched {
+        marked.append(&mut run);
+    }
+    for (step, index) in marked {
+        if let Step::Line(parts, _) = &mut steps[step] {
+            parts[index].matched = true;
         }
     }
 }
 
 /// Appends `parts` to `pieces` as they are drawn, with the search's
 /// `matches` (byte ranges in the text of `parts`) in their style (design,
-/// "Search and jumps"): text is split at the matches' edges, and a run of
-/// spoiler text, drawn as `█`, is drawn whole as `▒` in its own style when
-/// a match touches it. In the cursor's message (`cursor`) these are bold
-/// too.
+/// "Search and jumps"): text is split at the matches' edges, and spoiler
+/// text, drawn as `█`, is drawn as `▒` in its own style when a match
+/// touches its run (`Part::matched`). In the cursor's message (`cursor`)
+/// these are bold too.
 fn push_parts<'a>(
     pieces: &mut Vec<Piece<'a>>,
-    mut parts: Vec<Part<'a>>,
+    parts: Vec<Part<'a>>,
     matches: &[Range<usize>],
     cursor: bool,
 ) {
     pieces.reserve(parts.len());
     let mut start = 0;
-    let mut index = 0;
-    while let Some(part) = parts.get_mut(index) {
-        if !part.spoiler {
-            let text = std::mem::take(&mut part.text);
-            let len = text.len();
-            push_split(pieces, text, part.style, start, matches, cursor);
-            start += len;
-            index += 1;
-            continue;
-        }
-        let run = parts[index..].iter().take_while(|part| part.spoiler);
-        let (count, len) = run.fold((0, 0), |(count, len), part| {
-            (count + 1, len + part.text.len())
-        });
-        let end = start + len;
-        let touched = matches
-            .iter()
-            .any(|range| range.start < end && range.end > start);
-        for part in &parts[index..index + count] {
-            let (block, style) = match (touched, cursor) {
+    for part in parts {
+        let len = part.text.len();
+        if part.spoiler {
+            let (block, style) = match (part.matched, cursor) {
                 (false, _) => (SPOILER, part.style),
                 (true, false) => (MATCHED_SPOILER, part.style),
                 (true, true) => (MATCHED_SPOILER, part.style.add_modifier(Modifier::BOLD)),
             };
             pieces.push((Cow::Owned(hidden(&part.text, block)), style));
+        } else {
+            push_split(pieces, part.text, part.style, start, matches, cursor);
         }
-        start = end;
-        index += count;
+        start += len;
     }
 }
 
@@ -1233,6 +1287,7 @@ fn paragraph_lines(inlines: &[Inline]) -> Vec<Vec<Part<'_>>> {
                     text: Cow::Borrowed(part),
                     style,
                     spoiler,
+                    matched: false,
                 });
             }
         }
@@ -1520,15 +1575,18 @@ mod tests {
         anchor: Option<&Anchor>,
     ) -> (Vec<(usize, isize, isize)>, Option<Anchor>) {
         let zone = TimeZone::UTC;
-        let render = render(entries, height, &zone);
-        let window = render.lay_out(Some(cursor), follows, anchor);
+        let render = Render {
+            cursor: Some(cursor),
+            ..render(entries, height, &zone)
+        };
+        let window = render.lay_out(follows, anchor);
         let placed = (window.first..=window.last())
             .map(|index| {
                 let top = window.top_of(index).unwrap();
                 (index, top, window.len_of(index).unwrap())
             })
             .collect();
-        (placed, render.anchor(&window, Some(cursor)))
+        (placed, render.anchor(&window))
     }
 
     /// The first and last entries laid out.
@@ -2567,6 +2625,71 @@ mod tests {
         assert_eq!(marked(&rows[0], Modifier::REVERSED), "");
         let rows = searched(content, Some("other"), false);
         assert_eq!(text(&rows[0]), "see ███████████ and ▒▒▒▒▒");
+    }
+
+    #[test]
+    fn a_spoiler_over_several_lines_turns_to_light_shade_on_all_of_them() {
+        let plain = rich::Style::default();
+        let spoiler = rich::Style {
+            spoiler: true,
+            ..plain
+        };
+        let texts = |rows: &[Vec<(String, Style)>]| -> Vec<String> {
+            rows.iter().map(Vec::as_slice).map(text).collect()
+        };
+        // A line break in a spoiler, as `<br>` and as a newline in its text.
+        let paragraphs = [
+            vec![
+                styled("see ", plain),
+                styled("one", spoiler),
+                Inline::LineBreak,
+                styled("two", spoiler),
+            ],
+            vec![styled("see ", plain), styled("one\ntwo", spoiler)],
+        ];
+        for inlines in paragraphs {
+            let content = rich_text(vec![Block::Paragraph(inlines)]);
+            let rows = searched(content.clone(), None, false);
+            assert_eq!(texts(&rows), ["see ███", "███"]);
+            for pattern in ["one", "two"] {
+                let rows = searched(content.clone(), Some(pattern), false);
+                assert_eq!(texts(&rows), ["see ▒▒▒", "▒▒▒"], "{pattern}");
+            }
+        }
+        let code = |runs: &[(&str, bool)]| Block::Code {
+            language: None,
+            runs: runs
+                .iter()
+                .map(|&(text, spoiler)| rich::CodeRun {
+                    text: text.into(),
+                    spoiler,
+                })
+                .collect(),
+        };
+        // In a code block, a run over a line break; text that is no spoiler
+        // ends a run.
+        let runs = rich_text(vec![code(&[
+            ("x = ", false),
+            ("secret", true),
+            ("\ny = ", false),
+            ("two\nlines", true),
+            (";", false),
+        ])]);
+        let rows = searched(runs.clone(), Some("lines"), false);
+        assert_eq!(texts(&rows), ["x = ██████", "y = ▒▒▒", "▒▒▒▒▒;"]);
+        let rows = searched(runs, Some("secret"), false);
+        assert_eq!(texts(&rows), ["x = ▒▒▒▒▒▒", "y = ███", "█████;"]);
+        // A spoiler around text and a code block, which are two blocks, with
+        // a blank line in the code; in the cursor's message bold on every
+        // line.
+        let content = rich_text(vec![
+            Block::Paragraph(vec![styled("the answer:", spoiler)]),
+            code(&[("x\n\nprint(42)", true)]),
+        ]);
+        let rows = searched(content, Some("print"), true);
+        assert_eq!(texts(&rows), ["▒▒▒▒▒▒▒▒▒▒▒", "▒", "", "▒▒▒▒▒▒▒▒▒"]);
+        let bold: Vec<String> = rows.iter().map(|row| marked(row, Modifier::BOLD)).collect();
+        assert_eq!(bold, texts(&rows));
     }
 
     #[test]
