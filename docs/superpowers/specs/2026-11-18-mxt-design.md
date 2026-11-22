@@ -1038,23 +1038,38 @@ group, and moved the cursor with the room it opened.
 - The room list's cursor stays on its room when the order changes under
   it: a room that moves takes the cursor along when the cursor is on it,
   and otherwise the cursor's index shifts with the rooms that move past
-  it. One exception (added after 0.1.4): when the open room moves because
-  it was opened or read, a cursor on it stays on its row, now on the room
-  that moved into its place, as in a mail inbox (`<CR>` opens that one
-  next). Opened covers every path that opens the room under the cursor:
-  `<CR>`, `]u`, the picker, `:open`, `:join` and the jump list. Read
-  covers optimistic clearing of the open room (its receipt, or
+  it. One exception (added after 0.1.4), as in a mail inbox: when the
+  room under the cursor is opened and moves because it was opened, the
+  cursor stays on its row, now on the room that moved into its place
+  (`<CR>` opens that one next). Opened covers every path that opens the
+  room under the cursor: `<CR>`, `]u`, `[u`, `room.open`, the picker,
+  `:open`, `:join` and the jump list. When the open room moves because it
+  was read, the cursor keeps its row only while it has stayed on the open
+  room since that room was opened from under it: under `read` alone,
+  `<CR>` on an unread room leaves the room in place, its receipt lifts it
+  to the top, the rooms below keep their rows, and `j<CR>` opens the next
+  one. Read covers optimistic clearing of the open room (its receipt, or
   `room.mark_read`) and an update of the open room that changes nothing
   but its counts and `last_read` (a receipt's echo, cleared counts):
   `RoomList::upsert` tells whether the stored room and the update differ
-  only there. Any other update of the open room (new activity, a rename
-  under `name`, a new notification mode) is another reorder, which the
-  cursor follows with the room. A room opened while the cursor is on
-  another room puts the cursor on the opened room in its new place, as
-  before. Opening also places the previously open room again by its
-  counts: when it is still unread (the terminal had no focus, so no
-  receipt went out), it can move into the cursor's row, and `<CR>` there
-  opens it again. The row is the cursor's index, at most the last room's.
+  only there. All three follow the same rule. A room opened while the
+  cursor is on another room takes the cursor along to its new place, and
+  the cursor keeps following it when it is read: its receipt lifts it to
+  the top of the read rooms, the cursor with it. Once the cursor moves
+  (`j`, `k` or another motion, a search, following another room, the
+  removal of its room) or another room opens, the condition ends, and a
+  read of the open room takes the cursor along as any other move does.
+  `App` keeps one flag for it: `open_at` sets it when the cursor was on
+  the opened room and clears it otherwise, and a cursor action that takes
+  the cursor to another row or the removal of the cursor's room clears
+  it; a cursor that follows another room is off the open room and gets
+  back onto it only by such a move. Any other update of the open room
+  (new activity, a rename under `name`, a new notification mode) is
+  another reorder, which the cursor follows with the room. Opening also
+  places the previously open room again by its counts: when it is still
+  unread (the terminal had no focus, so no receipt went out), it can move
+  into the cursor's row, and `<CR>` there opens it again. The row is the
+  cursor's index, at most the last room's.
   Before the cursor was first placed it stays on the first room,
   whichever room that is. `]u`, `[u`, `room.open` and the
   room picker follow the list's order: `first`, `next` and `prev` are
@@ -1256,8 +1271,9 @@ the open one (`pick = "first"`, which skips the open room; changed after
 0.1.4 from `pick = "next"`, the next unread room after the open one,
 which, under sorts where the open room keeps its place (`recent`, `read`
 alone, `name`), was often far down, while a room with a new mention at
-the top waited; under sorts that start with `mentions`, `notify` or
-`unread` the open room sorts as read, below the unread rooms, so `next`
+the top waited; under sorts that put every unread room before the open
+room (`unread` before `recent` or `read`, as in `"mentions, unread,
+read"`) the open room sorts as read, below the unread rooms, so `next`
 already wrapped to the topmost one). `[u` opens the previous unread room,
 wrapping around (`pick = "prev"`). Both count every badge, dim counts
 included; a binding with `filter = "notify"` skips the rooms whose only

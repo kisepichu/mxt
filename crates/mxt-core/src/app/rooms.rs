@@ -24,8 +24,9 @@ pub(super) enum RoomSwitch {
 
 impl App {
     /// The cursor stays on its room when the order changes, but stays on its
-    /// row when it is on the open room and the update changed nothing but
-    /// the room's counts and `last_read`: the room moved because it was read
+    /// row when the update changed nothing but the open room's counts and
+    /// `last_read` (the room moved because it was read) and the cursor has
+    /// stayed on the open room since it was opened from under the cursor
     /// (design, "Room list").
     pub(super) fn upsert_room(&mut self, summary: RoomSummary) {
         let open = self.open_room.as_ref() == Some(&summary.id);
@@ -41,9 +42,10 @@ impl App {
     /// to zero at once and, when it has something to read, its `last_read`
     /// to the top of the read rooms (`receipt_at` is the time of the event
     /// the receipt goes on; see `RoomList::clear_unread`), and the room
-    /// moves when the sort keys depend on them. A cursor on the open room
-    /// stays on its row, since the room moved because it was read; any
-    /// other cursor stays on its room.
+    /// moves when the sort keys depend on them. The open room moved because
+    /// it was read, so a cursor that has stayed on it since it was opened
+    /// from under the cursor stays on its row; any other cursor stays on its
+    /// room.
     pub(super) fn clear_room_unread(&mut self, id: &RoomId, receipt_at: Option<Timestamp>) {
         if let Some((old, new)) = self.rooms.clear_unread(id, receipt_at) {
             let open = self.open_room.as_ref() == Some(id);
@@ -52,18 +54,28 @@ impl App {
     }
 
     /// The cursor after the room at `old` (`None` for a new room) moved to
-    /// `new`: on its row when it is on the room and `read` says that the
-    /// open room moved because it was read, otherwise on its room (design,
-    /// "Room list").
+    /// `new`: on its row when `read` says that the open room moved because
+    /// it was read and the cursor has stayed on it since it was opened from
+    /// under the cursor, otherwise on its room (design, "Room list").
     fn room_moved(&mut self, old: Option<usize>, new: usize, read: bool) {
         if let Some(cursor) = self.room_cursor
-            && !(read && old == Some(cursor))
+            && !(read && self.opened_under_cursor && old == Some(cursor))
         {
             self.room_cursor = Some(follow(cursor, old, new));
         }
     }
 
-    /// A cursor on the removed room moves to the room now at its index.
+    /// Puts the room list cursor on `index` for a cursor action. A cursor
+    /// that leaves its row no longer stays on it when the open room is read.
+    pub(super) fn place_room_cursor(&mut self, index: usize) {
+        if self.room_cursor() != Some(index) {
+            self.opened_under_cursor = false;
+        }
+        self.room_cursor = Some(index);
+    }
+
+    /// A cursor on the removed room moves to the room now at its index,
+    /// which is a move of the cursor.
     pub(super) fn remove_room(&mut self, id: RoomId, effects: &mut Vec<Effect>) {
         if let Some((index, _)) = self.rooms.remove(&id)
             && let Some(cursor) = self.room_cursor
@@ -71,7 +83,10 @@ impl App {
             self.room_cursor = match cursor.cmp(&index) {
                 Ordering::Less => Some(cursor),
                 Ordering::Greater => Some(cursor - 1),
-                Ordering::Equal => self.rooms.len().checked_sub(1).map(|last| cursor.min(last)),
+                Ordering::Equal => {
+                    self.opened_under_cursor = false;
+                    self.rooms.len().checked_sub(1).map(|last| cursor.min(last))
+                }
             };
         }
         if self.open_room.as_ref() == Some(&id) {
@@ -98,7 +113,7 @@ impl App {
             Motion::First => 0,
             Motion::Last => last,
         };
-        self.room_cursor = Some(target.min(last));
+        self.place_room_cursor(target.min(last));
     }
 
     pub(super) fn open_selected(&mut self, effects: &mut Vec<Effect>) {
@@ -127,12 +142,14 @@ impl App {
     /// timeline. Both rooms move when the sort keys depend on their counts,
     /// or under `read` on their `last_read` and latest activity, since the
     /// open room sorts as read. A cursor on the opened room stays on its
-    /// row, now on the room that moved into its place, as in a mail inbox;
-    /// a cursor on another room goes to the opened room in its new place
-    /// (design, "Room list"). An open room only gets the focus. This is the
-    /// one place where the open room becomes another room, so a recorded
-    /// switch puts the position before it into the jump list whichever
-    /// action or answer opens the room (design, "Jump list").
+    /// row, now on the room that moved into its place, as in a mail inbox,
+    /// and later also when the room moves because it was read, until the
+    /// cursor moves; a cursor on another room goes to the opened room in its
+    /// new place and follows it (design, "Room list"). An open room only
+    /// gets the focus. This is the one place where the open room becomes
+    /// another room, so a recorded switch puts the position before it into
+    /// the jump list whichever action or answer opens the room (design,
+    /// "Jump list").
     pub(super) fn open_at(&mut self, index: usize, switch: RoomSwitch, effects: &mut Vec<Effect>) {
         let id = &self.rooms.rooms()[index].id;
         if self.open_room.as_ref() != Some(id) {
@@ -148,6 +165,7 @@ impl App {
             let on_it = self.room_cursor() == Some(index);
             let new = self.rooms.open(&id);
             self.room_cursor = if on_it { Some(index) } else { new };
+            self.opened_under_cursor = on_it;
             effects.push(Effect::Matrix(MatrixEffect::SubscribeTimeline(id)));
         }
         self.focus = Focus::Timeline;

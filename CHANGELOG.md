@@ -43,11 +43,15 @@ marked **Breaking:**.
   `room.open` now skips the open room (before, it could pick the open
   room, which only moved the focus to its timeline), and `]u` is
   `{ action = "room.open", filter = "unread" }`. `[u` is unchanged.
-- When the room you open moves in the room list (it sorts as read while
-  open), the room list's cursor stays on its row, on the room that took
-  its place, as in a mail inbox; also when `]u`, the picker or `:open`
-  opens the room under the cursor, and when the open room moves because
-  you read it. Other moves keep the cursor on its room.
+- When you open the room under the room list's cursor and it moves in the
+  list (it sorts as read while open), the cursor stays on its row, on the
+  room that took its place, as in a mail inbox, whether `<CR>`, `]u`,
+  `[u`, the picker, `:open`, `:join` or the jump list opens it; while the
+  cursor stays on that room, it also keeps its row when the room moves
+  because you read it. A room opened away from the cursor takes the
+  cursor along, also when you read it, and once the cursor moves or
+  another room opens, reading the open room takes the cursor along too.
+  Other moves keep the cursor on its room.
 
 ## [0.1.4] - 2026-11-22
 

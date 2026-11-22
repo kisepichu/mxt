@@ -487,11 +487,14 @@ working"). A user's own `]u` binding is unaffected.
 - [ ] `app/rooms.rs`: `open_at` remembers whether `room_cursor` was
   `Some(index)` before `self.rooms.open(&id)`; if so the cursor stays at
   `index` (at most the last index), otherwise it goes to the opened room's
-  new index as now. `clear_room_unread` on the open room with the cursor
-  on it keeps the cursor's index; elsewhere `follow` as now.
-  `upsert_room` of the open room with the cursor on it and `read_only`
-  keeps the cursor's index; every other upsert uses `follow`. Doc
-  comments name the design's rule ("Room list").
+  new index as now. `App` keeps one flag, set by `open_at` when the
+  cursor was on the opened room and cleared otherwise, also by a cursor
+  action that takes the cursor to another row and by the removal of the
+  cursor's room. `clear_room_unread` on the open room with the cursor on
+  it and the flag set keeps the cursor's index; elsewhere `follow` as
+  now. `upsert_room` of the open room with the cursor on it, the flag set
+  and `read_only` keeps the cursor's index; every other upsert uses
+  `follow`. Doc comments name the design's rule ("Room list").
 - [ ] Tests in `app/tests/room_actions.rs`, with `sort = "mentions, unread,
   read"` and four rooms: `<CR>` on the unread room at row 0 opens it, the
   room moves among the read rooms, and the cursor is on row 0, now the
@@ -499,11 +502,14 @@ working"). A user's own `]u` binding is unaffected.
   the topmost unread room keeps the cursor on that row; the room picker
   and `:open` opening the room under the cursor do the same; `]u` opening
   a room while the cursor is on another room puts the cursor on the
-  opened room's new place; a receipt's optimistic clearing and
-  `room.mark_read` of the open room with the cursor on it keep the row; an
-  upsert of the open room with a newer `last_read`, cleared counts and the
-  same `latest_activity` keeps the row, while one with newer activity
-  (under `recent`), one that renames it (under `name`) and one that
+  opened room's new place, and its receipt takes the cursor along to the
+  top of the read rooms. Under `sort = "read"`: `<CR>` on an unread room
+  at row k, then its receipt or `room.mark_read` lifting it to row 0,
+  leaves the cursor on row k, and `j<CR>` opens the next room below; after
+  the cursor moved off the open room and back, its read takes the cursor
+  along; an upsert of the open room opened under the cursor with a newer
+  `last_read`, cleared counts and the same `latest_activity` keeps the
+  row, while one with newer activity, one that renames it and one that
   changes its mode take the cursor along; an upsert of another room under
   the cursor takes it along, and one passing the cursor shifts its index,
   as before; opening the last room keeps the cursor within the list; with
@@ -512,16 +518,23 @@ working"). A user's own `]u` binding is unaffected.
   under the cursor, where `<CR>` opens it again (the documented case).
 - [ ] Docs: `docs/keys.md`, "The screen": after you open a room, the room
   list's cursor stays where that room was, on the room that took its
-  place, so `<CR>` opens the next one; when other rooms move, the cursor
-  stays on its room; a room you left unread (the terminal had no focus)
-  goes back to its place among the unread rooms and can be the one under
-  the cursor again.
-- [ ] CHANGELOG `### Changed`: "When the room you open moves in the room
-  list (it sorts as read while open), the room list's cursor stays on its
-  row, on the room that took its place, as in a mail inbox; also when
-  `]u`, the picker or `:open` opens the room under the cursor, and when
-  the open room moves because you read it. Other moves keep the cursor on
-  its room."
+  place, so `<CR>` opens the next one; while the cursor stays on the room
+  opened this way, it also keeps its row when you read the room; a room
+  opened away from the cursor takes the cursor along, also when you read
+  it; once the cursor moves or another room opens, a read takes the
+  cursor along; when rooms move for any other reason, the cursor stays
+  on its room; a room you left unread (the terminal had no focus) goes
+  back to its place among the unread rooms and can be the one under the
+  cursor again.
+- [ ] CHANGELOG `### Changed`: "When you open the room under the room
+  list's cursor and it moves in the list (it sorts as read while open),
+  the cursor stays on its row, on the room that took its place, as in a
+  mail inbox, whether `<CR>`, `]u`, `[u`, the picker, `:open`, `:join` or
+  the jump list opens it; while the cursor stays on that room, it also
+  keeps its row when the room moves because you read it. A room opened
+  away from the cursor takes the cursor along, also when you read it, and
+  once the cursor moves or another room opens, reading the open room
+  takes the cursor along too. Other moves keep the cursor on its room."
 
 ## Task G1b: Timeline previews, the tui part
 
