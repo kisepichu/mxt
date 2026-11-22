@@ -801,9 +801,12 @@ covered by unit tests.
   full-screen overlay. For text, the overlay is an edtui scratch editor
   holding the message's text, so vim motions, search, visual selection and
   yanks work on messages taller than the timeline. Changes are discarded when
-  the view closes. For images, the overlay shows the image (fetched with
-  `FetchImage`, decoded and scaled down with the `image` crate, and kept in
-  the tui adapter's image cache) and the file name and size. Messages taller
+  the view closes. `q` closes the view in normal and visual mode, and
+  `<Esc>` in normal mode; in visual mode `<Esc>` (`view.leave`) goes back to
+  normal mode, as in vim (see "Default keymap"). For images, the overlay
+  shows the image (fetched with `FetchImage`, decoded and scaled down with
+  the `image` crate, and kept in the tui adapter's image cache) and the
+  file name and size. Messages taller
   than the timeline pane show a `[+N lines]` marker at the cut-off.
   The help views (`:help`, `:map`, `:messages`; see "Help views") use the
   same overlay and editor for text the core generates. The core's open
@@ -1248,7 +1251,8 @@ instead, and it never takes more than half of the width.
 | `picker` | `<CR>` / `<Esc>` | `picker.accept` / `picker.cancel` | |
 | `command_line` | `<CR>` / `<Esc>` / `<Tab>` | `command_line.execute` / `command_line.cancel` / `command_line.complete` | same |
 | `command_line` | `<Up>` / `<Down>` | `command_line.history_prev` / `command_line.history_next` (see "Line editing") | same, by the text before the cursor |
-| `message_view` | `q` / `<Esc>` | `view.close` | close window |
+| `message_view` | `q` | `view.close` | close window |
+| `message_view` | `<Esc>` | `view.leave`: in the view editor's visual mode back to normal mode, otherwise `view.close` | `v_<Esc>`, then close window |
 
 `<Esc>` in the composer's insert mode is not bound: edtui switches to its
 normal mode and the draft is kept. A user binding of `<Esc>` in
@@ -1279,6 +1283,28 @@ shown, so a binding of them in `normal` still works in the main timeline.
 `t` is in `timeline`, which comes before `normal`: a binding of `t` in
 `normal` no longer applies while the timeline has focus, unless it is also
 written in `timeline` (see "Threads").
+
+`<Esc>` in `message_view` was `view.close` up to 0.1.4, in normal and
+visual mode alike, so `V` then `<Esc>` closed the view where vim leaves
+visual mode. After 0.1.4 it runs `view.leave`: in the view editor's visual
+mode the core returns `Effect::Ui(ViewNormal)`, and the tui puts the view's
+editor in normal mode as edtui's own `<Esc>` does (`SwitchMode(Normal)`:
+the selection goes, the cursor stays where it is), so `V<Esc>v` starts a
+selection of characters; keys resolved again after the action are
+resolved in normal mode, as after `composer.normal`. In normal mode it
+closes the view. `q` stays `view.close` in both modes: mxt has no
+macros. An action rather than a narrower table, because `message_view`
+is one table for normal and visual mode (see "Tables and resolution")
+and the user's tables merge over the defaults key by key: a user's
+`<Esc>` in `[keymap.message_view]` replaces `view.leave` in both modes,
+as before, and
+`"<Esc>" = "view.close"` brings back the old behaviour. A table for
+normal mode alone, holding the default `<Esc>`, would have to come
+before `message_view` in the chain and so hide a user's `<Esc>` there, or
+after it as a fallback that no other table pair has. The composer needs
+neither: `composer.visual` and `normal` bind no `<Esc>`, so in its visual
+mode the key goes to edtui, which leaves visual mode, and only
+`composer.normal` binds it (`composer.leave`).
 
 `<C-j>` inserts a newline because many terminals cannot tell Shift+Enter apart
 from Enter.
@@ -2206,7 +2232,8 @@ them can be joined. Completing the name `join` adds a space.
 `:help`, `:map` and `:messages` open a view over the whole screen, the same
 overlay and editor as the message view for a text message: `j`/`k`, `/`
 search, visual selection and `yy` work, changes are discarded as in the
-message view, and `q` or `<Esc>` closes it (the `message_view` table). The
+message view, and `q` closes it, as `<Esc>` does in normal mode (the
+`message_view` table; in visual mode `<Esc>` goes back to normal mode). The
 text is generated each time the view opens, so it shows the running mxt's
 commands, configuration and messages; a long text scrolls and wraps like a
 long message. A help
@@ -2848,7 +2875,8 @@ Actions are named `<target>.<verb>`. The first release has:
   the first release; no default keys (see "Help views")
 - status line: `status.messages` (`:messages`), added after the first
   release; no default key (see "Help views")
-- other: `view.close`, `sidebar.toggle`, `focus.room_list`, `focus.timeline`,
+- other: `view.close`, `view.leave` (added after 0.1.4; see "Default
+  keymap"), `sidebar.toggle`, `focus.room_list`, `focus.timeline`,
   `file.upload`, `account.recover`, `app.quit`, `nop`
 
 Each action declares typed arguments. `room.open` takes a `RoomTarget`:

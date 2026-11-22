@@ -8,7 +8,7 @@ use super::jumps::AfterGone;
 use super::{App, Confirm, Focus, Motion, StatusKind, View};
 use crate::effect::{Effect, MatrixEffect, UiEffect, ViewContent};
 use crate::ids::{EventId, RoomId, TimelineId, Timestamp};
-use crate::msg::Pane;
+use crate::msg::{EditorMode, Pane};
 use crate::rich::is_web_url;
 use crate::settings::ImagePreview;
 use crate::timeline::{
@@ -480,6 +480,19 @@ impl App {
     pub(super) fn close_view(&mut self, effects: &mut Vec<Effect>) {
         if self.view.take().is_some() {
             effects.push(Effect::Ui(UiEffect::CloseView));
+        }
+    }
+
+    /// `view.leave`: in the view editor's visual mode, the tui puts the
+    /// editor in normal mode with the cursor where it is, as vim's `<Esc>`
+    /// does, and keys resolved again after it are resolved in normal mode;
+    /// otherwise `view.close`.
+    pub(super) fn leave_view(&mut self, effects: &mut Vec<Effect>) {
+        if self.view.is_some() && self.editor == Some(EditorMode::Visual) {
+            effects.push(Effect::Ui(UiEffect::ViewNormal));
+            self.editor = Some(EditorMode::Normal);
+        } else {
+            self.close_view(effects);
         }
     }
 

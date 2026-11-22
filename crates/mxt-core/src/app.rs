@@ -782,6 +782,7 @@ impl App {
             Action::RoomJoin { target } => self.join(target, effects),
             Action::MessageView => self.view_message(effects),
             Action::ViewClose => self.close_view(effects),
+            Action::ViewLeave => self.leave_view(effects),
             Action::HelpCommands => self.view_help(help_text(COMMANDS), effects),
             Action::HelpKeymap => self.view_help(keymap_text(&self.keymap), effects),
             Action::StatusMessages => self.view_help(self.messages_text(), effects),
