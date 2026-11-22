@@ -1,6 +1,6 @@
-//! The event loop: terminal input, timers and the matrix adapter's messages
-//! into `App::update`, its effects out to the adapters and the history
-//! writer, and a frame after every batch.
+//! The event loop: terminal input, timers, the matrix adapter's messages
+//! and the timeline previews' waker into `App::update`, its effects out to
+//! the adapters and the history writer, and a frame after every batch.
 
 use std::collections::VecDeque;
 use std::io;
@@ -10,19 +10,22 @@ use mxt_core::app::App;
 use mxt_core::effect::{Effect, MatrixEffect, StoreEffect};
 use mxt_core::msg::Msg;
 use mxt_tui::Tui;
+use tokio::sync::Notify;
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::warn;
 
 /// Runs until `UiEffect::Quit`. `from_matrix` delivers adapter messages;
 /// matrix effects are sent to `to_matrix`, and store effects to `to_store`,
-/// the history writer.
+/// the history writer. `previews` is the waker the tui adapter's previews
+/// worker calls after each preview it finishes, so that a frame takes it.
 pub async fn run(
     app: &mut App,
     tui: &mut Tui,
     mut from_matrix: UnboundedReceiver<Msg>,
     to_matrix: UnboundedSender<MatrixEffect>,
     to_store: UnboundedSender<StoreEffect>,
+    previews: &Notify,
 ) -> io::Result<()> {
     let senders = Senders {
         matrix: to_matrix,
@@ -46,6 +49,8 @@ pub async fn run(
             },
             Some(msg) = from_matrix.recv() => queue.push_back(msg),
             () = timer => queue.extend(tui.expired(Instant::now())),
+            // Nothing to update: the frame below takes the previews.
+            () = previews.notified() => {}
         }
         // A burst of room updates draws once.
         while let Ok(msg) = from_matrix.try_recv() {
@@ -91,9 +96,12 @@ fn update(app: &mut App, tui: &mut Tui, senders: &Senders, queue: &mut VecDeque<
                     if let Err(SendError(effect)) = senders.matrix.send(effect) {
                         let error = "The matrix adapter has stopped".to_owned();
                         // Every send is answered, so the core lets go of its
-                        // draft.
+                        // draft, and every preview, so its queue goes on.
                         queue.push_back(match effect {
                             MatrixEffect::Send { id, .. } => Msg::SendFailed { id, error },
+                            MatrixEffect::FetchPreview { room, item } => {
+                                Msg::PreviewFailed { room, item }
+                            }
                             _ => Msg::EffectFailed { error },
                         });
                     }

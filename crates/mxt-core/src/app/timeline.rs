@@ -412,16 +412,19 @@ impl App {
         }
     }
 
-    /// `message.view`: the item in the full-screen view. An image shows its
-    /// details, and its image is fetched unless previews are off; other
-    /// items show their text. An image that is still a local echo is
-    /// refused: the adapter fetches media by remote event.
+    /// `message.view`: the item in the full-screen view. An image or a
+    /// sticker shows its details (a sticker's body as its name), and its
+    /// image is fetched unless previews are off; other items show their
+    /// text. An image or a sticker that is still a local echo is refused:
+    /// the adapter fetches media by remote event.
     pub(super) fn view_message(&mut self, effects: &mut Vec<Effect>) {
         let (Some(room), Some(item)) = (&self.open_room, self.timeline.cursor_item()) else {
             return;
         };
         let content = match &item.content {
-            MessageContent::Image { .. } if matches!(item.id, ItemRef::Local(_)) => {
+            MessageContent::Image { .. } | MessageContent::Sticker { .. }
+                if matches!(item.id, ItemRef::Local(_)) =>
+            {
                 return self.set_status(StatusKind::Error, NOT_SENT);
             }
             MessageContent::Image {
@@ -432,6 +435,12 @@ impl App {
                 item: item.id.clone(),
                 name: name.clone(),
                 size: *size,
+                dimensions: *dimensions,
+            },
+            MessageContent::Sticker { body, dimensions } => ViewContent::Image {
+                item: item.id.clone(),
+                name: body.clone(),
+                size: None,
                 dimensions: *dimensions,
             },
             content => ViewContent::Text(content.plain_text()),
@@ -561,9 +570,10 @@ impl App {
     /// what belongs to the previous one: its open thread, which it
     /// unsubscribes, its viewport, which must not count for the new room's
     /// entries before the new room is drawn, the wait for a jump's message
-    /// and `gd`'s question, a message view (a help view stays), the picker,
-    /// a confirmation, and the focus and mention menu of its composer. Runs
-    /// while the previous room is still the open one.
+    /// and `gd`'s question, the previews it wants (those in flight keep
+    /// their slots until answered), a message view (a help view stays), the
+    /// picker, a confirmation, and the focus and mention menu of its
+    /// composer. Runs while the previous room is still the open one.
     pub(super) fn reset_timeline(&mut self, effects: &mut Vec<Effect>) {
         if let (Some(open), Some(room)) = (self.thread.take(), &self.open_room) {
             effects.push(Effect::Matrix(MatrixEffect::UnsubscribeThread {
@@ -575,6 +585,7 @@ impl App {
         self.timeline_viewport = None;
         self.jump_wait = None;
         self.reply_lookup = None;
+        self.drop_wanted_previews();
         if matches!(self.view, Some(View::Message(_))) {
             self.close_view(effects);
         }

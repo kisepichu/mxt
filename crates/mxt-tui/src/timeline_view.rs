@@ -599,14 +599,18 @@ impl<'a> Render<'a, '_> {
             .filter_map(|index| self.target(index))
     }
 
-    /// The target of the preview of the remote image item at `index`,
-    /// unless its preview failed or the item with it would not fit the pane.
+    /// The target of the preview of the remote image or sticker item at
+    /// `index`, unless its preview failed or the item with it would not fit
+    /// the pane.
     fn target(&self, index: usize) -> Option<(&'a ItemRef, Target)> {
         let TimelineEntry::Item(item) = &self.entries[index] else {
             return None;
         };
         if !matches!(item.id, ItemRef::Remote(_))
-            || !matches!(item.content, MessageContent::Image { .. })
+            || !matches!(
+                item.content,
+                MessageContent::Image { .. } | MessageContent::Sticker { .. }
+            )
         {
             return None;
         }
@@ -614,8 +618,8 @@ impl<'a> Render<'a, '_> {
         Some((slot.item, slot.target))
     }
 
-    /// The header, the reply preview, the body, an image's preview rows,
-    /// the reactions, and a thread root's summary.
+    /// The header, the reply preview, the body, an image's or a sticker's
+    /// preview rows, the reactions, and a thread root's summary.
     fn item(&self, item: &'a TimelineItem) -> Rows<'a> {
         let mut rows = vec![self.header(item)];
         if let Some(reply) = &item.reply {
@@ -645,20 +649,7 @@ impl<'a> Render<'a, '_> {
                     None => format!("[image: {name}]"),
                 };
                 body.line(vec![(Cow::Owned(text), PLAIN)]);
-                // Blank rows, which the preview is drawn over once kept.
-                let width = u16::try_from(self.width).unwrap_or(u16::MAX);
-                if let Some(target) = self
-                    .previews
-                    .and_then(|layout| layout.target(&item.id, *dimensions, width))
-                {
-                    preview = Some(Slot {
-                        item: &item.id,
-                        offset: body.rows.len(),
-                        target,
-                    });
-                    let rows = usize::from(target.size.height);
-                    body.rows.extend(iter::repeat_n(Line::default(), rows));
-                }
+                preview = self.reserve(&mut body, &item.id, *dimensions);
             }
             MessageContent::File { name, size, .. } => {
                 let text = match size {
@@ -667,8 +658,12 @@ impl<'a> Render<'a, '_> {
                 };
                 body.line(vec![(Cow::Owned(text), PLAIN)]);
             }
-            MessageContent::Sticker { body: text } => {
+            MessageContent::Sticker {
+                body: text,
+                dimensions,
+            } => {
                 body.line(vec![(Cow::Owned(format!("[sticker: {text}]")), PLAIN)]);
+                preview = self.reserve(&mut body, &item.id, *dimensions);
             }
             MessageContent::Redacted => body.line(vec![(Cow::Borrowed("(deleted)"), DIM)]),
             MessageContent::Undecryptable => {
@@ -690,6 +685,27 @@ impl<'a> Render<'a, '_> {
             lines: rows,
             preview,
         }
+    }
+
+    /// With previews on, the blank rows after an image's or a sticker's
+    /// line, which the preview of `item` is drawn over once kept, unless it
+    /// failed; where they start among the rows.
+    fn reserve(
+        &self,
+        body: &mut Body<'a>,
+        item: &'a ItemRef,
+        dimensions: Option<(u32, u32)>,
+    ) -> Option<Slot<'a>> {
+        let width = u16::try_from(self.width).unwrap_or(u16::MAX);
+        let target = self.previews?.target(item, dimensions, width)?;
+        let slot = Slot {
+            item,
+            offset: body.rows.len(),
+            target,
+        };
+        let rows = usize::from(target.size.height);
+        body.rows.extend(iter::repeat_n(Line::default(), rows));
+        Some(slot)
     }
 
     /// A thread root's last row (design, "Threads"): `💬 N · <time>`, dim,
@@ -1754,6 +1770,41 @@ mod tests {
         assert_eq!(
             (rows, preview),
             (vec!["00:00 alice".to_owned(), line.to_owned()], None)
+        );
+    }
+
+    #[test]
+    fn a_sticker_reserves_its_preview_s_rows_below_its_line() {
+        let mut entry = message(ItemRef::Remote(EventId::new("$sticker:example.org")), 1);
+        if let TimelineEntry::Item(item) = &mut entry {
+            item.content = MessageContent::Sticker {
+                body: "a happy cat".to_owned(),
+                dimensions: Some((512, 512)),
+            };
+        }
+        let entries = [entry];
+        let previews = Previews::new(
+            ImageRows::default(),
+            PreviewEncoder::TmuxSixel(FontSize::new(10, 20)),
+            Limits::DEFAULT,
+            Box::new(|| {}),
+        )
+        .unwrap();
+        let zone = TimeZone::UTC;
+        let render = Render {
+            width: 60,
+            previews: Some(previews.layout()),
+            ..render(&entries, 20, &zone)
+        };
+        // 512 by 512 pixels fit 8 rows of 20 pixels as 160 by 160: 16
+        // columns.
+        let (rows, preview) = with_preview(render.rows(0));
+        assert_eq!(rows.len(), 10);
+        assert_eq!(rows[1], "[sticker: a happy cat]");
+        assert_eq!(preview, Some((2, Size::new(16, 8))));
+        assert_eq!(
+            render.target(0).map(|(_, target)| target.size),
+            Some(Size::new(16, 8))
         );
     }
 

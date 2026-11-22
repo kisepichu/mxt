@@ -51,6 +51,15 @@ marked **Breaking:**.
   and searches keep separate histories of 100 lines each in
   `$XDG_STATE_HOME/mxt/history` (mode 0600), across starts. `<Up>` and
   `<Down>` did nothing on these lines before.
+- Images in the timeline: with `[ui.timeline] images = "on"` (off by
+  default), image messages and stickers show a preview under their line,
+  at most `image_rows` rows tall (8 by default), in the graphics protocol
+  the message view uses. mxt reserves the rows from the image's dimensions
+  before it loads, so the timeline does not jump, fetches only the images
+  on or near the screen, prefers thumbnails, decodes them in the
+  background and keeps a bounded number in memory.
+  `ui.image_preview = "off"` turns previews off too. `<CR>` on a sticker
+  shows its image. mxt 0.1.4 ignores `ui.timeline` with a warning.
 
 ### Changed
 

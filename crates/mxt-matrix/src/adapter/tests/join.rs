@@ -13,7 +13,7 @@ use matrix_sdk_test::{InvitedRoomBuilder, LeftRoomBuilder};
 use mxt_core::{msg::JoinedHow, room::Invite};
 use serde_json::{Value, json};
 use wiremock::{
-    Mock, Request, ResponseTemplate,
+    Mock, ResponseTemplate,
     matchers::{method, path_regex},
 };
 
@@ -154,15 +154,6 @@ impl Adapter {
     /// No room is created: the server checks it when the test ends.
     async fn creates_nothing(&self) {
         self.server.mock_create_room().ok().expect(0).mount().await;
-    }
-
-    /// The requests the server received whose path starts with `prefix`.
-    async fn requests(&self, prefix: &str) -> Vec<Request> {
-        let requests = self.server.server().received_requests().await.unwrap();
-        requests
-            .into_iter()
-            .filter(|request| request.url.path().starts_with(prefix))
-            .collect()
     }
 
     /// The `via` servers of each `/join` request.

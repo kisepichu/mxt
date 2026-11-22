@@ -1,7 +1,7 @@
 //! The `Matrix` handle: runs the tasks that report to the core while the
 //! sync loop runs, and executes matrix effects.
 
-use std::{fmt::Display, path::PathBuf, sync::Arc};
+use std::{fmt::Display, path::PathBuf, sync::Arc, time::Duration};
 
 use matrix_sdk::{
     Client, Room, RoomMemberships,
@@ -71,7 +71,11 @@ impl Matrix {
     ) -> Matrix {
         let settings = client.notification_settings().await;
         let rooms = rooms::Rooms::new(client.clone(), settings.clone(), to_core.clone());
-        let files = Files { download_dir, home };
+        let files = Files {
+            download_dir,
+            home,
+            preview_timeout: PREVIEW_TIMEOUT,
+        };
         let mut tasks = JoinSet::new();
         // First, so the send queue's updates are watched before `watch_sync`
         // enables the queues.
@@ -147,11 +151,12 @@ async fn watch_sync(
     }
 }
 
-/// Where downloads go, and what a leading `~/` in an upload's path stands
-/// for.
+/// Where downloads go, what a leading `~/` in an upload's path stands for,
+/// and how long a timeline preview's fetch may take (`PREVIEW_TIMEOUT`).
 struct Files {
     download_dir: PathBuf,
     home: PathBuf,
+    preview_timeout: Duration,
 }
 
 /// Spawns in `tasks` the effects (`run_effects`) and the task that answers
@@ -343,6 +348,11 @@ async fn run_effects(
                     };
                     running.spawn(answered(&to_core, "Loading the image failed", fetched));
                 }
+                Some(MatrixEffect::FetchPreview { room, item }) => {
+                    let open = ItemTimelines::of(&main, &thread, &room);
+                    let (limit, to_core) = (files.preview_timeout, to_core.clone());
+                    running.spawn(fetch_preview(client.clone(), open, room, item, limit, to_core));
+                }
                 Some(MatrixEffect::FindThread { room, event }) => {
                     running.spawn(find_thread(client.clone(), room, event, to_core.clone()));
                 }
@@ -407,6 +417,43 @@ where
             Err(error) => report(&to_core, what, &error),
         }
     }
+}
+
+/// How long a timeline preview's fetch may take: matrix-sdk downloads media
+/// without a timeout (matrix-sdk `media.rs:818`), and a download that stalls
+/// would hold one of the core's few slots for fetches in flight for good.
+const PREVIEW_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// `MatrixEffect::FetchPreview`: answers `Msg::PreviewFetched` with the
+/// item's image from the timeline that holds it (see `ItemTimelines`), or
+/// `Msg::PreviewFailed` for any failure and when the fetch takes longer
+/// than `limit`, which only `debug` logs: a room can hold many, and the
+/// item shows its text line instead (design, "Logging").
+async fn fetch_preview(
+    client: Client,
+    open: Result<ItemTimelines, Error>,
+    room: RoomId,
+    item: ItemRef,
+    limit: Duration,
+    to_core: UnboundedSender<Msg>,
+) {
+    let fetched = async {
+        let timeline = open?.holding(&item).await;
+        media::fetch_preview(&client, &timeline, &item).await
+    };
+    let fetched = tokio::time::timeout(limit, fetched).await;
+    let answer = match fetched {
+        Ok(Ok(bytes)) => Msg::PreviewFetched { room, item, bytes },
+        Ok(Err(error)) => {
+            debug!(?item, "a timeline preview could not be fetched: {error}");
+            Msg::PreviewFailed { room, item }
+        }
+        Err(_) => {
+            debug!(?item, "a timeline preview timed out after {limit:?}");
+            Msg::PreviewFailed { room, item }
+        }
+    };
+    let _ = to_core.send(answer);
 }
 
 /// Queues the messages and uploads one at a time, in the order they were

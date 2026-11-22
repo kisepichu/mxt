@@ -23,16 +23,34 @@ fn item(n: u32) -> ItemRef {
 
 /// The image message with the event `$<n>` and the image's `dimensions`.
 fn image(n: u32, dimensions: (u32, u32)) -> TimelineEntry {
+    with_content(
+        n,
+        MessageContent::Image {
+            name: format!("photo{n}.png"),
+            size: None,
+            dimensions: Some(dimensions),
+        },
+    )
+}
+
+/// The sticker with the event `$<n>` and the image's `dimensions`.
+fn sticker(n: u32, dimensions: (u32, u32)) -> TimelineEntry {
+    with_content(
+        n,
+        MessageContent::Sticker {
+            body: format!("sticker {n}"),
+            dimensions: Some(dimensions),
+        },
+    )
+}
+
+fn with_content(n: u32, content: MessageContent) -> TimelineEntry {
     TimelineEntry::Item(TimelineItem {
         id: item(n),
         sender: UserId::new("@alice:example.org"),
         sender_name: "Alice".to_owned(),
         timestamp: Timestamp::from_millis(0),
-        content: MessageContent::Image {
-            name: format!("photo{n}.png"),
-            size: None,
-            dimensions: Some(dimensions),
-        },
+        content,
         reply: None,
         reactions: Vec::new(),
         edited: false,
@@ -255,11 +273,13 @@ fn a_panic_while_making_a_preview_fails_that_preview_alone() {
     assert!(matches!(done, Done::Failed(failed) if failed == item(1)));
 }
 
-/// Thirty messages of two rows, with images of four rows at 5, 12 and 25.
+/// Thirty messages of two rows, with images of four rows at 5 and 25 and a
+/// sticker of four rows at 12.
 fn thirty() -> Vec<TimelineEntry> {
     (0..30)
         .map(|n| match n {
-            5 | 12 | 25 => image(n, (100, 50)),
+            5 | 25 => image(n, (100, 50)),
+            12 => sticker(n, (100, 50)),
             _ => message(n),
         })
         .collect()
@@ -449,6 +469,26 @@ fn a_job_whose_item_scrolled_away_is_dropped_before_it_is_decoded() {
     }
     let wanted = Some(vec![item(11), item(12), item(9)]);
     assert_eq!(frame(&app, &mut screen), (Some((10, 11)), wanted));
+}
+
+#[test]
+fn the_jobs_of_a_room_that_is_gone_are_dropped_before_they_are_decoded() {
+    let (mut app, mut screen, _) = twenty_images(Limits {
+        count: 4,
+        ..Limits::DEFAULT
+    });
+    let previews = previews_of(&mut screen);
+    previews.show(item(10), png(100, 50));
+    previews.show(item(11), png(100, 50));
+    assert_eq!(previews.pending.len(), 1);
+    // A frame without a room, which lays out no targets.
+    app.update(Msg::RoomRemoved(RoomId::new(ROOM)));
+    assert_eq!(frame(&app, &mut screen), (None, None));
+    let previews = previews_of(&mut screen);
+    assert!(previews.pending.is_empty());
+    // 10 was with the worker already; 11 is never decoded.
+    settle(previews);
+    assert_eq!(kept(previews), items(&[10]));
 }
 
 /// A preview of one cell, encoded for tmux.

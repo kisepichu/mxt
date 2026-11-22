@@ -1,6 +1,7 @@
 //! Files and images (design, "Files and images"): downloads into
-//! `files.download_dir`, uploads, and the image of the message view. Media
-//! bytes are never logged, and file names only at `debug`.
+//! `files.download_dir`, uploads, the image of the message view and the
+//! previews in the timeline. Media bytes are never logged, and file names
+//! only at `debug`.
 
 use std::{
     fs::{self, OpenOptions},
@@ -16,30 +17,39 @@ use matrix_sdk::{
     attachment::{
         AttachmentConfig, AttachmentInfo, BaseAudioInfo, BaseFileInfo, BaseImageInfo, BaseVideoInfo,
     },
-    media::{MediaFormat, MediaRequestParameters},
+    media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings},
     room::reply::{EnforceThread, Reply},
     ruma::{
         OwnedEventId, UInt,
         events::room::{
-            MediaSource,
-            message::{AddMentions, ImageMessageEventContent, MessageType, ReplyWithinThread},
+            ImageInfo, MediaSource,
+            message::{AddMentions, MessageType, ReplyWithinThread},
         },
     },
 };
 use matrix_sdk_ui::Timeline;
 use mime_guess::{Mime, mime};
-use mxt_core::{msg::Msg, timeline::ItemRef};
+use mxt_core::{
+    msg::Msg,
+    timeline::{ItemRef, MediaBytes},
+};
 use tracing::debug;
 
 use crate::{
     Error,
     error::{timeline_error, without_url},
-    timeline::{enable_sending, message_type},
+    timeline::{enable_sending, message_type, preview_media},
 };
 
-/// The largest image the message view fetches (design, "Images"): 10 MB, in
-/// the binary units the timeline shows sizes in.
+/// The largest image the message view and the timeline's previews fetch
+/// (design, "Images"): 10 MB, in the binary units the timeline shows sizes
+/// in.
 const PREVIEW_LIMIT: u64 = 10 * 1024 * 1024;
+
+/// The size of the server's thumbnail a timeline preview asks for: one
+/// that Synapse makes ahead of time (`DEFAULT_THUMBNAIL_SIZES`), enough for
+/// 8 rows of 40-pixel cells (design, "Images in the timeline").
+const THUMBNAIL_SIZE: (u32, u32) = (640, 480);
 
 /// `Msg::ImageUnavailable`'s reason for an image above `PREVIEW_LIMIT`.
 const TOO_LARGE: &str = "too large to preview";
@@ -97,9 +107,9 @@ pub(crate) async fn download(
 }
 
 /// `MatrixEffect::FetchImage` (design, "Images"): the image's thumbnail
-/// when the event has one, otherwise the file, up to `PREVIEW_LIMIT`;
-/// answered with `Msg::ImageFetched`, or with `Msg::ImageUnavailable` and
-/// the reason.
+/// when the event has one, otherwise the file, up to `PREVIEW_LIMIT`, of
+/// an image message or a sticker; answered with `Msg::ImageFetched`, or
+/// with `Msg::ImageUnavailable` and the reason.
 pub(crate) async fn fetch_image(
     client: &Client,
     timeline: &Timeline,
@@ -109,10 +119,10 @@ pub(crate) async fn fetch_image(
         item,
         reason: reason.to_owned(),
     };
-    let Some(MessageType::Image(image)) = message_type(timeline, &item).await? else {
+    let Some((info, source)) = preview_media(timeline, &item).await? else {
         return Ok(unavailable(item, "the message is not an image"));
     };
-    let Some(source) = preview_source(&image) else {
+    let Some(source) = preview_source(info.as_ref(), source) else {
         return Ok(unavailable(item, TOO_LARGE));
     };
     let bytes = fetch(client, source).await?;
@@ -124,6 +134,61 @@ pub(crate) async fn fetch_image(
         item,
         bytes: bytes.into(),
     })
+}
+
+/// `MatrixEffect::FetchPreview` (design, "Images in the timeline"): the
+/// image of an image message or a sticker, trying in order:
+///
+/// - the event's thumbnail, plain or encrypted, unless its info says it is
+///   above `PREVIEW_LIMIT`; a failure ends there;
+/// - for a plain file, the server's thumbnail of `THUMBNAIL_SIZE`, scaled
+///   and not animated, then the file when that request fails;
+/// - for an encrypted file, whose thumbnail the server cannot make (the SDK
+///   ignores the format for encrypted media, matrix-sdk `media.rs:827-857`),
+///   the file, decrypted.
+///
+/// A file whose info says it is above `PREVIEW_LIMIT` is not fetched, and
+/// bytes above it are refused after the download. Every request goes
+/// through the SDK's media cache.
+pub(crate) async fn fetch_preview(
+    client: &Client,
+    timeline: &Timeline,
+    item: &ItemRef,
+) -> Result<MediaBytes, Error> {
+    let (info, source) = preview_media(timeline, item).await?.ok_or(Error::NoImage)?;
+    let info = info.as_ref();
+    let fits = |size: Option<UInt>| size.is_none_or(|size| fits_preview(size.into()));
+    let thumbnail = info
+        .and_then(|info| {
+            Some((
+                info.thumbnail_source.clone()?,
+                info.thumbnail_info.as_deref(),
+            ))
+        })
+        .filter(|(_, thumbnail)| fits(thumbnail.and_then(|thumbnail| thumbnail.size)));
+    let file_fits = fits(info.and_then(|info| info.size));
+    let bytes = match (thumbnail, &source) {
+        (Some((thumbnail, _)), _) => fetch(client, thumbnail).await?,
+        (None, MediaSource::Plain(_)) => {
+            let (width, height) = THUMBNAIL_SIZE;
+            let settings = MediaThumbnailSettings::new(width.into(), height.into());
+            let format = MediaFormat::Thumbnail(settings);
+            match fetch_as(client, source.clone(), format).await {
+                Ok(bytes) => bytes,
+                Err(error) if file_fits => {
+                    debug!("the server's thumbnail for a preview failed: {error}");
+                    fetch(client, source).await?
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        (None, MediaSource::Encrypted(_)) if file_fits => fetch(client, source).await?,
+        (None, MediaSource::Encrypted(_)) => return Err(Error::TooLargeToPreview),
+    };
+    if !fits_preview(bytes.len() as u64) {
+        return Err(Error::TooLargeToPreview);
+    }
+    Ok(bytes.into())
 }
 
 /// The thread an upload goes into: its root, and its timeline, whose latest
@@ -226,10 +291,17 @@ fn attachment(message: &MessageType) -> Option<(MediaSource, &str)> {
 /// The media's content, decrypted when it is encrypted; from the SDK's media
 /// cache when it is there, and kept there.
 async fn fetch(client: &Client, source: MediaSource) -> Result<Vec<u8>, Error> {
-    let request = MediaRequestParameters {
-        source,
-        format: MediaFormat::File,
-    };
+    fetch_as(client, source, MediaFormat::File).await
+}
+
+/// `fetch` in `format`: the file, or for plain media the server's
+/// thumbnail.
+async fn fetch_as(
+    client: &Client,
+    source: MediaSource,
+    format: MediaFormat,
+) -> Result<Vec<u8>, Error> {
+    let request = MediaRequestParameters { source, format };
     client
         .media()
         .get_media_content(&request, true)
@@ -237,17 +309,15 @@ async fn fetch(client: &Client, source: MediaSource) -> Result<Vec<u8>, Error> {
         .map_err(|error| without_url(error).into())
 }
 
-/// What the message view shows of `image`: the thumbnail when the event has
-/// one, otherwise the file; `None` when the event gives it a size above
-/// `PREVIEW_LIMIT`.
-fn preview_source(image: &ImageMessageEventContent) -> Option<MediaSource> {
-    let info = image.info.as_deref();
+/// What the message view shows of an image with `info` and `source`: the
+/// thumbnail when the event has one, otherwise the file; `None` when the
+/// event gives it a size above `PREVIEW_LIMIT`.
+fn preview_source(info: Option<&ImageInfo>, source: MediaSource) -> Option<MediaSource> {
     let thumbnail = info.and_then(|info| {
         let size = info.thumbnail_info.as_deref().and_then(|thumb| thumb.size);
         Some((info.thumbnail_source.clone()?, size))
     });
-    let (source, size) =
-        thumbnail.unwrap_or_else(|| (image.source.clone(), info.and_then(|info| info.size)));
+    let (source, size) = thumbnail.unwrap_or_else(|| (source, info.and_then(|info| info.size)));
     size.is_none_or(|size| fits_preview(size.into()))
         .then_some(source)
 }
@@ -413,7 +483,7 @@ mod tests {
         OwnedMxcUri,
         events::room::{
             ImageInfo, ThumbnailInfo,
-            message::{AudioInfo, FileInfo, VideoInfo},
+            message::{AudioInfo, FileInfo, ImageMessageEventContent, VideoInfo},
         },
         owned_mxc_uri, uint,
     };
@@ -541,7 +611,7 @@ mod tests {
     }
 
     fn preview_uri(image: &ImageMessageEventContent) -> Option<OwnedMxcUri> {
-        match preview_source(image)? {
+        match preview_source(image.info.as_deref(), image.source.clone())? {
             MediaSource::Plain(uri) => Some(uri),
             MediaSource::Encrypted(_) => unreachable!("the test images are not encrypted"),
         }

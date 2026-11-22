@@ -12,9 +12,12 @@ use matrix_sdk::{
         self, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedUserId,
         events::{
             Mentions,
-            room::message::{
-                FormattedBody, MessageFormat, MessageType, RoomMessageEventContent,
-                RoomMessageEventContentWithoutRelation,
+            room::{
+                ImageInfo, MediaSource,
+                message::{
+                    FormattedBody, MessageFormat, MessageType, RoomMessageEventContent,
+                    RoomMessageEventContentWithoutRelation,
+                },
             },
         },
     },
@@ -408,6 +411,43 @@ pub(crate) async fn message_type(
     timeline: &Timeline,
     item: &ItemRef,
 ) -> Result<Option<MessageType>, Error> {
+    with_event(timeline, item, |event| {
+        let message = event.content().as_message()?;
+        Some(message.msgtype().clone())
+    })
+    .await
+}
+
+/// The image of `item`, for the message view and the timeline's previews:
+/// the info and the source of an image message, with its latest edit
+/// applied, or of a sticker (ruma-events `sticker.rs:59-97`); `None` for
+/// any other item.
+pub(crate) async fn preview_media(
+    timeline: &Timeline,
+    item: &ItemRef,
+) -> Result<Option<(Option<ImageInfo>, MediaSource)>, Error> {
+    with_event(timeline, item, |event| {
+        let content = event.content();
+        if let Some(sticker) = content.as_sticker() {
+            let sticker = sticker.content();
+            return Some((Some(sticker.info.clone()), sticker.source.clone().into()));
+        }
+        match content.as_message()?.msgtype() {
+            MessageType::Image(image) => {
+                Some((image.info.as_deref().cloned(), image.source.clone()))
+            }
+            _ => None,
+        }
+    })
+    .await
+}
+
+/// `f` of the event of `item` in `timeline`.
+async fn with_event<T>(
+    timeline: &Timeline,
+    item: &ItemRef,
+    f: impl FnOnce(&EventTimelineItem) -> T,
+) -> Result<T, Error> {
     let id = item_id(item)?;
     let items = timeline.items().await;
     let event = items
@@ -415,10 +455,7 @@ pub(crate) async fn message_type(
         .rev()
         .find_map(|item| item.as_event().filter(|event| event.identifier() == id));
     let event = event.ok_or_else(|| Error::Timeline(sdk::Error::EventNotInTimeline(id)))?;
-    Ok(event
-        .content()
-        .as_message()
-        .map(|message| message.msgtype().clone()))
+    Ok(f(event))
 }
 
 /// Whether `timeline` has `item` among its items.
@@ -560,9 +597,13 @@ fn other_content(content: &TimelineItemContent) -> Option<MessageContent> {
 fn msg_like_content(kind: &MsgLikeKind) -> MessageContent {
     match kind {
         MsgLikeKind::Message(message) => message_content(message.msgtype(), message.body()),
-        MsgLikeKind::Sticker(sticker) => MessageContent::Sticker {
-            body: sticker.content().body.clone(),
-        },
+        MsgLikeKind::Sticker(sticker) => {
+            let sticker = sticker.content();
+            MessageContent::Sticker {
+                body: sticker.body.clone(),
+                dimensions: dimensions(&sticker.info),
+            }
+        }
         MsgLikeKind::Redacted => MessageContent::Redacted,
         MsgLikeKind::UnableToDecrypt(_) => MessageContent::Undecryptable,
         MsgLikeKind::Poll(_) => MessageContent::Unsupported {
@@ -595,12 +636,10 @@ fn message_content(msgtype: &MessageType, body: &str) -> MessageContent {
         MessageType::ServerNotice(notice) => MessageContent::Notice(RichText::plain(&notice.body)),
         MessageType::Image(image) => {
             let info = image.info.as_deref();
-            let dimension = |side: Option<ruma::UInt>| u32::try_from(u64::from(side?)).ok();
             MessageContent::Image {
                 name: image.filename().to_owned(),
                 size: info.and_then(|info| info.size).map(u64::from),
-                dimensions: info
-                    .and_then(|info| Some((dimension(info.width)?, dimension(info.height)?))),
+                dimensions: info.and_then(dimensions),
             }
         }
         MessageType::File(file) => {
@@ -633,6 +672,13 @@ fn message_content(msgtype: &MessageType, body: &str) -> MessageContent {
         // turn the message into `m.text` for every client.
         _ => MessageContent::Notice(RichText::plain(body)),
     }
+}
+
+/// An image's width and height from its info, when it gives both and they
+/// fit in `u32`.
+fn dimensions(info: &ImageInfo) -> Option<(u32, u32)> {
+    let side = |side: Option<ruma::UInt>| u32::try_from(u64::from(side?)).ok();
+    Some((side(info.width)?, side(info.height)?))
 }
 
 /// The HTML body when there is one, otherwise the plain body. An HTML body

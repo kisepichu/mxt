@@ -108,8 +108,11 @@ pub enum MessageContent {
         size: Option<u64>,
         mime: Option<String>,
     },
+    /// `dimensions` from the sticker's info, for its preview in the
+    /// timeline.
     Sticker {
         body: String,
+        dimensions: Option<(u32, u32)>,
     },
     Redacted,
     Undecryptable,
@@ -129,7 +132,7 @@ impl MessageContent {
             | MessageContent::Notice(rich)
             | MessageContent::Emote(rich) => rich.to_plain(),
             MessageContent::Image { name, .. } | MessageContent::File { name, .. } => name.clone(),
-            MessageContent::Sticker { body } => body.clone(),
+            MessageContent::Sticker { body, .. } => body.clone(),
             MessageContent::Redacted => "(deleted)".into(),
             MessageContent::Undecryptable => "(unable to decrypt)".into(),
             MessageContent::Unsupported { kind } => format!("(unsupported: {kind})"),
@@ -327,6 +330,7 @@ mod tests {
             (
                 MessageContent::Sticker {
                     body: "a happy cat".into(),
+                    dimensions: Some((512, 512)),
                 },
                 "a happy cat",
             ),

@@ -270,9 +270,11 @@ impl Previews {
     /// Before each draw: forgets what the last draw placed, and when the
     /// shown timeline changed, also through none (no room open, a frame
     /// that draws no timeline pane), the failed marks, whose items may be
-    /// wanted again, and the last report: the core drops its queue with
-    /// the open room, so a room opened again reports its wanted list even
-    /// when it is the one reported last.
+    /// wanted again, the jobs waiting for the worker, which are no targets
+    /// of the timeline shown now (a frame without the pane lays out no
+    /// targets, which would drop them), and the last report: the core drops
+    /// its queue with the open room, so a room opened again reports its
+    /// wanted list even when it is the one reported last.
     pub(crate) fn begin_frame(&mut self, app: &App) {
         self.placed.clear();
         let same = match &self.shown {
@@ -282,17 +284,18 @@ impl Previews {
         if !same {
             self.shown = app.shown_timeline();
             self.failed.clear();
+            self.pending.clear();
             self.reported = None;
         }
     }
 
-    /// The targets (design, "Fetching"): `on_pane`, the remote image items
-    /// whose preview has not failed among the entries with a row on the
-    /// pane, all of them, then those of `margin`, the entries around them by
-    /// distance from the pane, until the next one would take the targets
-    /// past the cache's limits, counting a kept preview's bytes, at most
-    /// its estimate (see [`Preview::counted`]), and the estimate of one not
-    /// kept yet.
+    /// The targets (design, "Fetching"): `on_pane`, the remote image and
+    /// sticker items whose preview has not failed among the entries with a
+    /// row on the pane, all of them, then those of `margin`, the entries
+    /// around them by distance from the pane, until the next one would take
+    /// the targets past the cache's limits, counting a kept preview's bytes,
+    /// at most its estimate (see [`Preview::counted`]), and the estimate of
+    /// one not kept yet.
     pub(crate) fn choose_targets<'a>(
         &self,
         on_pane: impl IntoIterator<Item = (&'a ItemRef, Target)>,
@@ -783,9 +786,10 @@ fn prepare(job: Job, encoder: &PreviewEncoder) -> Done {
 /// The worker's answer for `item`: the preview `make` makes, or a failed
 /// preview, logged at `debug` (design, "Logging"). A panic while making it,
 /// a decoder's or an encoder's on an image anyone in the room sent, fails
-/// this preview alone: the panic hook logs it for this thread and leaves
-/// the terminal alone (see `terminal::install_panic_hook`), and the worker
-/// goes on with the next job.
+/// this preview alone: the panic hook logs the panic at `warn` for this
+/// thread and leaves the terminal alone (see
+/// `terminal::install_panic_hook`), this logs its item at `debug`, and the
+/// worker goes on with the next job.
 fn answer(item: ItemRef, make: impl FnOnce() -> Result<Preview, Failure>) -> Done {
     // Nothing `make` touches is used after a panic: the job's file or
     // image is its own, and the encoder is only read.
@@ -799,7 +803,10 @@ fn answer(item: ItemRef, make: impl FnOnce() -> Result<Preview, Failure>) -> Don
             debug!(?item, "a timeline preview could not be encoded: {error}");
             Done::Failed(item)
         }
-        Err(_) => Done::Failed(item),
+        Err(_) => {
+            debug!(?item, "a timeline preview's worker panicked");
+            Done::Failed(item)
+        }
     }
 }
 

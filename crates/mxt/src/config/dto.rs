@@ -44,6 +44,7 @@ pub struct Ui {
     pub image_preview: Option<Spanned<String>>,
     /// One of [`READ_RECEIPTS`].
     pub read_receipts: Option<Spanned<String>>,
+    pub timeline: Timeline,
 }
 
 #[derive(Deserialize, Default)]
@@ -57,6 +58,15 @@ pub struct RoomList {
     pub width: Option<Spanned<i64>>,
     /// One of [`NETWORK_PLACEMENTS`].
     pub network: Option<Spanned<String>>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct Timeline {
+    /// One of [`TIMELINE_IMAGES`].
+    pub images: Option<Spanned<String>>,
+    /// Any integer, so every value outside the range gets the same message.
+    pub image_rows: Option<Spanned<i64>>,
 }
 
 // The values of the settings with fixed values. The settings are strings, so
@@ -89,6 +99,9 @@ pub const READ_RECEIPTS: &[(&str, settings::ReceiptKind)] = &[
     ("public", settings::ReceiptKind::Public),
     ("private", settings::ReceiptKind::Private),
 ];
+
+/// The values of `ui.timeline.images`: whether the timeline shows previews.
+pub const TIMELINE_IMAGES: &[(&str, bool)] = &[("off", false), ("on", true)];
 
 #[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]

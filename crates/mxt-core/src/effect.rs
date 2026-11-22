@@ -183,9 +183,18 @@ pub enum MatrixEffect {
         timeline: TimelineId,
         path: String,
     },
-    /// The item's image for the message view; answered with
-    /// `Msg::ImageFetched` or `Msg::ImageUnavailable`.
+    /// The item's image for the message view, an image message's or a
+    /// sticker's; answered with `Msg::ImageFetched` or
+    /// `Msg::ImageUnavailable`.
     FetchImage {
+        room: RoomId,
+        item: ItemRef,
+    },
+    /// The item's image for its preview in the timeline (design, "Images in
+    /// the timeline"), an image message's or a sticker's, a thumbnail when
+    /// there is one; answered with `Msg::PreviewFetched`, or with
+    /// `Msg::PreviewFailed` for any failure, never `Msg::EffectFailed`.
+    FetchPreview {
         room: RoomId,
         item: ItemRef,
     },
@@ -221,8 +230,8 @@ pub enum MatrixEffect {
 pub enum ViewContent {
     /// The message's text for the scratch editor.
     Text(String),
-    /// An image message: its name, size and dimensions, and the image once
-    /// `UiEffect::ShowImage` brings it.
+    /// An image message or a sticker: its name (a sticker's body), size and
+    /// dimensions, and the image once `UiEffect::ShowImage` brings it.
     Image {
         item: ItemRef,
         name: String,

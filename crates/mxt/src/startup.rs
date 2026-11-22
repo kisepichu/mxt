@@ -7,6 +7,7 @@
 use std::error::Error;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use mxt_core::app::App;
@@ -16,7 +17,7 @@ use mxt_matrix::{
     Client, Homeserver, Matrix, RecoveryStatus, SavedSession, SessionWatch, SyncLoop,
 };
 use mxt_tui::Tui;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tracing::{error, info, warn};
 
 use crate::config::Config;
@@ -246,6 +247,7 @@ async fn run_ui(
         room_list_layout,
         download_dir,
         opener,
+        timeline_images,
         warnings,
         ..
     } = config;
@@ -282,6 +284,15 @@ async fn run_ui(
     };
     tui.set_time_format(time_format);
     tui.set_room_list_layout(room_list_layout);
+    // Woken by the previews' worker; `Tui::enable_previews` does nothing
+    // with `ui.image_preview = "off"`, which turns previews off too.
+    let previews = Arc::new(Notify::new());
+    if let Some(rows) = timeline_images {
+        let wake = Arc::clone(&previews);
+        if let Err(error) = tui.enable_previews(rows, Box::new(move || wake.notify_one())) {
+            warn!("timeline previews are off: their worker thread did not start: {error}");
+        }
+    }
     let outcome = tokio::select! {
         // The adapter's panic first: the panic hook has restored the terminal
         // and printed the panic, and the next frame fails then.
@@ -296,6 +307,7 @@ async fn run_ui(
             from_matrix,
             to_matrix,
             history_writer.sender(),
+            &previews,
         ) => match ended {
             Ok(()) => Outcome::Quit,
             Err(error) => Outcome::Failed(format!("terminal: {error}")),
