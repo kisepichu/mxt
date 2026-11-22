@@ -79,8 +79,9 @@ impl SortKey {
 /// unread by the rule of `RoomFilter::Unread` (any badge), its latest
 /// activity, the time of its newest message, or its `last_read` when it has
 /// none; for any other room its `last_read`. The open room sorts as read: the
-/// later of its `last_read` and its latest activity; its receipt then lifts
-/// it to the top of the read rooms (see `RoomList::clear_unread`).
+/// later of its `last_read` and its latest activity; its receipt, when it has
+/// something to read, lifts it to the top of the read rooms (see
+/// `RoomList::clear_unread`).
 fn news_time(room: &RoomSummary, open: Option<&RoomId>) -> Option<Timestamp> {
     if open == Some(&room.id) {
         room.last_read.max(room.latest_activity)
@@ -336,8 +337,11 @@ impl RoomList {
     /// another room, 1 ms keeping it off a tie with that room: the room tops
     /// the read rooms at once, and the echo keeps it there. A room with
     /// nothing to read keeps its `last_read` and its place: the homeserver
-    /// ignores a receipt that does not move forward, so no echo comes.
-    /// Returns the room's old and new index.
+    /// ignores a receipt that does not move forward, so no echo comes, when
+    /// the user's newest receipt is the same kind of unthreaded receipt mxt
+    /// sends; a room last read with another kind (Element's main-thread
+    /// receipts, the other receipt type) moves once its echo comes (design,
+    /// "Risks"). Returns the room's old and new index.
     pub fn clear_unread(
         &mut self,
         id: &RoomId,

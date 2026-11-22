@@ -243,8 +243,13 @@ as any other room again. When you read a room with something new (its read
 receipt goes out, or `room.mark_read`), it goes to the top of the read rooms
 at once and stays there when the homeserver sends the receipt back. Opening
 a room with nothing new leaves it in place, since homeservers keep a read
-receipt only when it moves forward; a room whose only news is an edit of an
-older message goes to the time of the edit while open, and back afterwards.
+receipt only when it moves forward, when you last read the room in mxt or
+in a client that sends the same kind of read receipt; a room you last read
+in a client that marks only the main timeline read, as Element does, or
+with the other kind of receipt (`read_receipts`) goes to the top of the
+read rooms once the homeserver sends mxt's receipt back. A room whose only
+news is an edit of an older message goes to the time of the edit while
+open, and back afterwards.
 
 `sort = "mentions, notify, unread, read"` puts the rooms that notify you
 after the rooms with mentions and before the rooms whose only news is a dim
