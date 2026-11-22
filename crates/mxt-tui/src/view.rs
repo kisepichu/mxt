@@ -1230,6 +1230,26 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn visual_iw_capital_w_then_y_in_the_message_view_yanks_the_word() {
+        use edtui::clipboard::ClipboardTrait as _;
+        let mut app = app();
+        press(&mut app, "<CR>");
+        app.update(reset("!a:example.org", 1..4));
+        press(&mut app, "<CR>");
+        let register = SharedRegister::default();
+        let content = ViewContent::Text {
+            text: "see foo.bar(baz) now".to_owned(),
+            matches: Vec::new(),
+        };
+        let mut view = View::new(content, register.clone());
+        type_in_view(&mut app, &mut view, "wllviWy");
+        assert_eq!(register.for_editor().get_text(), "foo.bar(baz)");
+        assert!(register.take_unsent().is_some());
+        assert_eq!(view.editor.mode(), EditorMode::Normal);
+        assert!(app.view_open());
+    }
+
+    #[test]
     fn the_message_view_underlines_matches_in_bold_and_a_selection_reverses_them() {
         let mut app = app();
         press(&mut app, "<CR>");

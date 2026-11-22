@@ -1056,6 +1056,17 @@ mod tests {
     }
 
     #[test]
+    fn visual_iw_capital_w_then_y_in_the_composer_yanks_the_word() {
+        let (mut app, mut composers) = composing("see<Space>foo.bar(baz)<Space>now");
+        run(&mut app, &mut composers, "0wllviWy");
+        let composer = composers.get(&main_of("!a:example.org")).unwrap();
+        assert_eq!(composer.mode(), EditorMode::Normal);
+        assert_eq!(composers.register.for_editor().get_text(), "foo.bar(baz)");
+        assert!(composers.register.take_unsent().is_some());
+        assert_eq!(app.focus(), Focus::Composer);
+    }
+
+    #[test]
     fn escape_in_visual_mode_goes_back_to_normal_mode_and_keeps_the_focus() {
         // `composer.visual` and `normal` bind no `<Esc>`: the editor gets it.
         // The cursor stays where `h` moved it in visual mode, not at the

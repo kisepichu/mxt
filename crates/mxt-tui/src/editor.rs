@@ -1059,6 +1059,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn v_and_capital_v_switch_the_selection_kind_from_the_same_anchor() {
+        let (mut editor, register) = with_register("one two\nthree four\nfive");
+        let mut yanked = register.for_editor();
+        // `V` on `two`'s `t`, `j`, then `v`: characters from that `t` to the
+        // cursor.
+        feed(&mut editor, "wVjv");
+        let selection = editor.state.selection.clone().unwrap();
+        assert!(!selection.line_mode);
+        assert_eq!(
+            (selection.start(), selection.end()),
+            (Index2::new(0, 4), Index2::new(1, 4))
+        );
+        // `v` again keeps the selection, and visual mode.
+        feed(&mut editor, "v");
+        assert_eq!(editor.state.selection, Some(selection));
+        assert_eq!(editor.mode(), EditorMode::Visual);
+        feed(&mut editor, "y");
+        assert_eq!(yanked.get_text(), "two\nthree");
+
+        // `v` on the same `t`, `j`, then `V`: both lines whole.
+        feed(&mut editor, "gg0wvjV");
+        let selection = editor.state.selection.clone().unwrap();
+        assert!(selection.line_mode);
+        assert_eq!(
+            (selection.start(), selection.end()),
+            (Index2::new(0, 0), Index2::new(1, 9))
+        );
+        feed(&mut editor, "V");
+        assert_eq!(editor.state.selection, Some(selection));
+        assert_eq!(editor.mode(), EditorMode::Visual);
+    }
+
+    #[test]
     fn a_waiting_key_counts_only_in_normal_and_visual_mode() {
         // The mode changes without a key while `f` or `r` waits: in insert
         // mode the next key is typed.

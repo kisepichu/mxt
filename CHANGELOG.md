@@ -68,6 +68,12 @@ marked **Breaking:**.
   `search.clear_highlight`) hides it until the next search, and opening
   another room does too. Matches in the cut-off part of a tall message are
   not shown; `<CR>` opens the message, whose view underlines them in bold.
+- `viW` in the editors' visual mode selects the inner WORD, as `diW` and
+  `ciW` delete and change it, and `v` and `V` in visual mode switch
+  between a character and a line selection from where it started, the
+  cursor staying, as in vim. These keys did nothing in visual mode before;
+  `v` in a character selection and `V` in a line selection still keep it,
+  where vim leaves visual mode.
 
 ### Changed
 

@@ -613,9 +613,12 @@ supported: `"a`, `"+` and the like do nothing, and the status line says so.
   character after `dF` or `yf` is dropped, as are the one after `r` in
   visual mode and the key after `gf`, `gF`, `gt` or `gT`.
 - The text objects are `i` with `w`, `W`, a quote or a bracket, after `d`
-  and `c` and in visual mode (`viW` excepted). There are no `a` objects and
-  no `yi`: `da(`, `yi"` and visual `a(` do nothing, and the key after them
-  is dropped.
+  and `c` and in visual mode. There are no `a` objects and no `yi`: `da(`,
+  `yi"` and visual `a(` do nothing, and the key after them is dropped.
+- `v` and `V` in visual mode switch to a character or a line selection
+  from where the selection started, the cursor staying, as in vim; `v` in
+  a character selection and `V` in a line selection keep it, where vim
+  leaves visual mode.
 - `w`, `e`, `b`, `dw`, `cw` and `iw` group characters as vim does: kanji,
   hiragana and katakana are separate words, full-width punctuation is
   punctuation, and the ideographic space is a space. Emoji count as
