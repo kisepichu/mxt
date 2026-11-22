@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::io;
 
 use edtui::actions::{DeleteChar, LineBreak, MoveForward, OpenSystemEditor, SwitchMode};
-use edtui::{EditorState, Index2, Lines, RowIndex};
+use edtui::{EditorState, Index2, RowIndex};
 use mxt_core::action::FocusMode;
 use mxt_core::ids::TimelineId;
 use mxt_core::keys::Key;
@@ -68,7 +68,6 @@ impl Composers {
 pub(crate) struct Composer {
     timeline: TimelineId,
     editor: Editor,
-    register: SharedRegister,
     /// Whether the composer is empty as the core knows it: as last reported,
     /// or as `ClearComposer` and `LoadComposer` left it.
     empty: bool,
@@ -80,8 +79,7 @@ impl Composer {
     fn new(timeline: TimelineId, register: SharedRegister) -> Composer {
         Composer {
             timeline,
-            editor: Editor::new("", register.clone()),
-            register,
+            editor: Editor::new("", register),
             empty: true,
             query: None,
         }
@@ -137,10 +135,11 @@ impl Composer {
         });
     }
 
-    /// `ReplayKeys`, reporting after each key.
+    /// `ReplayKeys`, reporting after each key; the editor reports a refused
+    /// register (see [`Editor::feed`]).
     pub(crate) fn replay(&mut self, keys: &[Key], msgs: &mut Vec<Msg>) {
         for &key in keys {
-            self.editor.feed(key);
+            self.editor.feed(key, msgs);
             self.report(msgs);
         }
     }
@@ -188,6 +187,30 @@ impl Composer {
         }
     }
 
+    /// `EmptyComposer`: the text goes as one change that `u` undoes, and
+    /// the register stays as it is: edtui's `DeleteChar` deletes every
+    /// character and line break back from after the last character. The
+    /// mode stays, except that a visual selection is dropped (normal mode),
+    /// and a key waiting for the next one is cancelled. An empty composer
+    /// stays as it is, with no undo state. The core keeps the draft and the
+    /// mentions, which count again when `u` brings their text back, and
+    /// closed its menu.
+    pub(crate) fn empty_text(&mut self, msgs: &mut Vec<Msg>) {
+        if self.is_empty() {
+            return;
+        }
+        self.editor.cancel_pending();
+        let state = &mut self.editor.state;
+        if state.mode == edtui::EditorMode::Visual {
+            state.execute(SwitchMode(edtui::EditorMode::Normal));
+        }
+        let last = state.lines.len() - 1;
+        let characters: usize = state.lines.iter_row().map(Vec::len).sum();
+        state.cursor = Index2::new(last, state.lines.len_col(last).unwrap_or(0));
+        state.execute(DeleteChar(characters + last));
+        self.report(msgs);
+    }
+
     /// `Paste` (see [`Editor::paste`]), reported once. A paste never opens
     /// the mention menu, not even with an `@` token at its end, and closes
     /// an open one; the next key looks for the token again.
@@ -232,8 +255,7 @@ impl Composer {
     /// search.
     fn reset(&mut self, text: &str) {
         let insert = self.editor.state.mode == edtui::EditorMode::Insert;
-        let mut state = EditorState::new(Lines::from(text));
-        state.set_clipboard(self.register.clone());
+        let mut state = self.editor.fresh_state(text);
         if insert {
             state.mode = edtui::EditorMode::Insert;
         }
@@ -344,9 +366,10 @@ mod tests {
 
     use super::*;
     use crate::editor::tests::keys;
-    use edtui::system_editor;
+    use edtui::clipboard::ClipboardTrait as _;
+    use edtui::{Lines, system_editor};
     use mxt_core::action::{Action, Binding};
-    use mxt_core::app::{App, Focus};
+    use mxt_core::app::{App, Focus, StatusKind};
     use mxt_core::effect::{Effect, UiEffect};
     use mxt_core::ids::{RoomId, Timestamp, UserId};
     use mxt_core::keymap::{Keymap, TableId};
@@ -548,6 +571,71 @@ mod tests {
         }
     }
 
+    fn empty_text(composer: &mut Composer) -> Vec<Msg> {
+        let mut msgs = Vec::new();
+        composer.empty_text(&mut msgs);
+        msgs
+    }
+
+    #[test]
+    fn emptying_is_one_undo_state_and_leaves_the_register() {
+        let register = SharedRegister::default();
+        register.copy("yanked".to_owned());
+        register.take_unsent();
+        let mut composer = inserting("hello\nworld", register.clone());
+        assert_eq!(empty_text(&mut composer), [edited(true)]);
+        // Insert mode stays, and nothing goes to the terminal clipboard.
+        assert_eq!(
+            (composer.text().as_str(), composer.mode()),
+            ("", EditorMode::Insert)
+        );
+        assert_eq!(register.take_unsent(), None);
+        assert_eq!(register.for_editor().get_text(), "yanked");
+        // Empty, it adds no undo state, so one `u` brings the text back.
+        assert_eq!(empty_text(&mut composer), []);
+        assert_eq!(type_keys(&mut composer, "<Esc>u"), [edited(false)]);
+        assert_eq!(composer.text(), "hello\nworld");
+    }
+
+    #[test]
+    fn composer_clear_bound_in_normal_empties_the_composer_from_visual_mode() {
+        let clear_key = KeySeq::parse("<C-g>", &leader()).unwrap();
+        let binding = Binding::single(Action::ComposerClear);
+        let keymap = Keymap::new(&leader(), [(TableId::Normal, clear_key, binding)]);
+        let (mut app, mut composers) = composing_with(keymap, "hello");
+        run(&mut app, &mut composers, "v<C-g>");
+        let composer = composers.get(&main_of("!a:example.org")).unwrap();
+        assert_eq!(
+            (composer.text().as_str(), composer.mode()),
+            ("", EditorMode::Normal)
+        );
+        assert!(composer.editor.state.selection.is_none());
+        run(&mut app, &mut composers, "u");
+        assert_eq!(text_of(&composers), "hello");
+    }
+
+    #[test]
+    fn registers_typed_in_the_composer_reach_its_editor_and_a_refusal_the_status_line() {
+        let (mut app, mut composers) = composing("one<C-j>two");
+        composers.register.copy("before".to_owned());
+        composers.register.take_unsent();
+        run(&mut app, &mut composers, r#""_dd"#);
+        assert_eq!(text_of(&composers), "one");
+        assert_eq!(composers.register.take_unsent(), None);
+        // The `a` does not append.
+        run(&mut app, &mut composers, r#""a"#);
+        let status = app.status().unwrap();
+        assert_eq!(
+            (status.kind, status.text.as_str()),
+            (
+                StatusKind::Error,
+                "Only the black hole register \"_ is supported"
+            )
+        );
+        let composer = composers.get(&main_of("!a:example.org")).unwrap();
+        assert_eq!(composer.mode(), EditorMode::Normal);
+    }
+
     #[test]
     fn the_mention_token_starts_after_whitespace() {
         let mut composer = focused("");
@@ -659,6 +747,15 @@ mod tests {
         assert_eq!(composer.key_mode(), EditorMode::Normal);
         type_keys(&mut composer, "x");
         assert_eq!(composer.text(), "xy");
+
+        // And `"_`: the `dd` after the focus writes the register.
+        let register = SharedRegister::default();
+        let mut composer = inserting("abc", register.clone());
+        type_keys(&mut composer, r#"<Esc>"_"#);
+        composer.focus(FocusMode::Keep, &mut Vec::new());
+        assert_eq!(composer.key_mode(), EditorMode::Normal);
+        type_keys(&mut composer, "dd");
+        assert!(register.take_unsent().is_some());
     }
 
     #[test]
@@ -847,8 +944,8 @@ mod tests {
 
     /// Runs `effect` as the terminal does: `FocusComposer`, `ReplayKeys`,
     /// `InsertNewline`, `RequestSubmit`, `ComposerNormal`,
-    /// `DeleteWordBefore` and `ClearComposer` go to the composers, which
-    /// report to `msgs`. The timer it starts.
+    /// `DeleteWordBefore`, `EmptyComposer` and `ClearComposer` go to the
+    /// composers, which report to `msgs`. The timer it starts.
     fn execute(composers: &mut Composers, effect: Effect, msgs: &mut Vec<Msg>) -> Option<TimerId> {
         match effect {
             Effect::Ui(UiEffect::StartTimer { id, .. }) => return Some(id),
@@ -879,6 +976,11 @@ mod tests {
             Effect::Ui(UiEffect::DeleteWordBefore(timeline)) => {
                 if let Some(composer) = composers.get_mut(&timeline) {
                     composer.delete_word_before(msgs);
+                }
+            }
+            Effect::Ui(UiEffect::EmptyComposer(timeline)) => {
+                if let Some(composer) = composers.get_mut(&timeline) {
+                    composer.empty_text(msgs);
                 }
             }
             Effect::Ui(UiEffect::ClearComposer(timeline)) => {

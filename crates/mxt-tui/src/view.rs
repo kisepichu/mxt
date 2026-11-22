@@ -1094,7 +1094,9 @@ pub(crate) mod tests {
             screen.bottom_line()
         );
         // In insert mode `q` is text, not `view.close`.
-        keys("i").into_iter().for_each(|key| view.editor.feed(key));
+        keys("i")
+            .into_iter()
+            .for_each(|key| view.editor.feed(key, &mut Vec::new()));
         screen.draw(&app, Some(&mut view));
         assert!(
             screen.bottom_line().starts_with(" VIEW INSERT "),
@@ -1113,7 +1115,8 @@ pub(crate) mod tests {
             for effect in app.update(Msg::Key { key, editor }) {
                 match effect {
                     Effect::Ui(UiEffect::ReplayKeys(keys)) => {
-                        keys.into_iter().for_each(|key| view.editor.feed(key));
+                        keys.into_iter()
+                            .for_each(|key| view.editor.feed(key, &mut Vec::new()));
                     }
                     Effect::Ui(UiEffect::CloseView) => closed = true,
                     _ => {}
@@ -1140,6 +1143,21 @@ pub(crate) mod tests {
             assert!(type_in_view(&mut app, &mut view, "q"), "{typed}");
             assert!(!app.view_open(), "{typed}");
         }
+    }
+
+    #[test]
+    fn black_hole_yy_in_the_message_view_keeps_the_register() {
+        let mut app = app();
+        press(&mut app, "<CR>");
+        app.update(reset("!a:example.org", 1..4));
+        press(&mut app, "<CR>");
+        let register = SharedRegister::default();
+        let text = ViewContent::Text("message 3".to_owned());
+        let mut view = View::new(text, register.clone());
+        type_in_view(&mut app, &mut view, r#""_yy"#);
+        assert_eq!(register.take_unsent(), None);
+        type_in_view(&mut app, &mut view, "yy");
+        assert!(register.take_unsent().is_some());
     }
 
     #[test]

@@ -256,6 +256,7 @@ use the commands below:
 | `room.mute`, `room.unmute` | `:mute`, `:unmute` |
 | `room.join`, with a `target` | `:join <target>` |
 | `message.react` with an `emoji`, for example `emoji = "thumbsup"` | `:react <emoji>` |
+| `composer.clear`, which empties the composer as one change that `u` undoes and keeps a reply or an edit | |
 | `file.upload` | `:upload <path>` |
 | `account.recover`, which asks for the recovery key | `:recover` |
 | `help.commands`, the command list | `:help` |
@@ -512,6 +513,13 @@ every editor shares, and to the terminal's clipboard
 from the system clipboard; the terminal's own paste goes in as text, line
 breaks included, and runs no keys.
 
+`"_` before a command in normal and visual mode deletes or yanks without
+writing that register or the terminal's clipboard, as vim's black hole
+register does: `"_dd`, `"_diw`, `"_cw`, `"_D`, `"_yy`, and in visual mode
+`"_d` and `"_c`. It counts for that one command. Other registers are not
+supported: `"a`, `"+` and the like do nothing, and the status line says so.
+`"_p` pastes the register as `p` does.
+
 ### Differences from vim
 
 - The editors have no count prefixes. `:` in the composer's normal mode
@@ -542,6 +550,12 @@ breaks included, and runs no keys.
   hiragana and katakana are separate words, full-width punctuation is
   punctuation, and the ideographic space is a space. Emoji count as
   punctuation, where vim gives them a class of their own.
+- Registers: the editors share one register (see above), and `"_` is the
+  only register name. `x` writes no register, so `x` and `"_x` are the
+  same, and `"_p` pastes the register, where vim's black hole register is
+  empty. `.` after `"_dd` deletes into the register, where vim repeats
+  with `"_`; type `"_.` to repeat without writing. The key after `"`, and
+  the keys of the command after `"_`, go to the editor without the keymap.
 - Not handled yet: `x`, `r`, `a`, the arrow keys in insert mode and visual
   selections work on single characters inside a grapheme cluster, so they
   can split an emoji; `e` stops on the last character of a cluster (the

@@ -341,6 +341,54 @@ fn ctrl_w_and_alt_backspace_delete_a_word_in_insert_mode_and_ctrl_w_stays_the_wi
 }
 
 #[test]
+fn composer_clear_empties_the_shown_composer_and_keeps_the_reply_and_its_mentions() {
+    let clear_text = Binding::single(Action::ComposerClear);
+    let mut app = app_with(vec![(TableId::ComposerInsert, seq("<C-g>"), clear_text)]);
+    keys(&mut app, "<CR>");
+    reset(&mut app, vec![msg(1)]);
+    keys(&mut app, "r");
+    members(&mut app, vec![member(ALICE, "Alice")]);
+    query(&mut app, Some("al"));
+    insert(&mut app, "<CR>");
+    // The mention menu's table falls back to `composer.insert`, and the
+    // menu closes.
+    query(&mut app, Some("al"));
+    assert!(menu(&app).is_some());
+    assert_eq!(
+        insert(&mut app, "<C-g>"),
+        vec![ui(UiEffect::EmptyComposer(main_of(C)))]
+    );
+    assert_eq!(menu(&app), None);
+    assert_eq!(app.focus(), Focus::Composer);
+    assert_eq!(app.draft(&main_of(C)), Some(&Draft::Reply { to: event(1) }));
+    // `u` brought the text back: it goes as the reply, with its mention.
+    let mentions = [MentionRef {
+        user: UserId::new(ALICE),
+        text: "@Alice".into(),
+    }];
+    assert_eq!(
+        submit(&mut app, "@Alice hi"),
+        vec![
+            send(
+                0,
+                render_mentions("@Alice hi", &mentions),
+                OutgoingKind::Reply { to: event(1) }
+            ),
+            clear(C),
+        ]
+    );
+}
+
+#[test]
+fn a_refused_register_is_an_error_in_the_status_line() {
+    let mut app = opened();
+    let error = "Only the black hole register \"_ is supported";
+    assert_eq!(app.update(Msg::EditorRefused(error.into())), vec![]);
+    assert_eq!(status(&app), Some(error));
+    assert_eq!(app.status().unwrap().kind, StatusKind::Error);
+}
+
+#[test]
 fn composer_leave_ends_a_reply_without_text() {
     let mut app = opened();
     reset(&mut app, vec![msg(1)]);

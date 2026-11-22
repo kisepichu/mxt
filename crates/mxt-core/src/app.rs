@@ -293,6 +293,7 @@ impl App {
             Msg::Submit { timeline, body } => self.submit(timeline, body, &mut effects),
             Msg::ComposerEdited { timeline, empty } => self.composer_edited(timeline, empty),
             Msg::MentionQuery { timeline, query } => self.mention_query(timeline, query),
+            Msg::EditorRefused(error) => self.set_status(StatusKind::Error, error),
             Msg::MembersLoaded { room, members } => self.members_loaded(room, members),
             Msg::Downloaded { path } => self.downloaded(path, &mut effects),
             Msg::ImageFetched { item, bytes } => self.image_fetched(item, bytes, &mut effects),
@@ -773,6 +774,7 @@ impl App {
             Action::ComposerDeleteWordBefore => {
                 self.composer_effect(UiEffect::DeleteWordBefore, effects);
             }
+            Action::ComposerClear => self.composer_clear(effects),
             Action::CompletionNext => self.move_completion(true),
             Action::CompletionPrev => self.move_completion(false),
             Action::CompletionAccept => self.accept_completion(effects),

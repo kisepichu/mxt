@@ -286,5 +286,10 @@ pub enum UiEffect {
     /// line the line break, as one undo state without a register write;
     /// nothing in other modes.
     DeleteWordBefore(TimelineId),
+    /// Empty the composer as one undo state without a register write,
+    /// keeping its mode (a visual selection is dropped); nothing when it is
+    /// empty. Unlike `ClearComposer`, the editor state stays, so `u` brings
+    /// the text back.
+    EmptyComposer(TimelineId),
     Quit,
 }

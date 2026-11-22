@@ -36,6 +36,14 @@ marked **Breaking:**.
   a default; bind it if yours tells it apart. These keys did nothing in
   insert mode before; `"<C-w>" = "nop"` and `"<A-BS>" = "nop"` in
   `[keymap.composer.insert]` keep that.
+- `"_` before a command in the editors' normal and visual mode (`"_dd`,
+  `"_diw`, `"_x`, `"_cw`, `"_D`, visual `"_d`) deletes or yanks without
+  writing mxt's register or the terminal's clipboard, as vim's black
+  hole register; `.` repeats such a change with a write, so use `"_.`
+  to repeat it without one. Other registers are not supported, and the
+  status line says so. `composer.clear` empties the composer as one
+  change that `u` undoes and keeps a reply or an edit; it has no
+  default key.
 
 ### Changed
 

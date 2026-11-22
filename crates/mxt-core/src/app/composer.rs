@@ -105,8 +105,8 @@ impl App {
     }
 
     /// `composer.send`, `composer.newline`, `composer.external_editor`,
-    /// `composer.normal`, `composer.delete_word_before`: the tui adapter
-    /// acts on the shown timeline's editor.
+    /// `composer.normal`, `composer.delete_word_before`, `composer.clear`:
+    /// the tui adapter acts on the shown timeline's editor.
     pub(super) fn composer_effect(
         &self,
         effect: fn(TimelineId) -> UiEffect,
@@ -127,6 +127,16 @@ impl App {
         if self.focus == Focus::Composer {
             self.editor = Some(EditorMode::Normal);
         }
+    }
+
+    /// `composer.clear`: the tui empties the shown timeline's composer as
+    /// one undo state, wherever the focus is. The draft and its mentions
+    /// stay, so a reply or an edit goes on, and `u` brings back the text
+    /// with its mentions; ending the draft is `composer.cancel`'s job. The
+    /// mention menu closes.
+    pub(super) fn composer_clear(&mut self, effects: &mut Vec<Effect>) {
+        self.composer_effect(UiEffect::EmptyComposer, effects);
+        self.cancel_completion();
     }
 
     /// `Msg::Submit`: a blank body does nothing; otherwise the body is sent
