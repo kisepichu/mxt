@@ -1192,11 +1192,12 @@ pub(crate) mod tests {
         app.update(reset("!a:example.org", 1..4));
         press(&mut app, "<CR>");
         let mut view = View::new(message_3(), SharedRegister::default());
-        // `V`, then characters after all: `<Esc>v`.
-        assert!(!type_in_view(&mut app, &mut view, "wV<Esc>"));
+        // `V`, then characters after all: `<Esc>v`. The cursor stays where
+        // `h` moved it in visual mode, not at the selection's start.
+        assert!(!type_in_view(&mut app, &mut view, "wVh<Esc>"));
         assert!(app.view_open());
         assert_eq!(view.editor.mode(), EditorMode::Normal);
-        assert_eq!(view.editor.state.cursor, Index2::new(0, 8));
+        assert_eq!(view.editor.state.cursor, Index2::new(0, 7));
         assert_eq!(view.editor.state.selection, None);
         assert!(!type_in_view(&mut app, &mut view, "v"));
         assert_eq!(view.editor.mode(), EditorMode::Visual);

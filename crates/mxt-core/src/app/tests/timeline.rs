@@ -489,6 +489,35 @@ fn a_user_binding_of_escape_in_the_view_wins_in_visual_mode() {
 }
 
 #[test]
+fn keys_resolved_after_opening_a_view_from_the_composers_visual_mode_use_normal_mode() {
+    // The tui opens the view's editor in normal mode. `<Esc>` ends the `K`
+    // waiting for `KK` and is resolved afresh in `message_view`: in normal
+    // mode `view.leave` closes the view, where in visual mode it would
+    // leave the editor's visual mode.
+    let mut app = app_with(vec![
+        (
+            TableId::Normal,
+            seq("K"),
+            Binding::single(Action::HelpKeymap),
+        ),
+        (TableId::Normal, seq("KK"), Binding::single(Action::Nop)),
+    ]);
+    keys(&mut app, "<CR>i");
+    let effects = no_timers(keys_in(&mut app, "K<Esc>", Some(EditorMode::Visual)));
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [
+                Effect::Ui(UiEffect::OpenView(_)),
+                Effect::Ui(UiEffect::CloseView)
+            ]
+        ),
+        "{effects:?}"
+    );
+    assert!(!app.view_open());
+}
+
+#[test]
 fn yy_yields_the_plain_text() {
     let mut app = opened();
     let bold = Style {

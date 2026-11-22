@@ -1297,14 +1297,13 @@ macros. An action rather than a narrower table, because `message_view`
 is one table for normal and visual mode (see "Tables and resolution")
 and the user's tables merge over the defaults key by key: a user's
 `<Esc>` in `[keymap.message_view]` replaces `view.leave` in both modes,
-as before, and
-`"<Esc>" = "view.close"` brings back the old behaviour. A table for
-normal mode alone, holding the default `<Esc>`, would have to come
-before `message_view` in the chain and so hide a user's `<Esc>` there, or
-after it as a fallback that no other table pair has. The composer needs
-neither: `composer.visual` and `normal` bind no `<Esc>`, so in its visual
-mode the key goes to edtui, which leaves visual mode, and only
-`composer.normal` binds it (`composer.leave`).
+as before, and `"<Esc>" = "view.close"` brings back the old behaviour.
+A table for normal mode alone, holding the default `<Esc>`, would have
+to come before `message_view` in the chain and so hide a user's `<Esc>`
+there, or after it as a fallback that no other table pair has. The
+composer needs neither: `composer.visual` and `normal` bind no `<Esc>`,
+so in its visual mode the key goes to edtui, which leaves visual mode,
+and only `composer.normal` binds it (`composer.leave`).
 
 `<C-j>` inserts a newline because many terminals cannot tell Shift+Enter apart
 from Enter.

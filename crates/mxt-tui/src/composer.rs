@@ -1058,12 +1058,14 @@ mod tests {
     #[test]
     fn escape_in_visual_mode_goes_back_to_normal_mode_and_keeps_the_focus() {
         // `composer.visual` and `normal` bind no `<Esc>`: the editor gets it.
+        // The cursor stays where `h` moved it in visual mode, not at the
+        // selection's start.
         let (mut app, mut composers) = composing("hello");
         let main = main_of("!a:example.org");
-        run(&mut app, &mut composers, "hV<Esc>");
+        run(&mut app, &mut composers, "hVh<Esc>");
         let composer = composers.get(&main).unwrap();
         assert_eq!(composer.mode(), EditorMode::Normal);
-        assert_eq!(composer.editor.state.cursor, Index2::new(0, 3));
+        assert_eq!(composer.editor.state.cursor, Index2::new(0, 2));
         assert_eq!(composer.editor.state.selection, None);
         assert_eq!(app.focus(), Focus::Composer);
         run(&mut app, &mut composers, "v");
