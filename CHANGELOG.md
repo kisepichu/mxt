@@ -44,6 +44,12 @@ marked **Breaking:**.
   room, which only moved the focus to its timeline), and `]u` is
   `{ action = "room.open", filter = "unread" }`. `[u` is unchanged.
 
+### Security
+
+- The `url` crate is at 2.5.9, which fixes
+  [RUSTSEC-2026-0592](https://rustsec.org/advisories/RUSTSEC-2026-0592)
+  (a stack overflow on nested `blob:` URLs).
+
 ## [0.1.4] - 2026-11-22
 
 ### Added
