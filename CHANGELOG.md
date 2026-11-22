@@ -8,6 +8,19 @@ marked **Breaking:**.
 
 ## [Unreleased]
 
+### Added
+
+- The `notify` sort key for `ui.room_list.sort` puts the rooms that notify
+  you first: unread mentions, bold counts and rooms marked unread, the
+  rooms that `filter = "notify"` takes. With
+  `sort = "mentions, notify, unread, read"`, rooms whose only news is a dim
+  count (muted rooms, rooms set to mentions and keywords only) come after
+  them, and `"]u" = { action = "room.open", filter = "notify" }` in
+  `[keymap.normal]` jumps between the rooms that notify only. As with
+  `mentions` and `unread`, the room you have open sorts as read. `unread`
+  and `filter = "unread"` are unchanged. mxt 0.1.4 skips `notify` with a
+  warning and sorts by the other keys.
+
 ## [0.1.4] - 2026-11-22
 
 ### Added

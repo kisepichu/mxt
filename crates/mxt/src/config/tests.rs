@@ -593,7 +593,7 @@ room_list = { sort = "size", network = "beside" }
                 7,
                 22,
                 "ui.room_list.sort: unknown value \"size\"; expected one of \"mentions\", \
-                 \"unread\", \"recent\", \"read\", \"name\" (ignored)"
+                 \"notify\", \"unread\", \"recent\", \"read\", \"name\" (ignored)"
             ),
             (
                 7,
@@ -633,16 +633,17 @@ fn sort(value: &str) -> (RoomSort, Vec<String>) {
 
 #[test]
 fn room_list_sort_is_a_list_of_keys() {
-    use SortKey::{Mentions, Name, Read, Recent, Unread};
+    use SortKey::{Mentions, Name, Notify, Read, Recent, Unread};
     let list = |keys: &[SortKey]| RoomSort::new(keys.to_vec()).unwrap();
     let unknown = |key: &str| {
         format!(
             "ui.room_list.sort: unknown value {key:?}; expected one of \"mentions\", \
-             \"unread\", \"recent\", \"read\", \"name\" (ignored)"
+             \"notify\", \"unread\", \"recent\", \"read\", \"name\" (ignored)"
         )
     };
     for (value, key) in [
         ("mentions", Mentions),
+        ("notify", Notify),
         ("unread", Unread),
         ("recent", Recent),
         ("read", Read),
@@ -661,6 +662,10 @@ fn room_list_sort_is_a_list_of_keys() {
             "{value}"
         );
     }
+    assert_eq!(
+        sort("mentions, notify, unread, read"),
+        (list(&[Mentions, Notify, Unread, Read]), vec![])
+    );
     // An unknown key is skipped; the others apply.
     assert_eq!(
         sort("Mentions, unread"),

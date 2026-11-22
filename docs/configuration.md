@@ -24,7 +24,7 @@ user_id = "@alice:example.org"
 [ui]
 leader = "<Space>"
 timeoutlen = 1000                                 # milliseconds
-# sort: comma-separated keys from "mentions", "unread", "recent", "read", "name"
+# sort: comma-separated keys from "mentions", "notify", "unread", "recent", "read", "name"
 # width: 12 to 80; network: "inline" | "below"
 room_list = { visible = true, sort = "recent", width = 30, network = "inline" }
 time_format = "%H:%M"                             # strftime, in the local time zone
@@ -121,8 +121,11 @@ names a key twice. The warnings read `ui.room_list.sort: names no sort key
 (ignored)`, `ui.room_list.sort: empty sort key in "mentions,,read"
 (ignored)` and `ui.room_list.sort: "unread" is listed twice (ignored)`.
 mxt 0.1.3, which knows only `"recent"` and `"name"`, reads a list or a new
-key as an unknown value: a warning, and `"recent"` applies. So a
-configuration shared with machines that run 0.1.3 can carry a list.
+key as an unknown value: a warning, and `"recent"` applies. mxt 0.1.4 does
+not know `"notify"`: it skips that key with a warning and applies the
+others, so it sorts `"mentions, notify, unread, read"` as
+`"mentions, unread, read"`. So a configuration shared with machines that
+run 0.1.3 or 0.1.4 can carry a list and the `"notify"` key.
 
 Up to mxt 0.1.2, `<C-i>` and `<Tab>` were two keys, and `<C-i>`, which
 terminals send as `<Tab>`, never arrived; now `<C-i>` is another name for
@@ -218,6 +221,7 @@ network = "below"
 | Key | First |
 |---|---|
 | `"mentions"` | rooms with unread mentions of you: whether a room has any, not how many |
+| `"notify"` | rooms that notify you: unread mentions, bold counts and the manual unread mark, the rooms that `filter = "notify"` takes; not the rooms whose only news is a dim count, such as muted rooms and rooms set to mentions and keywords only |
 | `"unread"` | rooms with unread messages, the rooms that `filter = "unread"` takes: any badge |
 | `"recent"` | the latest activity, newest first; rooms without any last |
 | `"read"` | the rooms you read most recently, by your own latest read receipt in the room outside threads, sent from any device; rooms you never read last |
@@ -229,10 +233,29 @@ last read its rooms. With `"read"`, a room you open moves up when its newest
 message is newer than your last read receipt in it, once the homeserver
 sends the receipt back; opening a room with nothing new leaves it in place,
 since homeservers keep a read receipt only when it moves forward. With
-`"unread"` or `"mentions"`, a room you read moves at once, and the room you
-have open sorts as read: it does not move into or within the unread rooms
-while it is open, though its badge counts new messages, and takes its
-place by its counts again once you open another room.
+`"unread"`, `"notify"` or `"mentions"`, a room you read moves at once, and
+the room you have open sorts as read: it does not move into or within the
+unread rooms while it is open, though its badge counts new messages, and
+takes its place by its counts again once you open another room.
+
+`sort = "mentions, notify, unread, read"` puts the rooms that notify you
+after the rooms with mentions and before the rooms whose only news is a dim
+count, such as busy bridged channels that are muted or set to mentions and
+keywords only. `"unread"`, `filter = "unread"` and the default `]u` and
+`[u` still count dim counts; with these bindings, `]u` and `[u` skip those
+rooms too:
+
+```toml
+[account]
+user_id = "@alice:example.org"
+
+[ui]
+room_list = { sort = "mentions, notify, unread, read" }
+
+[keymap.normal]
+"]u" = { action = "room.open", filter = "notify" }
+"[u" = { action = "room.open", filter = "notify", pick = "prev" }
+```
 
 ## `[files]`
 

@@ -14,6 +14,10 @@ pub enum SortKey {
     /// Rooms with unread mentions first: whether a room has any, not how
     /// many, so a new mention does not reorder the rooms that have some.
     Mentions,
+    /// Rooms that notify first, by the rule of `filter = "notify"`:
+    /// notifications or mentions, or the manual unread mark, so a room whose
+    /// only unread state is a dim count is not among them.
+    Notify,
     /// Rooms with unread messages first, by the rule of `filter = "unread"`.
     Unread,
     /// Latest activity, newest first; rooms without activity last.
@@ -27,19 +31,21 @@ pub enum SortKey {
 }
 
 impl SortKey {
-    pub const ALL: [SortKey; 5] = [
+    pub const ALL: [SortKey; 6] = [
         SortKey::Mentions,
+        SortKey::Notify,
         SortKey::Unread,
         SortKey::Recent,
         SortKey::Read,
         SortKey::Name,
     ];
 
-    /// The key in `ui.room_list.sort`: "mentions", "unread", "recent",
-    /// "read", "name".
+    /// The key in `ui.room_list.sort`: "mentions", "notify", "unread",
+    /// "recent", "read", "name".
     pub fn config_name(self) -> &'static str {
         match self {
             SortKey::Mentions => "mentions",
+            SortKey::Notify => "notify",
             SortKey::Unread => "unread",
             SortKey::Recent => "recent",
             SortKey::Read => "read",
@@ -50,14 +56,15 @@ impl SortKey {
     /// `Less` when `a` comes first. `None` sorts before `Some` and `false`
     /// before `true`, so comparing `b` with `a` puts the newest time and the
     /// rooms with something unread first, and rooms without a time last.
-    /// The room `open` has nothing unread for `Mentions` and `Unread`
-    /// (design, "The open room sorts as read").
+    /// The room `open` has nothing unread for `Mentions`, `Notify` and
+    /// `Unread` (design, "The open room sorts as read").
     fn compare(self, a: &RoomSummary, b: &RoomSummary, open: Option<&RoomId>) -> Ordering {
         let has = |room: &RoomSummary, filter: RoomFilter| {
             open != Some(&room.id) && filter.matches(&room.unread)
         };
         match self {
             SortKey::Mentions => has(b, RoomFilter::Mentions).cmp(&has(a, RoomFilter::Mentions)),
+            SortKey::Notify => has(b, RoomFilter::Notify).cmp(&has(a, RoomFilter::Notify)),
             SortKey::Unread => has(b, RoomFilter::Unread).cmp(&has(a, RoomFilter::Unread)),
             SortKey::Recent => b.latest_activity.cmp(&a.latest_activity),
             SortKey::Read => b.last_read.cmp(&a.last_read),
@@ -127,7 +134,8 @@ pub enum RoomFilter {
     All,
     /// Any badge: messages, notifications or mentions above zero, or marked.
     Unread,
-    /// Notifications or mentions above zero, or marked.
+    /// Notifications or mentions above zero, or marked: the rooms that
+    /// notify. The `notify` sort key uses this rule too.
     Notify,
     /// Mentions above zero.
     Mentions,
@@ -287,8 +295,8 @@ impl RoomList {
     }
 
     /// Optimistic clearing: sets the room's counts to zero (and `marked` to
-    /// false) and places the room again, since the `mentions` and `unread`
-    /// keys depend on them. Returns the room's old and new index.
+    /// false) and places the room again, since the `mentions`, `notify` and
+    /// `unread` keys depend on them. Returns the room's old and new index.
     pub fn clear_unread(&mut self, id: &RoomId) -> Option<(usize, usize)> {
         let (old, mut room) = self.take(id)?;
         room.unread = UnreadCounts::default();
@@ -349,7 +357,7 @@ pub fn resolve_room(
 mod tests {
     use super::*;
     use crate::ids::{RoomId, Timestamp};
-    use crate::room::{NotificationMode, RoomKind, RoomName, RoomSummary, UnreadCounts};
+    use crate::room::{Badge, NotificationMode, RoomKind, RoomName, RoomSummary, UnreadCounts};
 
     fn room(
         id: &str,
@@ -629,6 +637,144 @@ mod tests {
         );
     }
 
+    /// By group under `"mentions, notify, unread, read"`: `!a` has a
+    /// mention; `!b` (notifications) and `!c` (marked unread) notify; `!d`,
+    /// muted, has a dim count only, and the newest message; `!e` is read.
+    /// Each room's latest activity and last read keep the same order, so
+    /// `read` orders the groups alike by either.
+    fn notify_rooms() -> Vec<RoomSummary> {
+        let notifications = UnreadCounts {
+            messages: 2,
+            notifications: 2,
+            ..UnreadCounts::default()
+        };
+        let marked = UnreadCounts {
+            marked: true,
+            ..UnreadCounts::default()
+        };
+        vec![
+            read_at(
+                room("!a:example.org", None, "a", Some(10), mentions(1)),
+                Some(10),
+            ),
+            read_at(
+                room("!b:example.org", None, "b", Some(15), notifications),
+                Some(12),
+            ),
+            read_at(
+                room("!c:example.org", None, "c", Some(25), marked),
+                Some(20),
+            ),
+            RoomSummary {
+                mode: NotificationMode::Mute,
+                ..read_at(
+                    room("!d:example.org", None, "d", Some(60), unread(5)),
+                    Some(50),
+                )
+            },
+            read_at(
+                room("!e:example.org", None, "e", Some(40), unread(0)),
+                Some(40),
+            ),
+        ]
+    }
+
+    fn notify_first() -> RoomSort {
+        RoomSort::new(vec![
+            SortKey::Mentions,
+            SortKey::Notify,
+            SortKey::Unread,
+            SortKey::Read,
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn notify_puts_the_rooms_that_notify_before_the_rooms_with_only_a_dim_count() {
+        // Without `notify`, the muted room shares the unread group.
+        assert_eq!(
+            order(
+                &[SortKey::Mentions, SortKey::Unread, SortKey::Read],
+                notify_rooms()
+            ),
+            [
+                "!a:example.org",
+                "!d:example.org",
+                "!c:example.org",
+                "!b:example.org",
+                "!e:example.org"
+            ]
+        );
+        let mut l = list(notify_first(), notify_rooms());
+        assert_eq!(
+            ids(&l),
+            [
+                "!a:example.org",
+                "!c:example.org",
+                "!b:example.org",
+                "!d:example.org",
+                "!e:example.org"
+            ]
+        );
+        // The dim count is still unread, with its dim badge.
+        let muted = l.get(&RoomId::new("!d:example.org")).unwrap().clone();
+        assert!(RoomFilter::Unread.matches(&muted.unread));
+        assert_eq!(Badge::from_counts(&muted.unread), Some(Badge::Messages(5)));
+        // Unmuted, its next message notifies: the room moves among the rooms
+        // that notify.
+        let notifying = RoomSummary {
+            mode: NotificationMode::Default,
+            unread: UnreadCounts {
+                messages: 6,
+                notifications: 1,
+                ..UnreadCounts::default()
+            },
+            latest_activity: Some(Timestamp::from_millis(70)),
+            ..muted
+        };
+        assert_eq!(l.upsert(notifying), (Some(3), 1));
+        assert_eq!(
+            ids(&l),
+            [
+                "!a:example.org",
+                "!d:example.org",
+                "!c:example.org",
+                "!b:example.org",
+                "!e:example.org"
+            ]
+        );
+    }
+
+    #[test]
+    fn under_notify_the_open_room_sorts_as_read_until_another_room_opens() {
+        let mut l = list(notify_first(), notify_rooms());
+        let b = RoomId::new("!b:example.org");
+        assert_eq!(l.open(&b), Some(4));
+        assert_eq!(
+            ids(&l),
+            [
+                "!a:example.org",
+                "!c:example.org",
+                "!d:example.org",
+                "!e:example.org",
+                "!b:example.org"
+            ]
+        );
+        // The filters still see its notifications.
+        assert!(RoomFilter::Notify.matches(&l.get(&b).unwrap().unread));
+        l.open(&RoomId::new("!e:example.org"));
+        assert_eq!(
+            ids(&l),
+            [
+                "!a:example.org",
+                "!c:example.org",
+                "!b:example.org",
+                "!d:example.org",
+                "!e:example.org"
+            ]
+        );
+    }
+
     #[test]
     fn rooms_every_key_leaves_tied_go_by_name_then_by_room_id() {
         let rooms = vec![
@@ -663,6 +809,11 @@ mod tests {
 
     #[test]
     fn every_sort_key_has_a_name_of_its_own() {
+        // In this order in the loader's warning for an unknown key.
+        assert_eq!(
+            SortKey::ALL.map(SortKey::config_name),
+            ["mentions", "notify", "unread", "recent", "read", "name"]
+        );
         for key in SortKey::ALL {
             let named: Vec<SortKey> = SortKey::ALL
                 .into_iter()
