@@ -24,11 +24,13 @@ pub(super) enum RoomSwitch {
 
 impl App {
     /// The cursor stays on its room when the order changes, but for the
-    /// open room's first move (see `rooms_moved`).
+    /// open room's first move (see `rooms_moved`), which only an update of
+    /// the open room itself makes.
     pub(super) fn upsert_room(&mut self, summary: RoomSummary) {
+        let open = self.open_room.as_ref() == Some(&summary.id);
         let (old, new) = self.rooms.upsert(summary);
-        let before = self.rooms.len() - usize::from(old.is_none());
-        self.rooms_moved(before, |row| Some(follow(row, old, new)));
+        let open_room_moved = open && old.is_some_and(|old| old != new);
+        self.rooms_moved(open_room_moved, |row| Some(follow(row, old, new)));
     }
 
     /// Optimistic clearing (design, "Matrix adapter"): the room's counts go
@@ -39,28 +41,32 @@ impl App {
     /// room but for the open room's first move (see `rooms_moved`).
     pub(super) fn clear_room_unread(&mut self, id: &RoomId, receipt_at: Option<Timestamp>) {
         if let Some((old, new)) = self.rooms.clear_unread(id, receipt_at) {
-            self.rooms_moved(self.rooms.len(), |row| Some(follow(row, Some(old), new)));
+            let open_room_moved = old != new && self.open_room.as_ref() == Some(id);
+            self.rooms_moved(open_room_moved, |row| Some(follow(row, Some(old), new)));
         }
     }
 
-    /// The cursor after a change of the list, which had `before` rooms:
-    /// `row_after` takes a row before the change to the row of the same
-    /// room after it, or, for a removed room, of the room now in its place
-    /// (`None` when the list is empty). The cursor stays on its room, except
-    /// on the open room's first move with the cursor that opening put on it
-    /// (design, "Room list"): the room's row changed, for whatever reason,
-    /// so the cursor goes to the room that was next to it before the
+    /// The cursor after a change of the list: `row_after` takes a row
+    /// before the change to the row of the same room after it, or, for a
+    /// removed room, of the room now in its place (`None` when the list is
+    /// empty). The cursor stays on its room, except on the open room's
+    /// first move with the cursor that opening put on it (design, "Room
+    /// list"): `open_room_moved` says that the change was one of the open
+    /// room itself (its opening, its clearing, its update) and changed its
+    /// row, so the cursor goes to the room that was next to it before the
     /// change, the one after it or, when it was the last, the one before
-    /// it, and stays on it when it was the only room. Either way the cursor
-    /// follows its room from then on.
-    fn rooms_moved(&mut self, before: usize, row_after: impl Fn(usize) -> Option<usize>) {
+    /// it. Such a change keeps the list's length. A change of another room
+    /// that shifts the open room is not its move: the cursor follows it,
+    /// and the rule stays. Either way the cursor follows its room from then
+    /// on.
+    fn rooms_moved(&mut self, open_room_moved: bool, row_after: impl Fn(usize) -> Option<usize>) {
         let Some(cursor) = self.room_cursor else {
             return;
         };
         let after = row_after(cursor);
-        self.room_cursor = if self.cursor_on_unmoved_open_room && after != Some(cursor) {
+        self.room_cursor = if self.cursor_on_unmoved_open_room && open_room_moved {
             self.cursor_on_unmoved_open_room = false;
-            next_to(cursor, before).map_or(after, row_after)
+            next_to(cursor, self.rooms.len()).map_or(after, row_after)
         } else {
             after
         };
@@ -77,12 +83,12 @@ impl App {
     }
 
     /// A cursor on the removed room moves to the room now at its index. A
-    /// room removed above the open room moves that room (see
-    /// `rooms_moved`).
+    /// room removed above the open room shifts it without moving it, so the
+    /// cursor follows it (see `rooms_moved`).
     pub(super) fn remove_room(&mut self, id: RoomId, effects: &mut Vec<Effect>) {
         if let Some((index, _)) = self.rooms.remove(&id) {
             let last = self.rooms.len().checked_sub(1);
-            self.rooms_moved(self.rooms.len() + 1, |row| match row.cmp(&index) {
+            self.rooms_moved(false, |row| match row.cmp(&index) {
                 Ordering::Less => Some(row),
                 Ordering::Greater => Some(row - 1),
                 Ordering::Equal => last.map(|last| row.min(last)),
@@ -142,11 +148,13 @@ impl App {
     /// timeline. Both rooms move when the sort keys depend on their counts,
     /// or under `read` on their `last_read` and latest activity, since the
     /// open room sorts as read. Opening puts the cursor on the room at
-    /// `index`, before the rooms move, so a move of the room as it opens is
-    /// its first (see `rooms_moved`). An open room only gets the focus. This
-    /// is the one place where the open room becomes another room, so a
-    /// recorded switch puts the position before it into the jump list
-    /// whichever action or answer opens the room (design, "Jump list").
+    /// `index`, before the rooms move, so the opened room's own move as it
+    /// opens is its first, while the previously open room going back to
+    /// its place only shifts it (see `rooms_moved`). An open room only gets
+    /// the focus. This is the one place where the open room becomes another
+    /// room, so a recorded switch puts the position before it into the jump
+    /// list whichever action or answer opens the room (design, "Jump
+    /// list").
     pub(super) fn open_at(&mut self, index: usize, switch: RoomSwitch, effects: &mut Vec<Effect>) {
         let id = &self.rooms.rooms()[index].id;
         if self.open_room.as_ref() != Some(id) {
@@ -158,11 +166,12 @@ impl App {
             if let Some(previous) = self.open_room.replace(id.clone()) {
                 effects.push(Effect::Matrix(MatrixEffect::UnsubscribeTimeline(previous)));
             }
-            let moves = self.rooms.open(&id);
+            let [previous, opened] = self.rooms.open(&id);
             self.room_cursor = Some(index);
             self.cursor_on_unmoved_open_room = true;
-            self.rooms_moved(self.rooms.len(), |row| {
-                let moved = moves.into_iter().flatten();
+            let open_room_moved = opened.is_some_and(|(old, new)| old != new);
+            self.rooms_moved(open_room_moved, |row| {
+                let moved = [previous, opened].into_iter().flatten();
                 Some(moved.fold(row, |row, (old, new)| follow(row, Some(old), new)))
             });
             effects.push(Effect::Matrix(MatrixEffect::SubscribeTimeline(id)));

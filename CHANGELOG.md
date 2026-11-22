@@ -52,16 +52,16 @@ marked **Breaking:**.
   `{ action = "room.open", filter = "unread" }`. `[u` is unchanged.
 - Opening a room, with `<CR>`, `]u`, `[u`, the picker, `:open`, `:join` or
   the jump list, puts the room list's cursor on it, and the first time
-  that room then moves in the list while the cursor is still on it, for
-  any reason (it sorts as read as it opens, you read it, a message arrives
-  in it, other rooms move past it), the cursor goes to the room that came
-  right after it, or to the room before it if it was the last (it stays
-  when the list has no other room), as in a mail inbox: with
-  `sort = "mentions, notify, unread, read"`, `<CR>` or `]u` opens the top
-  room, it drops out of its group, and the cursor is on the next one.
-  After that the cursor stays on its room as rooms move, and so it does
-  when you moved the cursor off the room before it moved. Before, the
-  cursor went along with the room you opened.
+  that room then moves in the list because of a change to it, while the
+  cursor is still on it (it sorts as read as it opens, you read it, a
+  message arrives in it), the cursor goes to the room that came right
+  after it, or to the room before it if it was the last, as in a mail
+  inbox: with `sort = "mentions, notify, unread, read"`, `<CR>` or `]u`
+  opens the top room, it drops out of its group, and the cursor is on the
+  next one. Another room passing the open room does not count: the cursor
+  stays on the open room. After that the cursor stays on its room as rooms
+  move, and so it does when you moved the cursor off the room before it
+  moved. Before, the cursor went along with the room you opened.
 
 ### Security
 

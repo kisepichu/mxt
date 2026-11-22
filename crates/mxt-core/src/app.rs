@@ -149,9 +149,10 @@ pub struct App {
     /// arrive in any order at startup leave it at the top.
     room_cursor: Option<usize>,
     /// Whether opening put the cursor on the open room and that room has
-    /// not moved since, with the cursor still on it: no cursor action took
-    /// the cursor to another row. The open room's first move then takes the
-    /// cursor to the room next to it, and ends this (design, "Room list").
+    /// not moved since by a change of its own, with the cursor still on it:
+    /// no cursor action took the cursor to another row. The open room's
+    /// first such move then takes the cursor to the room next to it, and
+    /// ends this; other rooms shifting it do not (design, "Room list").
     cursor_on_unmoved_open_room: bool,
     open_room: Option<RoomId>,
     /// The shown timeline: the open room's main timeline, or the thread

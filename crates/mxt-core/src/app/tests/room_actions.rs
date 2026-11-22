@@ -376,10 +376,21 @@ fn under_mentions_the_open_room_sorts_as_read_until_another_room_opens() {
         no_timers(keys(&mut app, "]u")),
         vec![unsubscribe(C), subscribe(A)]
     );
-    // !c goes back to the top by its mention, which moves !a down a row,
-    // its first move: the cursor goes to !b, the room after it.
+    // !c goes back to the top by its mention, which shifts !a down a row:
+    // a change of !c, not a move of !a, so the cursor stays on !a.
     assert_eq!(order(&app), [C, A, B]);
-    assert_eq!((cursor_id(&app), app.room_cursor()), (B, Some(2)));
+    assert_eq!((cursor_id(&app), app.room_cursor()), (A, Some(1)));
+    // A rename moves !a past !b, its first move: the cursor goes to !b,
+    // the room after it.
+    app.update(Msg::RoomUpserted(RoomSummary {
+        name: RoomName {
+            network: None,
+            room: "z".into(),
+        },
+        ..room(A, 10, 1)
+    }));
+    assert_eq!(order(&app), [C, B, A]);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (B, Some(1)));
 }
 
 #[test]
@@ -891,18 +902,20 @@ fn the_last_room_moving_puts_the_cursor_on_the_room_before_it() {
 }
 
 #[test]
-fn the_only_room_keeps_the_cursor_when_it_moves() {
+fn a_room_added_above_the_open_room_leaves_the_cursor_on_it() {
+    let e = "!e:example.org";
     let mut app = read_alone();
-    for other in [D, C, B] {
-        app.update(Msg::RoomRemoved(id(other)));
-    }
-    keys(&mut app, "<CR>"); // open !a
-    assert_eq!(shown(&mut app, A, 1, 50), vec![receipt(A, 1)]);
-    assert_eq!((cursor_id(&app), app.room_cursor()), (A, Some(0)));
-    // A room joined since, above it, moves it down a row.
-    app.update(Msg::RoomUpserted(read_at(room(D, 90, 0), 90)));
-    assert_eq!(order(&app), [D, A]);
-    assert_eq!((cursor_id(&app), app.room_cursor()), (A, Some(1)));
+    keys(&mut app, "j<CR>"); // open !a, row 1
+    // A room joined since, read later, goes to the top: a change of another
+    // room, so the cursor stays on !a.
+    app.update(Msg::RoomUpserted(read_at(room(e, 90, 0), 90)));
+    assert_eq!(order(&app), [e, D, A, C, B]);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (A, Some(2)));
+    // Its receipt is then its first move: the cursor goes to !c, the room
+    // after it.
+    read_open(&mut app, true, A, 1, 50);
+    assert_eq!(order(&app), [A, e, D, C, B]);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (C, Some(3)));
 }
 
 #[test]
@@ -944,11 +957,17 @@ fn any_first_move_of_the_open_room_puts_the_cursor_on_the_room_after_it() {
             "{update:?}"
         );
     }
-    // A message in !b lifts it above !a, which moves !a down a row.
+    // A message in !b lifts it past !a, which shifts !a down a row: a
+    // change of !b, not a move of !a, so the cursor stays on !a.
     let mut app = read_alone();
     keys(&mut app, "j<CR>");
     app.update(Msg::RoomUpserted(read_at(room(B, 80, 1), 20)));
     assert_eq!(order(&app), [B, D, A, C]);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (A, Some(2)));
+    // Its receipt is then its first move: the cursor goes to !c, the room
+    // after it.
+    read_open(&mut app, true, A, 1, 50);
+    assert_eq!(order(&app), [A, B, D, C]);
     assert_eq!((cursor_id(&app), app.room_cursor()), (C, Some(3)));
     // Another room under the cursor, read elsewhere, takes the cursor along.
     let mut app = inbox(vec![], 60);
@@ -959,24 +978,28 @@ fn any_first_move_of_the_open_room_puts_the_cursor_on_the_room_after_it() {
 }
 
 #[test]
-fn rooms_removed_next_to_the_open_room_leave_the_cursor_in_the_list() {
+fn rooms_removed_next_to_the_open_room_leave_the_cursor_on_it() {
     let mut app = read_alone();
-    keys(&mut app, "j<CR>"); // open !a, row 1
-    // The room after it leaves; !a stays in place.
-    app.update(Msg::RoomRemoved(id(C)));
-    assert_eq!(order(&app), [D, A, B]);
-    assert_eq!((cursor_id(&app), app.room_cursor()), (A, Some(1)));
-    // The room above it leaves, which moves it up a row: the cursor goes to
-    // the room after it now.
+    keys(&mut app, "jj<CR>"); // open !c, row 2
+    // The room after it leaves, then the room above it, which shifts it up
+    // a row: changes of other rooms, so the cursor stays on !c.
+    app.update(Msg::RoomRemoved(id(B)));
+    assert_eq!(order(&app), [D, A, C]);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (C, Some(2)));
     app.update(Msg::RoomRemoved(id(D)));
-    assert_eq!(order(&app), [A, B]);
-    assert_eq!((cursor_id(&app), app.room_cursor()), (B, Some(1)));
-    // The open room last: the room before it leaves, which moves it up a
-    // row, and with no room left before it the cursor stays on it.
-    keys(&mut app, "<C-w>h<CR>"); // open !b
-    app.update(Msg::RoomRemoved(id(A)));
-    assert_eq!(order(&app), [B]);
-    assert_eq!((cursor_id(&app), app.room_cursor()), (B, Some(0)));
+    assert_eq!(order(&app), [A, C]);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (C, Some(1)));
+    // Its receipt is then its first move: it was last, so the cursor goes
+    // to !a, the room before it.
+    read_open(&mut app, true, C, 2, 30);
+    assert_eq!(order(&app), [C, A]);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (A, Some(1)));
+    // The open room last: the room before it leaves, and the cursor stays
+    // on it.
+    keys(&mut app, "<C-w>h<CR>"); // open !a
+    app.update(Msg::RoomRemoved(id(C)));
+    assert_eq!(order(&app), [A]);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (A, Some(0)));
 }
 
 #[test]

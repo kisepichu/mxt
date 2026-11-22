@@ -487,12 +487,16 @@ working"). A user's own `]u` binding is unaffected.
 The rule (the supervisor's, 2026-11-22, replacing the earlier ones that
 kept the cursor's row): opening a room by any path puts the room list's
 cursor on it; the first time the open room then moves in the list (its
-index changes, for any reason) while the cursor is still on it, the
-cursor goes to the room that came right after it in the order before
-the move, the room before it when it was last, and stays when the list
-has only that room; from then on the cursor follows the room it is on.
-A cursor moved off the open room before it moved follows its room. No
-row is kept anywhere.
+index changes because of a change to the room itself: its opening, its
+receipt or `room.mark_read`, an update of it) while the cursor is still
+on it, the cursor goes to the room that came right after it in the order
+before the move, the room before it when it was last, and stays when the
+list has only that room; from then on the cursor follows the room it is
+on. Another room shifting the open room (its update passing it, a room
+added or removed above it, the previously open room placed again during
+an open) is not the open room's move: the cursor follows the open room
+and the rule stays. A cursor moved off the open room before it moved
+follows its room. No row is kept anywhere.
 
 - [ ] `rooms.rs`: `RoomList::open` places the previously open room again
   with no room open, then the opened room, and returns both moves (old
@@ -501,12 +505,14 @@ row is kept anywhere.
   the open room and it has not moved since". `open_at` puts the cursor
   on the room at `index` and sets the flag before it applies the two
   moves. One function applies every change of the list to the cursor
-  (moves by `follow`, removals): the cursor follows its room, except when
-  the flag is set and the cursor's row changes; then the flag clears and
-  the cursor goes to the room next to it before the change, tracked
-  through the same change. `place_room_cursor` clears the flag when the
-  row changes; the removal of the open room clears it. Doc comments name
-  the design's rule ("Room list").
+  (moves by `follow`, removals), told whether the change was one of the
+  open room that changed its index (the second step of an open, the open
+  room's upsert or optimistic clearing): the cursor follows its room,
+  except when the flag is set and the change is such a move; then the
+  flag clears and the cursor goes to the room next to it before the
+  change, tracked through the same change. `place_room_cursor` clears the
+  flag when the row changes; the removal of the open room clears it. Doc
+  comments name the design's rule ("Room list").
 - [ ] Tests in `app/tests/room_actions.rs`, with the owner's
   `sort = "mentions, notify, unread, read"` where it matters: `<CR>` on
   the top room, which sorts as read as it opens, puts the cursor on the
@@ -517,29 +523,33 @@ row is kept anywhere.
   `sort = "read"`: `<CR>` on an unread room at row k, then its receipt
   or `room.mark_read` lifting it to row 0, puts the cursor on the room
   from row k+1, still on row k+1, which `<CR>` opens; the last room
-  moving puts the cursor on the room before it; the only room keeps the
-  cursor; a cursor moved off the open room first (also off and back)
-  follows its room, a change of focus alone does not count; an update
-  of the open room (a receipt from elsewhere, a new message) and another
-  room moving past it are first moves too; rooms removed next to the open
-  room and the open room removed leave the cursor in the list; with the
-  terminal unfocused, the room left unread goes back among the unread
-  rooms and the cursor goes to the room after the newly opened one.
+  moving puts the cursor on the room before it; a cursor moved off the
+  open room first (also off and back) follows its room, a change of focus
+  alone does not count; an update of the open room (a receipt from
+  elsewhere, a new message, a rename) is a first move too; another
+  room's message lifting it past the open room, a room added above it,
+  rooms removed above or after it and the previously open room going
+  back above it as it opens leave the cursor on the open room, and the
+  open room's own later move then takes the cursor to the room after it;
+  the open room removed leaves the cursor in the list; with the terminal
+  unfocused, the room left unread goes back among the unread rooms and
+  the cursor goes to the room after the newly opened one.
 - [ ] Docs: `docs/keys.md`, "The screen": the rule in user terms, with
-  the inbox walk under the owner's sort and under `read` alone.
+  the inbox walk under the owner's sort and under `read` alone, and that
+  another room passing the open room does not count.
 - [ ] CHANGELOG `### Changed`: "Opening a room, with `<CR>`, `]u`, `[u`,
   the picker, `:open`, `:join` or the jump list, puts the room list's
   cursor on it, and the first time that room then moves in the list
-  while the cursor is still on it, for any reason (it sorts as read as it
-  opens, you read it, a message arrives in it, other rooms move past it),
-  the cursor goes to the room that came right after it, or to the room
-  before it if it was the last (it stays when the list has no other
-  room), as in a mail inbox: with
+  because of a change to it, while the cursor is still on it (it sorts as
+  read as it opens, you read it, a message arrives in it), the cursor
+  goes to the room that came right after it, or to the room before it if
+  it was the last, as in a mail inbox: with
   `sort = "mentions, notify, unread, read"`, `<CR>` or `]u` opens the top
   room, it drops out of its group, and the cursor is on the next one.
-  After that the cursor stays on its room as rooms move, and so it does
-  when you moved the cursor off the room before it moved. Before, the
-  cursor went along with the room you opened."
+  Another room passing the open room does not count: the cursor stays on
+  the open room. After that the cursor stays on its room as rooms move,
+  and so it does when you moved the cursor off the room before it moved.
+  Before, the cursor went along with the room you opened."
 
 ## Task G1b: Timeline previews, the tui part
 

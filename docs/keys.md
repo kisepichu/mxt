@@ -18,21 +18,23 @@ mxt 0.1.2 did nothing. The leader and the longer bindings work as before.
   unless it says otherwise (see [Sort keys](configuration.md#sort-keys)).
   Opening a room, with `<CR>` or any other way of opening it (`]u`, `[u`,
   the room picker, `:open`, `:join`, the jump list), puts the cursor on
-  it. The first time that room then moves in the list while the cursor is
-  still on it, for any reason (it sorts as read as it opens, you read it,
-  a message arrives in it, other rooms move past it), the cursor goes to
-  the room that came right after it, or to the room before it if it was
-  the last (it stays when the list has no other room), as in a mail
-  inbox: with
+  it. The first time that room then moves in the list because of a change
+  to it, while the cursor is still on it (it sorts as read as it opens,
+  you read it, a message arrives in it, it is renamed), the cursor goes
+  to the room that came right after it, or to the room before it if it
+  was the last, as in a mail inbox: with
   `sort = "mentions, notify, unread, read"`, `<CR>` or `]u` opens the top
   room, it drops out of its group, and the cursor is on the next one; with
   `sort = "read"`, `<CR>` on an unread room leaves it in place, reading it
   lifts it to the top, and the cursor goes to the room that was right
-  below it. After that the cursor stays on its room as rooms move, and so
-  it does when you moved the cursor off the open room before the room
-  moved, also if you moved it back. A room you left unread (the terminal
-  had no focus) goes back to its place among the unread rooms once you
-  open another. `]u`, `[u` and the room picker follow the list's order.
+  below it. Another room passing the open room does not count, nor does a
+  room added or removed above it or the room you left going back above
+  it: the cursor stays on the open room until the open room itself moves.
+  After that the cursor stays on its room as rooms move, and so it does
+  when you moved the cursor off the open room before the room moved, also
+  if you moved it back. A room you left unread (the terminal had no focus)
+  goes back to its place among the unread rooms once you open another.
+  `]u`, `[u` and the room picker follow the list's order.
 - The status line at the bottom shows the mode, a count or keys typed so far,
   the open room, the last message or a question, and on the right the sync
   state: `starting` before the first sync, then `synced`, `offline` (no
