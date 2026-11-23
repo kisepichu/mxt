@@ -148,8 +148,8 @@ pub struct TimelineItem {
     pub timestamp: Timestamp,
     pub content: MessageContent,
     pub reply: Option<ReplyPreview>,
-    /// In the SDK's order, which is the order the timeline draws them in
-    /// under the message and `message.react`'s `index` counts in.
+    /// One group per key, in the SDK's order. Read them through
+    /// [`TimelineItem::shown_reactions`].
     pub reactions: Vec<ReactionGroup>,
     pub edited: bool,
     /// `Some` for local echoes.
@@ -157,6 +157,16 @@ pub struct TimelineItem {
     /// `Some` for the root of a thread. No item of the main timeline is a
     /// reply in a thread: the SDK leaves them out of it.
     pub thread_summary: Option<ThreadSummary>,
+}
+
+impl TimelineItem {
+    /// The reactions in the order the timeline shows them under the
+    /// message, the user's own among them: the SDK's order. The single
+    /// source of that order: the timeline draws them in it, and the emoji
+    /// picker lists them first in it.
+    pub fn shown_reactions(&self) -> &[ReactionGroup] {
+        &self.reactions
+    }
 }
 
 /// One entry of the timeline, in the SDK's order (oldest first).

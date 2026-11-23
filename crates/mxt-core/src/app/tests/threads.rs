@@ -5,7 +5,7 @@
 use std::num::NonZeroU32;
 
 use super::timeline::{
-    done, event, item, local, msg, opened, paginate, receipt, reset, status, viewport,
+    done, event, item, local, msg, opened, paginate, receipt, remote, reset, status, viewport,
 };
 use super::*;
 use crate::action::FocusMode;
@@ -314,6 +314,44 @@ fn react_with_an_index_in_a_thread_counts_the_reactions_of_the_threads_message()
     keys(&mut app, "k");
     assert_eq!(no_timers(keys(&mut app, "g1")), vec![]);
     assert_eq!(status(&app), Some("The message has no reaction 1"));
+}
+
+#[test]
+fn the_emoji_picker_in_a_thread_lists_the_reactions_shown_under_the_message_first() {
+    let mut app = on_the_root();
+    keys(&mut app, "t");
+    let reacted = |key: &str, mine: bool| ReactionGroup {
+        key: key.into(),
+        count: 1,
+        mine,
+    };
+    let mut newest = msg(12);
+    if let TimelineEntry::Item(item) = &mut newest {
+        item.reactions = vec![reacted("👀", false), reacted("👍", true)];
+    }
+    thread_reset(&mut app, 2, vec![msg(2), msg(10), msg(11), newest]);
+    keys(&mut app, "+");
+    let picker = app.picker().unwrap();
+    assert_eq!(
+        picker.kind,
+        PickerKind::Emoji {
+            room: id(C),
+            item: remote(12),
+        }
+    );
+    let first: Vec<PickerKey> = picker.items[..3].iter().map(|i| i.key.clone()).collect();
+    assert_eq!(
+        first,
+        ["👀", "👍", "❤️"].map(|key| PickerKey::Reaction(key.into()))
+    );
+    assert_eq!(
+        keys(&mut app, "<C-n><CR>"),
+        vec![Effect::Matrix(MatrixEffect::ToggleReaction {
+            room: id(C),
+            item: remote(12),
+            key: "👍".into(),
+        })]
+    );
 }
 
 #[test]

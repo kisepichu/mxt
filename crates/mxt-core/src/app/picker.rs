@@ -85,8 +85,8 @@ impl OpenPicker {
 
 /// What a picker's items come from, besides its query.
 enum Source {
-    /// The keys the user reacted with on the item.
-    Emoji { reacted: Vec<String> },
+    /// The reactions on the item, as the timeline shows them.
+    Emoji { shown: Vec<ReactionGroup> },
     /// The rooms that pass the filter, as the room list is at each edit.
     Rooms(RoomFilter),
     /// The URLs of the item's links.
@@ -96,7 +96,7 @@ enum Source {
 impl Source {
     fn items(&self, query: &str, rooms: &RoomList) -> Vec<PickerItem> {
         match self {
-            Source::Emoji { reacted } => emoji_items(query, reacted),
+            Source::Emoji { shown } => emoji_items(query, shown),
             Source::Rooms(filter) => room_items(rooms, *filter, query),
             Source::Links(urls) => link_items(urls, query),
         }
@@ -133,25 +133,22 @@ impl App {
         if item.content == MessageContent::Redacted {
             return self.set_status(StatusKind::Error, "The message is deleted");
         }
-        let reacted = item
-            .reactions
-            .iter()
-            .filter(|group| group.mine)
-            .map(|group| group.key.as_str());
+        let shown = item.shown_reactions();
         let (room, id) = (room.clone(), item.id.clone());
         let key = match with {
-            ReactWith::Emoji(emoji) => reaction_key(reacted, emoji),
-            ReactWith::Index(index) => match item.reactions.get(index.get() - 1) {
-                Some(group) => shown_reaction_key(reacted, group),
+            ReactWith::Emoji(emoji) => reaction_key(own_keys(shown), emoji),
+            ReactWith::Index(index) => match shown.get(index.get() - 1) {
+                Some(group) => shown_reaction_key(own_keys(shown), group),
                 None => {
                     let text = format!("The message has no reaction {index}");
                     return self.set_status(StatusKind::Error, text);
                 }
             },
             ReactWith::Picker => {
-                let reacted = reacted.map(str::to_owned).collect();
-                let kind = PickerKind::Emoji { room, item: id };
-                return self.open_picker(kind, Source::Emoji { reacted });
+                let source = Source::Emoji {
+                    shown: shown.to_vec(),
+                };
+                return self.open_picker(PickerKind::Emoji { room, item: id }, source);
             }
         };
         effects.push(Effect::Matrix(MatrixEffect::ToggleReaction {
@@ -276,67 +273,79 @@ fn link_items(urls: &[String], query: &str) -> Vec<PickerItem> {
         .collect()
 }
 
-/// The emoji for `query`. An empty query lists the user's reactions on the
-/// item first, then the most common reactions, then every other emoji in
-/// `emojis` order. Each item's key comes from [`reaction_key`].
-fn emoji_items(query: &str, reacted: &[String]) -> Vec<PickerItem> {
-    let key = |emoji: Emoji| reaction_key(reacted.iter().map(String::as_str), emoji);
-    let item = |emoji: Emoji| PickerItem {
-        label: emoji.label(),
+/// The emoji for `query`, each once. An empty query lists the reactions on
+/// the item first, in the order the timeline shows them (others' and the
+/// user's own), each toggling its own key and labelled with it, so two
+/// reactions with one emoji (`❤` and `❤️`) can be told apart; then the most
+/// common reactions, then every other emoji in `emojis` order. A query ranks
+/// every emoji, each toggling the key from [`reaction_key`].
+fn emoji_items(query: &str, shown: &[ReactionGroup]) -> Vec<PickerItem> {
+    let item = |label: String, key: String| PickerItem {
+        label,
         badge: None,
-        key: PickerKey::Reaction(key(emoji)),
+        key: PickerKey::Reaction(key),
     };
     if !query.trim().is_empty() {
-        return emoji::search(query).into_iter().map(item).collect();
+        return emoji::search(query)
+            .into_iter()
+            .map(|emoji| item(emoji.label(), reaction_key(own_keys(shown), emoji)))
+            .collect();
     }
     let mut listed: HashSet<&str> = HashSet::new();
-    let mut items: Vec<PickerItem> = reacted
+    let mut items: Vec<PickerItem> = shown
         .iter()
-        .map(|key| {
-            let emoji = Emoji::get(key);
+        .map(|group| {
+            let emoji = Emoji::get(&group.key);
             if let Some(emoji) = emoji {
                 listed.insert(emoji.as_str());
             }
-            PickerItem {
-                label: emoji.map_or_else(|| key.clone(), Emoji::label),
-                badge: None,
-                key: PickerKey::Reaction(key.clone()),
-            }
+            let label = emoji.map_or_else(|| group.key.clone(), |emoji| emoji.label_as(&group.key));
+            item(label, group.key.clone())
         })
         .collect();
+    // The user's own reactions are among the shown ones, so every other
+    // emoji is a new reaction, whose key is the emoji itself.
     for emoji in emoji::common().chain(emoji::all()) {
         if listed.insert(emoji.as_str()) {
-            items.push(item(emoji));
+            items.push(item(emoji.label(), emoji.as_str().to_owned()));
         }
     }
     items
 }
 
+/// The keys of the user's own reactions among `shown`.
+fn own_keys(shown: &[ReactionGroup]) -> impl Iterator<Item = &str> {
+    shown
+        .iter()
+        .filter(|group| group.mine)
+        .map(|group| group.key.as_str())
+}
+
 /// The key a reaction with `emoji` toggles: the key of the user's own
-/// reaction (`reacted`) with the same emoji, which may lack the variation
+/// reaction (`own`) with the same emoji, which may lack the variation
 /// selector (`❤` for `❤️`), so toggling removes their reaction instead of
 /// adding a second one; otherwise the emoji itself.
-fn reaction_key<'a>(reacted: impl Iterator<Item = &'a str>, emoji: Emoji) -> String {
-    own_key(reacted, emoji).unwrap_or(emoji.as_str()).to_owned()
+fn reaction_key<'a>(own: impl Iterator<Item = &'a str>, emoji: Emoji) -> String {
+    own_key(own, emoji).unwrap_or(emoji.as_str()).to_owned()
 }
 
 /// The key that toggles the reaction shown as `group`: its key when the
 /// user is among its senders, so toggling removes it; otherwise, as
-/// [`reaction_key`] chooses, the key of the user's own reaction with the
-/// same emoji, and else the group's key, so the user's reaction joins the
-/// group (`❤ 2` becomes `❤ 3`, not `❤ 2  ❤️ 1`).
-fn shown_reaction_key<'a>(reacted: impl Iterator<Item = &'a str>, group: &ReactionGroup) -> String {
+/// [`reaction_key`] chooses, the key of the user's own reaction (`own`)
+/// with the same emoji, and else the group's key, so the user's reaction
+/// joins the group (`❤ 2` becomes `❤ 3`, not `❤ 2  ❤️ 1`).
+fn shown_reaction_key<'a>(own: impl Iterator<Item = &'a str>, group: &ReactionGroup) -> String {
     if group.mine {
         return group.key.clone();
     }
     Emoji::get(&group.key)
-        .and_then(|emoji| own_key(reacted, emoji))
+        .and_then(|emoji| own_key(own, emoji))
         .unwrap_or(&group.key)
         .to_owned()
 }
 
-/// The key of the user's own reaction (`reacted`) with `emoji`, compared
+/// The key of the user's own reaction (`own`) with `emoji`, compared
 /// through [`Emoji::get`].
-fn own_key<'a>(mut reacted: impl Iterator<Item = &'a str>, emoji: Emoji) -> Option<&'a str> {
-    reacted.find(|key| Emoji::get(key) == Some(emoji))
+fn own_key<'a>(mut own: impl Iterator<Item = &'a str>, emoji: Emoji) -> Option<&'a str> {
+    own.find(|key| Emoji::get(key) == Some(emoji))
 }

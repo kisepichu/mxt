@@ -701,9 +701,10 @@ impl<'a> Render<'a, '_> {
                 body.line(vec![Part::new(text, DIM)], &matches);
             }
         }
-        if !item.reactions.is_empty() {
+        let shown = item.shown_reactions();
+        if !shown.is_empty() {
             body.base = PLAIN;
-            body.line(reactions(&item.reactions), &[]);
+            body.line(reactions(shown), &[]);
         }
         let mut rows = body.rows;
         if let Some(summary) = &item.thread_summary {
@@ -866,9 +867,8 @@ fn reply_line(reply: &ReplyPreview, width: usize) -> Line<'_> {
     Line::from(fit(&segments, width).0)
 }
 
-/// `key count` chips in [`TimelineItem::reactions`] order, which
-/// `message.react`'s `index` counts in, so they must not be reordered here;
-/// the user's own reactions are bold.
+/// `key count` chips in [`TimelineItem::shown_reactions`]'s order; the
+/// user's own reactions are bold.
 fn reactions(groups: &[ReactionGroup]) -> Vec<Part<'_>> {
     let mut parts = Vec::with_capacity(groups.len() * 3);
     for (index, group) in groups.iter().enumerate() {
@@ -2002,7 +2002,7 @@ mod tests {
             photo(ItemRef::Local(TxnId::new("echo"))),
         ];
         let mut previews = Previews::new(
-            ImageRows::default(),
+            ImageRows::new(8).unwrap(),
             PreviewEncoder::TmuxSixel(FontSize::new(10, 20)),
             Limits::DEFAULT,
             Box::new(|| {}),
@@ -2051,7 +2051,7 @@ mod tests {
         }
         let entries = [entry];
         let previews = Previews::new(
-            ImageRows::default(),
+            ImageRows::new(8).unwrap(),
             PreviewEncoder::TmuxSixel(FontSize::new(10, 20)),
             Limits::DEFAULT,
             Box::new(|| {}),

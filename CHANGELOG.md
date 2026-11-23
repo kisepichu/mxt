@@ -18,6 +18,12 @@ marked **Breaking:**.
 
 ### Changed
 
+- The emoji picker lists the reactions already on the message first, in
+  the order shown under it, so `+<CR>` toggles the first one and
+  `+<C-n><CR>` the second; the common emoji and every emoji follow as
+  before.
+- `[ui.timeline] image_rows` is 16 by default (it was 8); `image_rows = 8`
+  keeps the old size.
 - `g1` … `g9` in the timeline react, so a binding of them in
   `[keymap.normal]` no longer applies while the timeline has focus; bind it
   in `[keymap.timeline]` too to keep it there.
