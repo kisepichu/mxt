@@ -3462,9 +3462,11 @@ Releases. How versions are chosen and a release is cut:
   build still links any `libsqlite3` the linker finds, without checking its
   version.
 
-The [README](../../../README.md) describes all three and the first start;
-[Configuration](../../configuration.md), [Keys](../../keys.md) and
-[Terminal setup](../../terminal.md) are the user's reference.
+The [README](../../../README.md) lists all three and describes the first
+start; [Installing](../../installing.md) has the details of each.
+[Configuration](../../configuration.md), [Keys](../../keys.md),
+[Terminal setup](../../terminal.md) and [Files](../../files.md) are the
+user's reference.
 
 ## Development phases
 
