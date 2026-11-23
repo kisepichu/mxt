@@ -286,6 +286,37 @@ fn t_in_a_thread_keeps_it() {
 }
 
 #[test]
+fn react_with_an_index_in_a_thread_counts_the_reactions_of_the_threads_message() {
+    let mut app = opened();
+    let reacted = |mut entry: TimelineEntry, key: &str| {
+        if let TimelineEntry::Item(item) = &mut entry {
+            item.reactions = vec![ReactionGroup {
+                key: key.into(),
+                count: 1,
+                mine: false,
+            }];
+        }
+        entry
+    };
+    let root = || with_replies(2, reacted(msg(2), "👀"));
+    reset(&mut app, vec![msg(1), root(), reacted(msg(3), "😂")]);
+    keys(&mut app, "kt");
+    thread_reset(&mut app, 2, vec![root(), msg(10), reacted(msg(11), "🎉")]);
+    // On the newest reply, which the cursor follows.
+    assert_eq!(
+        no_timers(keys(&mut app, "g1")),
+        vec![Effect::Matrix(MatrixEffect::ToggleReaction {
+            room: id(C),
+            item: ItemRef::Remote(event(11)),
+            key: "🎉".into(),
+        })]
+    );
+    keys(&mut app, "k");
+    assert_eq!(no_timers(keys(&mut app, "g1")), vec![]);
+    assert_eq!(status(&app), Some("The message has no reaction 1"));
+}
+
+#[test]
 fn the_emoji_picker_in_a_thread_lists_the_reactions_shown_under_the_message_first() {
     let mut app = on_the_root();
     keys(&mut app, "t");

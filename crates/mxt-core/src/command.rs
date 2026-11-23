@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::fmt::{self, Write as _};
 
-use crate::action::Action;
+use crate::action::{Action, ReactWith};
 use crate::emoji::Emoji;
 use crate::rooms::{RoomFilter, RoomTarget};
 
@@ -93,10 +93,10 @@ pub static COMMANDS: &[Command] = &[
         description: "Toggle a reaction on the message under the timeline's cursor, or pick one",
         action: |emoji| {
             if emoji.is_empty() {
-                return Ok(Action::MessageReact(None));
+                return Ok(Action::MessageReact(ReactWith::Picker));
             }
             match Emoji::parse(emoji) {
-                Some(emoji) => Ok(Action::MessageReact(Some(emoji))),
+                Some(emoji) => Ok(Action::MessageReact(ReactWith::Emoji(emoji))),
                 None => Err(CommandError::UnknownEmoji {
                     emoji: emoji.to_owned(),
                 }),
@@ -315,11 +315,16 @@ mod tests {
 
     #[test]
     fn react_takes_an_emoji_or_a_shortcode_or_nothing() {
-        let thumbs = Ok(Some(Action::MessageReact(Emoji::get("👍"))));
+        let thumbs = Ok(Some(Action::MessageReact(ReactWith::Emoji(
+            Emoji::get("👍").unwrap(),
+        ))));
         assert_eq!(parse_command("react 👍"), thumbs);
         assert_eq!(parse_command("react  thumbsup "), thumbs);
         assert_eq!(parse_command("react :+1:"), thumbs);
-        assert_eq!(parse_command("react"), Ok(Some(Action::MessageReact(None))));
+        assert_eq!(
+            parse_command("react"),
+            Ok(Some(Action::MessageReact(ReactWith::Picker)))
+        );
         assert_eq!(
             parse_command("react nonsense"),
             Err(CommandError::UnknownEmoji {

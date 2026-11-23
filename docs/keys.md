@@ -237,6 +237,7 @@ editors' own `/` shows only the current match, while you type it.
 | `dd` | `message.delete` | delete your own message, after `y` |
 | `yy` | `message.yank` | copy the message's text |
 | `+` | `message.react` | react with the emoji picker, which lists the reactions under the message first; an emoji you already chose removes your reaction |
+| `g1` … `g9` | `message.react` with `index = 1` … `9` | toggle the first … ninth reaction shown under the message: add yours, or remove it if it is there |
 | `gx` | `message.open` | open the link, or download and open the attachment |
 | `gd` | `message.goto_reply` | go to the message this one replies to |
 | `R` | `message.resend` | send a message marked `failed` again |
@@ -252,10 +253,19 @@ reactions and every other emoji, each once. Typing searches shortcodes and
 names. Up to mxt 0.1.5, your own reactions came first, then the common
 ones.
 
-`t` did nothing in the timeline before mxt had threads. It is in
-`timeline`, which comes before `normal`, so if your configuration binds
-`t` in `[keymap.normal]`, write that binding in `[keymap.timeline]` too to
-keep it in the timeline.
+`g1` … `g9` count the reactions in the order they are shown under the
+message: under `👍 2  ❤️ 1`, `g1` toggles 👍 and `g2` toggles ❤️. Each adds
+yours with that emoji, or removes yours if you already reacted with it, so
+a second `g1` takes yours back. On a message with fewer reactions, the
+status line says so (`The message has no reaction 3`) and nothing is sent.
+In the composer, `g` and a digit go to the editor as before; these keys
+are the timeline's only.
+
+`t` did nothing in the timeline before mxt had threads, nor did `g1` …
+`g9` before they reacted. They are in `timeline`, which comes before
+`normal`, so if your configuration binds one of them in
+`[keymap.normal]`, write that binding in `[keymap.timeline]` too to keep
+it in the timeline.
 
 ### `thread`
 
@@ -396,9 +406,9 @@ past them or use `room.mark_read`.
 In a thread:
 
 - The timeline's keys work on the thread's messages: moving and counts,
-  `/`, `n`, `N`, `<CR>`, `e`, `dd`, `yy`, `+`, `gx`, `R`, `i` and `a`, and
-  older replies load as the cursor nears the top. `room.mark_read`,
-  `:mute` and `:unmute` act on the room.
+  `/`, `n`, `N`, `<CR>`, `e`, `dd`, `yy`, `+`, `g1` … `g9`, `gx`, `R`, `i`
+  and `a`, and older replies load as the cursor nears the top.
+  `room.mark_read`, `:mute` and `:unmute` act on the room.
 - The composer sends into the thread. Each thread has its own draft, as
   each room has: what you leave in a thread's composer waits there for the
   next time you open the thread, and the room's draft, reply or edit is

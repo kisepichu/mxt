@@ -1,5 +1,5 @@
 use super::*;
-use mxt_core::action::Action;
+use mxt_core::action::{Action, ReactWith};
 use mxt_core::keymap::InputContext;
 use mxt_core::keys::KeySeq;
 use mxt_core::rooms::{RoomSort, SortKey};
@@ -378,6 +378,36 @@ fn an_unknown_emoji_points_at_its_argument() {
     ));
     assert_eq!(line, 5);
     assert!(msg.contains("unknown emoji \"nonsense\""), "{msg}");
+}
+
+#[test]
+fn a_reaction_index_loads_and_its_errors_point_at_it() {
+    // Over the default `g1`, `index = 1`.
+    let c = ok(&format!(
+        "{MINIMAL}[keymap.timeline]\n\"g1\" = {{ action = \"message.react\", index = 3 }}\n"
+    ));
+    let g1 = [Key::char('g'), Key::char('1')];
+    let react = c.keymap.effective(InputContext::Timeline).get(&g1);
+    let third = std::num::NonZeroUsize::new(3).unwrap();
+    let third = Action::MessageReact(ReactWith::Index(third));
+    assert_eq!(react, Some(&Binding::single(third)));
+
+    let header =
+        |args: &str| format!("{MINIMAL}[keymap.timeline.g1]\naction = \"message.react\"\n{args}");
+    let not_positive = "message.react: \"index\" must be a positive integer";
+    for (args, line, reason) in [
+        ("index = 0\n", 5, not_positive),
+        ("index = \"1\"\n", 5, not_positive),
+        (
+            "index = 1\nemoji = \"heart\"\n",
+            6,
+            "message.react: \"emoji\" and \"index\" cannot be used together",
+        ),
+    ] {
+        let (at, msg) = err(&header(args));
+        assert_eq!(at, line, "{args}");
+        assert!(msg.contains(reason), "{msg}");
+    }
 }
 
 #[test]

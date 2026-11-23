@@ -2,6 +2,7 @@
 //! name and arguments.
 
 use std::fmt;
+use std::num::NonZeroUsize;
 
 use crate::emoji::Emoji;
 use crate::rooms::{Pick, RoomFilter, RoomTarget};
@@ -15,6 +16,37 @@ pub enum ArgValue {
     /// Any other TOML value (a float, an array, a table, a date-time), which
     /// no action takes, so a known argument with it has the wrong type.
     Unsupported,
+}
+
+/// An argument value of a built action, as [`Action::arguments`] gives it
+/// back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArgRef<'a> {
+    String(&'a str),
+    Integer(usize),
+}
+
+#[cfg(test)]
+impl ArgRef<'_> {
+    /// The value the configuration gives [`Action::from_spec`] for it.
+    pub(crate) fn to_value(self) -> ArgValue {
+        match self {
+            ArgRef::String(value) => ArgValue::String(value.to_owned()),
+            ArgRef::Integer(value) => ArgValue::Integer(i64::try_from(value).unwrap()),
+        }
+    }
+}
+
+/// What `message.react` toggles on the message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReactWith {
+    /// Nothing yet: the emoji picker opens.
+    Picker,
+    /// The reaction with this emoji.
+    Emoji(Emoji),
+    /// The reaction shown at this place under the message, from 1, in the
+    /// order of `TimelineItem::shown_reactions`, which the timeline draws.
+    Index(NonZeroUsize),
 }
 
 /// The editor mode `composer.focus` leaves the composer in.
@@ -56,8 +88,8 @@ pub enum Action {
     MessageEdit,
     MessageDelete,
     MessageYank,
-    /// With an emoji, toggles that reaction; without, the emoji picker.
-    MessageReact(Option<Emoji>),
+    /// Toggles a reaction, or opens the emoji picker.
+    MessageReact(ReactWith),
     MessageOpen,
     MessageGotoReply,
     MessageResend,
@@ -152,8 +184,8 @@ impl Action {
     /// - `picker.rooms`: `filter`, as for `room.open`
     /// - `composer.focus`: `mode` (`insert` or `keep`; default `insert`)
     /// - `file.upload`: `path` (non-empty), required
-    /// - `message.react`: `emoji` (an emoji or a shortcode, see
-    ///   [`Emoji::parse`]; non-empty)
+    /// - `message.react`: either `emoji` (an emoji or a shortcode, see
+    ///   [`Emoji::parse`]; non-empty) or `index` (a positive integer)
     /// - `room.join`: `target` (non-empty), required
     ///
     /// Argument names are unique in a configuration table; if one repeats
@@ -179,7 +211,7 @@ impl Action {
             }
             "file.upload" => return file_upload(Args::new("file.upload", &["path"], args)?),
             "message.react" => {
-                return message_react(Args::new("message.react", &["emoji"], args)?);
+                return message_react(Args::new("message.react", &["emoji", "index"], args)?);
             }
             "room.join" => return room_join(Args::new("room.join", &["target"], args)?),
             "room.open_selected" => Action::RoomOpenSelected,
@@ -323,29 +355,37 @@ impl Action {
     }
 
     /// The arguments [`Action::from_spec`] builds this action from, as
-    /// names and string values: those at their default are left out, the
-    /// others follow in the order `filter`, `pick`, `query`, `mode`, `path`,
-    /// `emoji`, `target`. An emoji is the emoji itself, not a shortcode.
-    pub fn arguments(&self) -> Vec<(&'static str, &str)> {
+    /// names and values: those at their default are left out, the others
+    /// follow in the order `filter`, `pick`, `query`, `mode`, `path`,
+    /// `emoji`, `index`, `target`. An emoji is the emoji itself, not a
+    /// shortcode.
+    pub fn arguments(&self) -> Vec<(&'static str, ArgRef<'_>)> {
         let filter = |filter: RoomFilter| {
-            (filter != RoomFilter::default()).then(|| ("filter", filter.config_name()))
+            (filter != RoomFilter::default())
+                .then(|| ("filter", ArgRef::String(filter.config_name())))
         };
         match self {
             Action::RoomOpen(RoomTarget::Pick { filter: f, pick }) => {
-                let pick = (*pick != Pick::default()).then(|| ("pick", pick.config_name()));
+                let pick = (*pick != Pick::default())
+                    .then(|| ("pick", ArgRef::String(pick.config_name())));
                 filter(*f).into_iter().chain(pick).collect()
             }
             Action::RoomOpen(RoomTarget::Fuzzy { filter: f, query }) => filter(*f)
                 .into_iter()
-                .chain([("query", query.as_str())])
+                .chain([("query", ArgRef::String(query))])
                 .collect(),
             Action::PickerRooms(f) => filter(*f).into_iter().collect(),
             Action::ComposerFocus(mode) if *mode != FocusMode::default() => {
-                vec![("mode", mode.config_name())]
+                vec![("mode", ArgRef::String(mode.config_name()))]
             }
-            Action::FileUpload { path } => vec![("path", path.as_str())],
-            Action::MessageReact(Some(emoji)) => vec![("emoji", emoji.as_str())],
-            Action::RoomJoin { target } => vec![("target", target.as_str())],
+            Action::FileUpload { path } => vec![("path", ArgRef::String(path))],
+            Action::MessageReact(ReactWith::Emoji(emoji)) => {
+                vec![("emoji", ArgRef::String(emoji.as_str()))]
+            }
+            Action::MessageReact(ReactWith::Index(index)) => {
+                vec![("index", ArgRef::Integer(index.get()))]
+            }
+            Action::RoomJoin { target } => vec![("target", ArgRef::String(target))],
             _ => Vec::new(),
         }
     }
@@ -411,15 +451,24 @@ fn room_join(args: Args<'_>) -> Result<Action, ActionError> {
     })
 }
 
-/// An empty `emoji` is [`ActionError::Empty`] and an unknown one
-/// [`ActionError::UnknownEmoji`], so a binding never reacts with something no
-/// client shows as an emoji.
+/// `emoji` and `index` are [`ActionError::Conflict`]. An empty `emoji` is
+/// [`ActionError::Empty`] and an unknown one [`ActionError::UnknownEmoji`],
+/// so a binding never reacts with something no client shows as an emoji.
 fn message_react(args: Args<'_>) -> Result<Action, ActionError> {
+    if args.has("emoji") && args.has("index") {
+        return Err(ActionError::Conflict {
+            action: args.action,
+            args: ["emoji", "index"],
+        });
+    }
+    if let Some(index) = args.positive("index")? {
+        return Ok(Action::MessageReact(ReactWith::Index(index)));
+    }
     let Some(value) = args.non_empty_string("emoji")? else {
-        return Ok(Action::MessageReact(None));
+        return Ok(Action::MessageReact(ReactWith::Picker));
     };
     match Emoji::parse(value) {
-        Some(emoji) => Ok(Action::MessageReact(Some(emoji))),
+        Some(emoji) => Ok(Action::MessageReact(ReactWith::Emoji(emoji))),
         None => Err(ActionError::UnknownEmoji {
             action: args.action,
             value: value.to_owned(),
@@ -476,6 +525,26 @@ impl<'a> Args<'a> {
                 arg,
             }),
             value => Ok(value),
+        }
+    }
+
+    /// An integer argument of 1 or more. Any other value, 0 and negative
+    /// integers included, is [`ActionError::WrongType`].
+    fn positive(&self, arg: &'static str) -> Result<Option<NonZeroUsize>, ActionError> {
+        let value = match self.args.iter().rev().find(|(name, _)| name == arg) {
+            None => return Ok(None),
+            Some((_, ArgValue::Integer(value))) => {
+                usize::try_from(*value).ok().and_then(NonZeroUsize::new)
+            }
+            Some(_) => None,
+        };
+        match value {
+            Some(value) => Ok(Some(value)),
+            None => Err(ActionError::WrongType {
+                action: self.action,
+                arg,
+                expected: "positive integer",
+            }),
         }
     }
 
@@ -732,21 +801,26 @@ mod tests {
         action
             .arguments()
             .into_iter()
-            .map(|(name, value)| s(name, value))
+            .map(|(name, value)| (name.to_owned(), value.to_value()))
             .collect()
+    }
+
+    fn int(k: &str, v: i64) -> (String, ArgValue) {
+        (k.to_owned(), ArgValue::Integer(v))
     }
 
     #[test]
     fn arguments_leave_defaults_out_and_build_the_same_action() {
+        let text = ArgRef::String;
         let cases = [
             (Action::from_spec("room.open", &[]), vec![]),
             (
                 Action::from_spec("room.open", &[s("pick", "prev"), s("filter", "notify")]),
-                vec![("filter", "notify"), ("pick", "prev")],
+                vec![("filter", text("notify")), ("pick", text("prev"))],
             ),
             (
                 Action::from_spec("room.open", &[s("query", "a \"b\""), s("filter", "all")]),
-                vec![("query", "a \"b\"")],
+                vec![("query", text("a \"b\""))],
             ),
             (
                 Action::from_spec("picker.rooms", &[s("filter", "all")]),
@@ -758,20 +832,24 @@ mod tests {
             ),
             (
                 Action::from_spec("composer.focus", &[s("mode", "keep")]),
-                vec![("mode", "keep")],
+                vec![("mode", text("keep"))],
             ),
             (
                 Action::from_spec("file.upload", &[s("path", "/tmp/a b.png")]),
-                vec![("path", "/tmp/a b.png")],
+                vec![("path", text("/tmp/a b.png"))],
             ),
             (Action::from_spec("message.react", &[]), vec![]),
             (
                 Action::from_spec("message.react", &[s("emoji", "thumbsup")]),
-                vec![("emoji", "👍")],
+                vec![("emoji", text("👍"))],
+            ),
+            (
+                Action::from_spec("message.react", &[int("index", 3)]),
+                vec![("index", ArgRef::Integer(3))],
             ),
             (
                 Action::from_spec("room.join", &[s("target", "#mxt:example.org")]),
-                vec![("target", "#mxt:example.org")],
+                vec![("target", text("#mxt:example.org"))],
             ),
         ];
         for (action, arguments) in cases {
@@ -1012,7 +1090,7 @@ mod tests {
 
     #[test]
     fn message_react_takes_an_emoji_or_a_shortcode() {
-        let thumbs = Action::MessageReact(Emoji::get("👍"));
+        let thumbs = Action::MessageReact(ReactWith::Emoji(Emoji::get("👍").unwrap()));
         for emoji in ["👍", "thumbsup", ":+1:"] {
             assert_eq!(
                 Action::from_spec("message.react", &[s("emoji", emoji)]),
@@ -1021,7 +1099,54 @@ mod tests {
         }
         assert_eq!(
             Action::from_spec("message.react", &[]),
-            Ok(Action::MessageReact(None))
+            Ok(Action::MessageReact(ReactWith::Picker))
+        );
+    }
+
+    #[test]
+    fn message_react_takes_a_positive_index() {
+        for n in [1, 2, 12] {
+            let index = NonZeroUsize::new(usize::try_from(n).unwrap()).unwrap();
+            assert_eq!(
+                Action::from_spec("message.react", &[int("index", n)]),
+                Ok(Action::MessageReact(ReactWith::Index(index)))
+            );
+        }
+        let not_positive = [int("index", 0), int("index", -1), s("index", "1")];
+        for arg in not_positive {
+            let error = Action::from_spec("message.react", std::slice::from_ref(&arg)).unwrap_err();
+            assert_eq!(
+                error,
+                ActionError::WrongType {
+                    action: "message.react",
+                    arg: "index",
+                    expected: "positive integer"
+                },
+                "{arg:?}"
+            );
+            assert_eq!(
+                error.to_string(),
+                "message.react: \"index\" must be a positive integer"
+            );
+        }
+    }
+
+    #[test]
+    fn index_and_emoji_conflict() {
+        // Before the values are read: neither value is valid here.
+        let error =
+            Action::from_spec("message.react", &[int("index", 0), s("emoji", "")]).unwrap_err();
+        assert_eq!(
+            error,
+            ActionError::Conflict {
+                action: "message.react",
+                args: ["emoji", "index"]
+            }
+        );
+        assert!(!error.is_unknown_name());
+        assert_eq!(
+            error.to_string(),
+            "message.react: \"emoji\" and \"index\" cannot be used together"
         );
     }
 

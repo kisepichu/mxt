@@ -71,7 +71,7 @@ These are errors:
 
 - a TOML syntax error;
 - a value of the wrong type, such as `timeoutlen = "1s"`, or `filter = 3`
-  in a binding;
+  or `index = 0` in a binding;
 - an `account.user_id` that is missing or not `@localpart:server`, and an
   `account.homeserver` that is not an `https://` or `http://` URL;
 - a `ui.room_list.width` outside 12 to 80, a `ui.timeline.image_rows`
@@ -80,9 +80,10 @@ These are errors:
   `files.opener` without a program;
 - malformed key notation, such as `"<C-x"`, `"<C-x<CR>"`, `"<>"`, `"<S-1>"`
   or `"<C-leader>"`;
-- `pick` together with `query`, `file.upload` without `path`, `room.join`
-  without `target`, an empty `query`, `path`, `emoji` or `target`, a
-  binding table without `action`, and an empty array as a binding;
+- `pick` together with `query`, `emoji` together with `index`,
+  `file.upload` without `path`, `room.join` without `target`, an empty
+  `query`, `path`, `emoji` or `target`, a binding table without `action`,
+  and an empty array as a binding;
 - the same key sequence written twice in one table in different spellings,
   such as `"<leader>x"` and `"<Space>x"`, or `"<C-a>"` and `"<C-A>"`; for
   `"<C-i>"` and `"<Tab>"`, see below.
@@ -484,7 +485,7 @@ arguments; any other argument ignores the binding with a warning. Actions on
 | `message.edit` | | Loads your own text message into the composer to edit it. The composer must be empty. |
 | `message.delete` | | Deletes your own message after you confirm with `y`. |
 | `message.yank` | | Copies the message's text to the clipboard (see [Terminal setup](terminal.md#clipboard)). |
-| `message.react` | `emoji` | Without `emoji`, opens the emoji picker; choosing an emoji you already reacted with removes your reaction. With `emoji`, an emoji (`"👍"`) or a shortcode with colons on both sides or none (`"thumbsup"`, `":+1:"`), toggles that reaction: adds it, or removes yours. An empty `emoji` is an error; an unknown one ignores the binding with a warning, since a newer mxt may know it. With no open room, on an empty timeline or on a deleted message, it says so and does nothing. |
+| `message.react` | `emoji` or `index` | Without arguments, opens the emoji picker; choosing an emoji you already reacted with removes your reaction. With `emoji`, an emoji (`"👍"`) or a shortcode with colons on both sides or none (`"thumbsup"`, `":+1:"`), toggles that reaction: adds it, or removes yours. An empty `emoji` is an error; an unknown one ignores the binding with a warning, since a newer mxt may know it. With `index = N`, a positive integer, toggles the N-th reaction in the order they are shown under the message (under `👍 2  ❤️ 1`, `index = 1` is 👍): adds yours with that emoji, or removes yours if you already reacted with it, so a second press removes it. `g1` … `g9` in `timeline` are the defaults for `index = 1` … `9`, written as `"g1" = { action = "message.react", index = 1 }` and so on. Without an N-th reaction, it says so and sends nothing. `emoji` and `index` together, and an `index` that is not a positive integer, are errors. With no open room, on an empty timeline or on a deleted message, it says so and does nothing. |
 | `message.open` | | Downloads an attachment to `files.download_dir` and opens it with `files.opener`, or opens the message's web link with `files.opener`, or offers a link picker when there are several. Only `http://` and `https://` links. |
 | `message.goto_reply` | | Moves the cursor to the message this one replies to, if the shown timeline holds it. In a thread, it goes to a message of the timeline, closing the thread; a message that is a reply in another thread opens that thread with the cursor on it (see [Threads](keys.md#threads)). Otherwise it says the message is not loaded. |
 | `message.resend` | | Sends a failed message again. |

@@ -6,6 +6,7 @@ use std::collections::HashSet;
 
 use super::rooms::NO_MATCHING_ROOM;
 use super::{App, StatusKind};
+use crate::action::ReactWith;
 use crate::effect::{Effect, MatrixEffect};
 use crate::emoji::{self, Emoji};
 use crate::fuzzy;
@@ -118,10 +119,11 @@ impl App {
     }
 
     /// `message.react` on the item under the open room's timeline cursor,
-    /// whichever pane has focus: with `emoji`, toggles that reaction;
-    /// without, opens the emoji picker. Refused without an open room, on an
-    /// empty timeline and on a deleted item.
-    pub(super) fn react(&mut self, emoji: Option<Emoji>, effects: &mut Vec<Effect>) {
+    /// whichever pane has focus: with an emoji, toggles that reaction; with
+    /// an index, the reaction shown there under the item, or says it has
+    /// none there; otherwise opens the emoji picker. Refused without an
+    /// open room, on an empty timeline and on a deleted item.
+    pub(super) fn react(&mut self, with: ReactWith, effects: &mut Vec<Effect>) {
         let Some(room) = &self.open_room else {
             return self.set_status(StatusKind::Error, "No room is open");
         };
@@ -133,19 +135,27 @@ impl App {
         }
         let shown = item.shown_reactions();
         let (room, id) = (room.clone(), item.id.clone());
-        match emoji {
-            Some(emoji) => effects.push(Effect::Matrix(MatrixEffect::ToggleReaction {
-                room,
-                item: id,
-                key: reaction_key(own_keys(shown), emoji),
-            })),
-            None => {
+        let key = match with {
+            ReactWith::Emoji(emoji) => reaction_key(own_keys(shown), emoji),
+            ReactWith::Index(index) => match shown.get(index.get() - 1) {
+                Some(group) => shown_reaction_key(own_keys(shown), group),
+                None => {
+                    let text = format!("The message has no reaction {index}");
+                    return self.set_status(StatusKind::Error, text);
+                }
+            },
+            ReactWith::Picker => {
                 let source = Source::Emoji {
                     shown: shown.to_vec(),
                 };
-                self.open_picker(PickerKind::Emoji { room, item: id }, source);
+                return self.open_picker(PickerKind::Emoji { room, item: id }, source);
             }
-        }
+        };
+        effects.push(Effect::Matrix(MatrixEffect::ToggleReaction {
+            room,
+            item: id,
+            key,
+        }));
     }
 
     /// `picker.rooms`: the room picker over the rooms that pass `filter`.
@@ -315,8 +325,27 @@ fn own_keys(shown: &[ReactionGroup]) -> impl Iterator<Item = &str> {
 /// reaction (`own`) with the same emoji, which may lack the variation
 /// selector (`❤` for `❤️`), so toggling removes their reaction instead of
 /// adding a second one; otherwise the emoji itself.
-fn reaction_key<'a>(mut own: impl Iterator<Item = &'a str>, emoji: Emoji) -> String {
-    own.find(|key| Emoji::get(key) == Some(emoji))
-        .unwrap_or(emoji.as_str())
+fn reaction_key<'a>(own: impl Iterator<Item = &'a str>, emoji: Emoji) -> String {
+    own_key(own, emoji).unwrap_or(emoji.as_str()).to_owned()
+}
+
+/// The key that toggles the reaction shown as `group`: its key when the
+/// user is among its senders, so toggling removes it; otherwise, as
+/// [`reaction_key`] chooses, the key of the user's own reaction (`own`)
+/// with the same emoji, and else the group's key, so the user's reaction
+/// joins the group (`❤ 2` becomes `❤ 3`, not `❤ 2  ❤️ 1`).
+fn shown_reaction_key<'a>(own: impl Iterator<Item = &'a str>, group: &ReactionGroup) -> String {
+    if group.mine {
+        return group.key.clone();
+    }
+    Emoji::get(&group.key)
+        .and_then(|emoji| own_key(own, emoji))
+        .unwrap_or(&group.key)
         .to_owned()
+}
+
+/// The key of the user's own reaction (`own`) with `emoji`, compared
+/// through [`Emoji::get`].
+fn own_key<'a>(mut own: impl Iterator<Item = &'a str>, emoji: Emoji) -> Option<&'a str> {
+    own.find(|key| Emoji::get(key) == Some(emoji))
 }

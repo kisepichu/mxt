@@ -8,6 +8,14 @@ marked **Breaking:**.
 
 ## [Unreleased]
 
+### Added
+
+- `message.react` takes `index = N` and toggles the N-th reaction shown
+  under the message (yours added or removed); `g1` … `g9` in the timeline
+  (and in a thread) are the default keys for `index = 1` … `9`, so under
+  `👍 2  ❤️ 1`, `g1` toggles 👍. In the composer, `g` and a digit still go
+  to the editor. mxt 0.1.5 ignores a binding with `index` with a warning.
+
 ### Changed
 
 - The emoji picker lists the reactions already on the message first, in
@@ -16,6 +24,9 @@ marked **Breaking:**.
   before.
 - `[ui.timeline] image_rows` is 16 by default (it was 8); `image_rows = 8`
   keeps the old size.
+- `g1` … `g9` in the timeline react, so a binding of them in
+  `[keymap.normal]` no longer applies while the timeline has focus; bind it
+  in `[keymap.timeline]` too to keep it there.
 
 ## [0.1.5] - 2026-11-23
 

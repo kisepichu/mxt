@@ -1337,6 +1337,57 @@ fn react_acts_on_the_open_rooms_timeline_cursor_from_the_room_list_too() {
     );
 }
 
+/// `g1` to `g9`, bound by default in `timeline`.
+#[test]
+fn react_with_an_index_toggles_the_reaction_shown_there() {
+    let group = |key: &str, count: u32, mine: bool| ReactionGroup {
+        key: key.into(),
+        count,
+        mine,
+    };
+    let mut app = opened();
+    let shown = |thumbs_mine: bool| {
+        vec![
+            group("👍", 2, thumbs_mine),
+            // The user's heart, without the variation selector.
+            group("\u{2764}", 1, true),
+            // Another user's heart, with it.
+            group("\u{2764}\u{fe0f}", 1, false),
+            // Not an emoji `emojis` knows.
+            group("lgtm", 4, false),
+        ]
+    };
+    reset(
+        &mut app,
+        vec![with(msg(1), |item| item.reactions = shown(false))],
+    );
+    // Another user's reaction: the user's joins it with its key.
+    assert_eq!(no_timers(keys(&mut app, "g1")), vec![toggle(1, "👍")]);
+    // The user's own reaction: its key, which removes it.
+    assert_eq!(no_timers(keys(&mut app, "g2")), vec![toggle(1, "\u{2764}")]);
+    // Another user's reaction with the emoji the user reacted with: the
+    // user's key, so their reaction goes, as with `:react heart`.
+    assert_eq!(no_timers(keys(&mut app, "g3")), vec![toggle(1, "\u{2764}")]);
+    assert_eq!(no_timers(keys(&mut app, "g4")), vec![toggle(1, "lgtm")]);
+    // Past the last reaction: a status, and nothing is sent.
+    assert_eq!(no_timers(keys(&mut app, "g5")), vec![]);
+    assert_eq!(status(&app), Some("The message has no reaction 5"));
+    assert_eq!(app.status().unwrap().kind, StatusKind::Error);
+
+    // The SDK shows the user's 👍 after the first `g1`: the second removes
+    // it with its key.
+    reset(
+        &mut app,
+        vec![with(msg(1), |item| item.reactions = shown(true))],
+    );
+    assert_eq!(no_timers(keys(&mut app, "g1")), vec![toggle(1, "👍")]);
+
+    // A message without reactions has none to toggle.
+    reset(&mut app, vec![msg(2)]);
+    assert_eq!(no_timers(keys(&mut app, "g1")), vec![]);
+    assert_eq!(status(&app), Some("The message has no reaction 1"));
+}
+
 #[test]
 fn react_and_plus_say_why_they_do_nothing() {
     let react = |app: &mut App| {
@@ -1345,6 +1396,9 @@ fn react_and_plus_say_why_they_do_nothing() {
         assert_eq!(no_timers(keys(app, "+")), vec![]);
         assert!(app.picker().is_none());
         assert_eq!(app.status().unwrap().kind, StatusKind::Error);
+        assert_eq!(status(app).map(str::to_owned), said);
+        // `index` checks the message first too.
+        assert_eq!(no_timers(keys(app, "g1")), vec![]);
         assert_eq!(status(app).map(str::to_owned), said);
         said
     };
@@ -1359,6 +1413,32 @@ fn react_and_plus_say_why_they_do_nothing() {
         vec![with(msg(1), |item| item.content = MessageContent::Redacted)],
     );
     assert_eq!(react(&mut app).as_deref(), Some("The message is deleted"));
+}
+
+#[test]
+fn g_and_a_digit_in_the_composers_normal_mode_go_to_the_editor_and_never_react() {
+    let mut app = opened();
+    let thumbs = ReactionGroup {
+        key: "👍".into(),
+        count: 1,
+        mine: false,
+    };
+    reset(
+        &mut app,
+        vec![with(msg(1), |item| item.reactions = vec![thumbs])],
+    );
+    keys(&mut app, "i");
+    let replay = |text: &str| ui(UiEffect::ReplayKeys(seq(text).keys().to_vec()));
+    // `g` waits for no binding here, so edtui gets it and waits for its
+    // `gg`: the digit goes to edtui without the keymap.
+    assert_eq!(normal(&mut app, "g"), vec![replay("g")]);
+    assert_eq!(
+        no_timers(keys_in(&mut app, "1", Some(EditorMode::AwaitingChar))),
+        vec![replay("1")]
+    );
+    // A digit in normal mode is no count in the composer either.
+    assert_eq!(normal(&mut app, "g2"), vec![replay("g"), replay("2")]);
+    assert_eq!(app.focus(), Focus::Composer);
 }
 
 /// `R`, bound by default, resends the failed local echo under the cursor.

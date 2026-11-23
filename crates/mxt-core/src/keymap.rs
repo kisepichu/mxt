@@ -3,9 +3,10 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::num::NonZeroUsize;
 use std::ops::Bound;
 
-use crate::action::{Action, Binding, FocusMode};
+use crate::action::{Action, ArgRef, Binding, FocusMode, ReactWith};
 use crate::keys::{Key, KeySeq};
 use crate::rooms::{Pick, RoomFilter, RoomTarget};
 
@@ -178,6 +179,11 @@ const UNREAD_PREV: Action = Action::RoomOpen(RoomTarget::Pick {
     pick: Pick::Prev,
 });
 
+/// `message.react` with `index = n`, for `g1` to `g9`; `n` is not 0.
+const fn react_at(n: usize) -> Action {
+    Action::MessageReact(ReactWith::Index(NonZeroUsize::new(n).unwrap()))
+}
+
 /// The default keymap (design, "Default keymap"): tables, key notation with
 /// `<leader>`, and the action.
 const DEFAULTS: &[(&[TableId], &str, Action)] = &[
@@ -243,9 +249,25 @@ const DEFAULTS: &[(&[TableId], &str, Action)] = &[
     (&[TableId::Timeline], "e", Action::MessageEdit),
     (&[TableId::Timeline], "dd", Action::MessageDelete),
     (&[TableId::Timeline], "yy", Action::MessageYank),
-    (&[TableId::Timeline], "+", Action::MessageReact(None)),
+    (
+        &[TableId::Timeline],
+        "+",
+        Action::MessageReact(ReactWith::Picker),
+    ),
     (&[TableId::Timeline], "gx", Action::MessageOpen),
     (&[TableId::Timeline], "gd", Action::MessageGotoReply),
+    // The reaction shown at that place under the message. Only in
+    // `timeline` (and so in `thread`): the composer's tables never fall
+    // back to it, so there `g` and a digit go to edtui.
+    (&[TableId::Timeline], "g1", react_at(1)),
+    (&[TableId::Timeline], "g2", react_at(2)),
+    (&[TableId::Timeline], "g3", react_at(3)),
+    (&[TableId::Timeline], "g4", react_at(4)),
+    (&[TableId::Timeline], "g5", react_at(5)),
+    (&[TableId::Timeline], "g6", react_at(6)),
+    (&[TableId::Timeline], "g7", react_at(7)),
+    (&[TableId::Timeline], "g8", react_at(8)),
+    (&[TableId::Timeline], "g9", react_at(9)),
     (&[TableId::Timeline], "R", Action::MessageResend),
     (&[TableId::Timeline], "t", Action::ThreadOpen),
     // The main timeline binds neither, so a binding of them in `normal`
@@ -409,9 +431,9 @@ impl Keymap {
 /// The text of `:map` (design, "Help views"): `leader = "<key>"`, then per
 /// table, in [`TableId::ALL`] order, an empty line, its header
 /// (`[keymap.timeline]`) and its own bindings as `keys -> action` or
-/// `keys -> action (name = "value", ...)`, the actions of an array joined
+/// `keys -> action (name = value, ...)`, the actions of an array joined
 /// with `; `. Keys are in the configuration's notation with the leader
-/// expanded; values are TOML strings.
+/// expanded; values are TOML values: strings quoted, integers bare.
 pub fn keymap_text(keymap: &Keymap) -> String {
     let mut text = String::from("leader = ");
     toml_string(&keymap.leader.to_string(), &mut text);
@@ -429,7 +451,10 @@ pub fn keymap_text(keymap: &Keymap) -> String {
                     text.push_str(if index == 0 { " (" } else { ", " });
                     text.push_str(name);
                     text.push_str(" = ");
-                    toml_string(value, &mut text);
+                    match *value {
+                        ArgRef::String(value) => toml_string(value, &mut text),
+                        ArgRef::Integer(value) => _ = write!(text, "{value}"),
+                    }
                 }
                 if !arguments.is_empty() {
                     text.push(')');
@@ -713,7 +738,7 @@ mod tests {
                     let args: Vec<(String, ArgValue)> = action
                         .arguments()
                         .into_iter()
-                        .map(|(name, value)| (name.to_owned(), ArgValue::String(value.to_owned())))
+                        .map(|(name, value)| (name.to_owned(), value.to_value()))
                         .collect();
                     assert_eq!(
                         Action::from_spec(action.name(), &args).as_ref(),
@@ -723,6 +748,66 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn react(n: usize) -> Binding {
+        one(Action::MessageReact(ReactWith::Index(
+            NonZeroUsize::new(n).unwrap(),
+        )))
+    }
+
+    #[test]
+    fn g_and_a_digit_react_by_index_in_the_timeline_and_a_thread() {
+        let km = Keymap::new(&space(), []);
+        for context in [InputContext::Timeline, InputContext::Thread] {
+            let map = km.effective(context);
+            for n in 1..=9 {
+                let keys = seq(&format!("g{n}"));
+                assert_eq!(map.get(keys.keys()), Some(&react(n)), "{context:?}: {keys}");
+            }
+            assert_eq!(map.get(seq("g0").keys()), None, "{context:?}");
+            assert_eq!(map.get(seq("gg").keys()), Some(&one(Action::CursorFirst)));
+            let g = map.lookup(seq("g").keys());
+            assert_eq!((g.binding, g.is_prefix), (None, true), "{context:?}");
+        }
+        let text = keymap_text(&km);
+        let timeline = section(&text, "timeline");
+        for line in [
+            "g1 -> message.react (index = 1)",
+            "g9 -> message.react (index = 9)",
+        ] {
+            assert!(timeline.contains(&line), "{line}: {timeline:#?}");
+        }
+    }
+
+    #[test]
+    fn g_and_a_digit_are_timeline_keys_only() {
+        let km = Keymap::new(&space(), []);
+        for context in InputContext::ALL {
+            if matches!(context, InputContext::Timeline | InputContext::Thread) {
+                continue;
+            }
+            // No other context falls back to `timeline`, the composer's
+            // and the message view's editors among them.
+            assert!(!context.chain().contains(&TableId::Timeline), "{context:?}");
+            assert_eq!(km.effective(context).get(seq("g1").keys()), None);
+        }
+        // So in the composer's normal mode nothing waits after `g`: it goes
+        // to edtui, which takes the digit as the key after its `g`.
+        let g = km
+            .effective(InputContext::ComposerNormal)
+            .lookup(seq("g").keys());
+        assert_eq!((g.binding, g.is_prefix), (None, false));
+    }
+
+    #[test]
+    fn a_user_binding_of_g_and_a_digit_replaces_the_default() {
+        let index = [("index".to_owned(), ArgValue::Integer(3))];
+        let third = one(Action::from_spec("message.react", &index).unwrap());
+        let km = Keymap::new(&space(), [(TableId::Timeline, seq("g1"), third)]);
+        let timeline = km.effective(InputContext::Timeline);
+        assert_eq!(timeline.get(seq("g1").keys()), Some(&react(3)));
+        assert_eq!(timeline.get(seq("g2").keys()), Some(&react(2)));
     }
 
     /// The lines under `[keymap.<table>]` up to the next empty line.
