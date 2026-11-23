@@ -236,7 +236,7 @@ editors' own `/` shows only the current match, while you type it.
 | `e` | `message.edit` | edit your own text message (the composer must be empty) |
 | `dd` | `message.delete` | delete your own message, after `y` |
 | `yy` | `message.yank` | copy the message's text |
-| `+` | `message.react` | react with the emoji picker, which lists the reactions under the message first; an emoji you already chose removes your reaction |
+| `+` | `message.react` | react with the emoji picker, which lists the reactions under the message first: one of them toggles its own key (removes yours from it, or joins it); a typed emoji or any other entry removes your reaction with that emoji, or adds it |
 | `g1` … `g9` | `message.react` with `index = 1` … `9` | toggle the first … ninth reaction shown under the message: join it, or remove yours from it |
 | `gx` | `message.open` | open the link, or download and open the attachment |
 | `gd` | `message.goto_reply` | go to the message this one replies to |

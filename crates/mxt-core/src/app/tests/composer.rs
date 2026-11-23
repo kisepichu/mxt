@@ -1408,21 +1408,16 @@ fn react_with_an_index_toggles_the_reaction_shown_there() {
 /// the user's own under another key, or a key that is no emoji.
 #[test]
 fn react_with_an_index_toggles_the_key_of_the_emoji_pickers_entry_there() {
-    let group = |key: &str, mine: bool| ReactionGroup {
-        key: key.into(),
-        count: 2,
-        mine,
-    };
     let chips = vec![
-        group("\u{2764}\u{fe0f}", true),
-        group("👍", false),
-        group("\u{2764}", false),
-        group("lgtm", true),
-        group("🎉", true),
-        group("lol", false),
-        group("😂", false),
-        group("👍🏽", true),
-        group("🙏", false),
+        reacted("\u{2764}\u{fe0f}", true),
+        reacted("👍", false),
+        reacted("\u{2764}", false),
+        reacted("lgtm", true),
+        reacted("🎉", true),
+        reacted("lol", false),
+        reacted("😂", false),
+        reacted("👍🏽", true),
+        reacted("🙏", false),
     ];
     let mut app = opened();
     reset(
@@ -1447,18 +1442,13 @@ fn react_with_an_emoji_keeps_the_users_own_key_under_any_chips() {
     let bound = Binding::single(Action::MessageReact(ReactWith::Emoji(heart)));
     let mut app = app_with(vec![(TableId::Timeline, seq("<F2>"), bound)]);
     keys(&mut app, "<CR>");
-    let group = |key: &str, count: u32, mine: bool| ReactionGroup {
-        key: key.into(),
-        count,
-        mine,
-    };
     reset(
         &mut app,
         vec![with(msg(1), |item| {
             item.reactions = vec![
-                group("👍", 2, false),
-                group("\u{2764}", 1, true),
-                group("\u{2764}\u{fe0f}", 1, false),
+                reacted("👍", false),
+                reacted("\u{2764}", true),
+                reacted("\u{2764}\u{fe0f}", false),
             ];
         })],
     );

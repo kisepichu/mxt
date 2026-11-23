@@ -120,10 +120,10 @@ impl App {
 
     /// `message.react` on the item under the open room's timeline cursor,
     /// whichever pane has focus: with an emoji, toggles that reaction; with
-    /// an index, the reaction shown there under the item, with its own key
-    /// as the emoji picker's entry for it, or says it has none there;
-    /// otherwise opens the emoji picker. Refused without an open room, on an
-    /// empty timeline and on a deleted item.
+    /// an index, the reaction shown there under the item, sending that
+    /// chip's own key, as the emoji picker's entry for it does, or says it
+    /// has none there; otherwise opens the emoji picker. Refused without an
+    /// open room, on an empty timeline and on a deleted item.
     pub(super) fn react(&mut self, with: ReactWith, effects: &mut Vec<Effect>) {
         let Some(room) = &self.open_room else {
             return self.set_status(StatusKind::Error, "No room is open");
