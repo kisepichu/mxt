@@ -288,29 +288,43 @@ fn t_in_a_thread_keeps_it() {
 #[test]
 fn react_with_an_index_in_a_thread_counts_the_reactions_of_the_threads_message() {
     let mut app = opened();
-    let reacted = |mut entry: TimelineEntry, key: &str| {
+    let reacted = |mut entry: TimelineEntry, reactions: &[(&str, bool)]| {
         if let TimelineEntry::Item(item) = &mut entry {
-            item.reactions = vec![ReactionGroup {
-                key: key.into(),
-                count: 1,
-                mine: false,
-            }];
+            item.reactions = reactions
+                .iter()
+                .map(|&(key, mine)| ReactionGroup {
+                    key: key.into(),
+                    count: 1,
+                    mine,
+                })
+                .collect();
         }
         entry
     };
-    let root = || with_replies(2, reacted(msg(2), "👀"));
-    reset(&mut app, vec![msg(1), root(), reacted(msg(3), "😂")]);
-    keys(&mut app, "kt");
-    thread_reset(&mut app, 2, vec![root(), msg(10), reacted(msg(11), "🎉")]);
-    // On the newest reply, which the cursor follows.
-    assert_eq!(
-        no_timers(keys(&mut app, "g1")),
+    let toggle = |key: &str| {
         vec![Effect::Matrix(MatrixEffect::ToggleReaction {
             room: id(C),
             item: ItemRef::Remote(event(11)),
-            key: "🎉".into(),
+            key: key.into(),
         })]
+    };
+    let root = || with_replies(2, reacted(msg(2), &[("👀", false)]));
+    reset(
+        &mut app,
+        vec![msg(1), root(), reacted(msg(3), &[("😂", false)])],
     );
+    keys(&mut app, "kt");
+    // The user's ❤ without the variation selector, another user's ❤️.
+    let hearts = [("\u{2764}", true), ("\u{2764}\u{fe0f}", false)];
+    thread_reset(
+        &mut app,
+        2,
+        vec![root(), msg(10), reacted(msg(11), &hearts)],
+    );
+    // On the newest reply, which the cursor follows: `g2` joins the second
+    // chip with its key, `g1` removes the user's own.
+    assert_eq!(no_timers(keys(&mut app, "g2")), toggle("\u{2764}\u{fe0f}"));
+    assert_eq!(no_timers(keys(&mut app, "g1")), toggle("\u{2764}"));
     keys(&mut app, "k");
     assert_eq!(no_timers(keys(&mut app, "g1")), vec![]);
     assert_eq!(status(&app), Some("The message has no reaction 1"));

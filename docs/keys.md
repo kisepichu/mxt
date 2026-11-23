@@ -236,8 +236,8 @@ editors' own `/` shows only the current match, while you type it.
 | `e` | `message.edit` | edit your own text message (the composer must be empty) |
 | `dd` | `message.delete` | delete your own message, after `y` |
 | `yy` | `message.yank` | copy the message's text |
-| `+` | `message.react` | react with the emoji picker, which lists the reactions under the message first; an emoji you already chose removes your reaction |
-| `g1` … `g9` | `message.react` with `index = 1` … `9` | toggle the first … ninth reaction shown under the message: add yours, or remove it if it is there |
+| `+` | `message.react` | react with the emoji picker, which lists the reactions under the message first: one of them toggles its own key (removes yours from it, or joins it); a typed emoji or any other entry removes your reaction with that emoji, or adds it |
+| `g1` … `g9` | `message.react` with `index = 1` … `9` | toggle the first … ninth reaction shown under the message: join it, or remove yours from it |
 | `gx` | `message.open` | open the link, or download and open the attachment |
 | `gd` | `message.goto_reply` | go to the message this one replies to |
 | `R` | `message.resend` | send a message marked `failed` again |
@@ -254,9 +254,13 @@ names. Up to mxt 0.1.5, your own reactions came first, then the common
 ones.
 
 `g1` … `g9` count the reactions in the order they are shown under the
-message: under `👍 2  ❤️ 1`, `g1` toggles 👍 and `g2` toggles ❤️. Each adds
-yours with that emoji, or removes yours if you already reacted with it, so
-a second `g1` takes yours back. On a message with fewer reactions, the
+message: under `👍 2  ❤️ 1`, `g1` toggles 👍 and `g2` toggles ❤️. Each
+joins that reaction with its key, or removes yours if you are among its
+senders, so a second `g1` takes yours back. Some clients send ❤ without
+its variation selector, so one emoji can show as two reactions: if yours
+is the plain ❤ in `❤ 1  ❤️ 1`, `g2` adds a ❤️ next to it and `g1` removes
+yours. The emoji picker's first entries toggle the same keys, so `g2`
+does what `+<C-n><CR>` does. On a message with fewer reactions, the
 status line says so (`The message has no reaction 3`) and nothing is sent.
 In the composer, `g` and a digit go to the editor as before; these keys
 are the timeline's only.
