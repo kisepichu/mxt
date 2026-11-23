@@ -203,7 +203,7 @@ In the message view:
 
 With `ui.timeline.images = "on"`, image messages and stickers show a
 preview under their `[image: …]` or `[sticker: …]` line, at most
-`ui.timeline.image_rows` rows tall (8 by default):
+`ui.timeline.image_rows` rows tall (16 by default):
 
 - The protocol is the message view's, except where iTerm2 graphics or
   sixel would pass through tmux, which neither moves nor removes them when

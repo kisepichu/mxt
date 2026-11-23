@@ -55,9 +55,16 @@ impl Emoji {
     /// Its first shortcode and the emoji (`:+1: 👍`); without a shortcode,
     /// the emoji and its name.
     pub fn label(self) -> String {
+        self.label_as(self.as_str())
+    }
+
+    /// [`Emoji::label`] with `key`, the form a reaction with the emoji was
+    /// sent in, for the emoji (`:heart: ❤` for `❤` without the variation
+    /// selector).
+    pub fn label_as(self, key: &str) -> String {
         match self.0.shortcode() {
-            Some(shortcode) => format!(":{shortcode}: {}", self.as_str()),
-            None => format!("{} {}", self.as_str(), self.0.name()),
+            Some(shortcode) => format!(":{shortcode}: {key}"),
+            None => format!("{key} {}", self.0.name()),
         }
     }
 }

@@ -1308,9 +1308,18 @@ and only `composer.normal` binds it (`composer.leave`).
 `<C-j>` inserts a newline because many terminals cannot tell Shift+Enter apart
 from Enter.
 
-The emoji picker lists, for an empty query, the user's own reactions on the
-message first, then the most common reactions, then every other emoji; a
-query is matched against shortcodes and names.
+The emoji picker lists, for an empty query, the reactions already on the
+message first, in the order the timeline shows them under it (others' and
+the user's own; `TimelineItem::shown_reactions` is that order for both),
+each toggling its own key, so choosing another user's reaction (`❤`
+without the variation selector, or a key that is no emoji) joins it;
+`+<CR>` toggles the first one and `+<C-n><CR>` the second. Then come the
+most common reactions, then every other emoji, each once (changed after
+0.1.5: the user's own reactions came first, then the common ones). A shown
+entry whose key is not its emoji's fully qualified form (`Emoji::as_str`)
+is labelled with the key as sent, `:heart: ❤` next to `:heart: ❤️`, so two
+reactions with one emoji can be told apart. A query is matched against
+shortcodes and names.
 
 `]u` opens the topmost unread room in the room list's order other than
 the open one (`pick = "first"`, which skips the open room; changed after
@@ -2488,8 +2497,9 @@ list, so mxt does not offer an event-level mention list.
 - Images in the timeline (added after 0.1.4). `ui.timeline.images = "on"`
   (off by default; `ui.image_preview = "off"` turns it off too) shows
   image messages and stickers with a preview below their `[image: …]` or
-  `[sticker: …]` line, at most `ui.timeline.image_rows` rows tall (8 by
-  default), with the message view's protocol choice:
+  `[sticker: …]` line, at most `ui.timeline.image_rows` rows tall (16 by
+  default; 8 up to 0.1.5, changed after it at the owner's request), with
+  the message view's protocol choice:
   - Layout, in the tui adapter alone. A preview's box is `image_rows` rows
     by the item's text width in columns, measured in the encoder's cell
     size in pixels (tmux's cell size for tmux's sixel,
@@ -2570,7 +2580,8 @@ list, so mxt does not offer an event-level mention list.
     not fetched, and one without a size is refused after the download
     when it is larger, as for the message view. 640 by 480 is one of the sizes
     Synapse makes ahead of time by default (`DEFAULT_THUMBNAIL_SIZES` in
-    `synapse/config/repository.py`), enough for 8 rows of 40-pixel cells.
+    `synapse/config/repository.py`), enough for the default 16 rows of
+    cells up to 30 pixels tall, or 12 rows of 40-pixel cells.
     Every fetch goes through the SDK's media cache (`get_media_content`
     with the cache, `media.rs:431-484`), so a preview fetched again after
     it left mxt's memory comes from the disk. A sticker's info and source
@@ -2765,7 +2776,7 @@ timeoutlen = 1000                                 # milliseconds
 room_list = { visible = true, sort = "recent", width = 30, network = "inline" }
 time_format = "%H:%M"                             # strftime, in the local time zone
 image_preview = "auto"                            # "auto" | "off" | "iterm2" | "sixel" | "kitty" | "halfblocks"
-timeline = { images = "off", image_rows = 8 }    # images: "off" | "on"; image_rows: 1 to 50
+timeline = { images = "off", image_rows = 16 }    # images: "off" | "on"; image_rows: 1 to 50
 read_receipts = "public"                          # "public" | "private"
 
 [files]
@@ -2792,8 +2803,9 @@ Settings:
   and images".
 - `ui.timeline` (added after 0.1.4) is a table: `images = "off"` (the
   default) or `"on"`, which shows image messages and stickers with a
-  preview in the timeline, and `image_rows`, an integer from 1 to 50 (8 by
-  default), the most rows a preview takes; see "Images in the timeline".
+  preview in the timeline, and `image_rows`, an integer from 1 to 50 (16
+  by default; 8 up to 0.1.5), the most rows a preview takes; see "Images
+  in the timeline".
   `ui.image_preview = "off"` turns previews off too, whatever `images`
   says. mxt 0.1.4 does not know the table and ignores it with a warning.
 - `ui.read_receipts = "public"` sends `m.read` receipts, which other users
@@ -2909,8 +2921,9 @@ without `emoji`, the action opens the emoji picker, as before. With `emoji`,
 it toggles that reaction: the key sent is the key of the user's own reaction
 on that message when it is the same emoji (compared through `Emoji::get`,
 so `❤` without the variation selector matches `❤️`), otherwise the emoji
-itself (`Emoji::as_str`), the same choice the emoji picker makes, so a
-second `:react heart` removes the reaction rather than adding a second one.
+itself (`Emoji::as_str`), the same choice the emoji picker makes for a
+query, so a second `:react heart` removes the reaction rather than adding a
+second one.
 A binding such as `{ action = "message.react", emoji = "thumbsup" }` reacts
 with one key.
 

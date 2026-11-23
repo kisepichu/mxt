@@ -29,7 +29,7 @@ timeoutlen = 1000                                 # milliseconds
 room_list = { visible = true, sort = "recent", width = 30, network = "inline" }
 time_format = "%H:%M"                             # strftime, in the local time zone
 image_preview = "auto"                            # "auto" | "off" | "iterm2" | "sixel" | "kitty" | "halfblocks"
-timeline = { images = "off", image_rows = 8 }     # images: "off" | "on"; image_rows: 1 to 50
+timeline = { images = "off", image_rows = 16 }    # images: "off" | "on"; image_rows: 1 to 50
 read_receipts = "public"                          # "public" | "private"
 
 [files]
@@ -290,11 +290,12 @@ image_rows = 12
 | Key | Default | Values | Meaning |
 |---|---|---|---|
 | `images` | `"off"` | `"off"`, `"on"` | `"on"` shows image messages and stickers with a preview under their `[image: …]` or `[sticker: …]` line, in the graphics protocol of the message view (see [Terminal setup](terminal.md#previews-in-the-timeline)). `ui.image_preview = "off"` turns previews off too. |
-| `image_rows` | `8` | an integer from 1 to 50 | The most rows a preview takes. A preview keeps the image's proportions within that many rows and the timeline's width, and is never larger than the image. |
+| `image_rows` | `16` | an integer from 1 to 50 | The most rows a preview takes. A preview keeps the image's proportions within that many rows and the timeline's width, and is never larger than the image. |
 
 mxt 0.1.4 does not know `ui.timeline`: it ignores the table with a
 warning, so a configuration shared with machines that run 0.1.4 can carry
-it.
+it. Up to mxt 0.1.5, `image_rows` was 8 by default; `image_rows = 8` keeps
+that size.
 
 ## `[files]`
 

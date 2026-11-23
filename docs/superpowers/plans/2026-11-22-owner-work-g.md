@@ -574,7 +574,8 @@ Core:
 `mxt-tui`:
 
 - [ ] `lib.rs`: `pub struct ImageRows(u16)` with `new(i64) ->
-  Option<ImageRows>` (1 to 50), `Default` 8, `get()`, as `RoomListWidth`.
+  Option<ImageRows>` (1 to 50), `Default` 8 (16 after 0.1.5, at the
+  owner's request), `get()`, as `RoomListWidth`.
 - [ ] `image_view.rs`: `decode` and `tmux_sixel` become `pub(crate)`;
   `Images::preview_encoder() -> PreviewEncoder` (`Picker(Picker)`,
   `Halfblocks` without a picker, or `TmuxSixel(FontSize)`), giving
@@ -1192,7 +1193,8 @@ After the release with G1, the owner, in WezTerm, in the test room only,
 on the check device, with `[ui.timeline] images = "on"`:
 
 1. Send a small test PNG with `:upload`. Its line shows
-   `[image: <name> <w>x<h>]` with the preview under it, at most 8 rows,
+   `[image: <name> <w>x<h>]` with the preview under it, at most
+   `image_rows` rows (8 by default in 0.1.5, 16 after it),
    in proportion, while rows were blank only until it loaded and nothing
    below moved.
 2. Hold `j` and `k` across it, outside tmux (iTerm2 graphics) and inside

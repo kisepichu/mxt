@@ -101,7 +101,7 @@ timeoutlen = 1000
 room_list = { visible = true, sort = "recent", width = 30, network = "inline" }
 time_format = "%H:%M"
 image_preview = "auto"
-timeline = { images = "off", image_rows = 8 }
+timeline = { images = "off", image_rows = 16 }
 read_receipts = "public"
 
 [files]
@@ -269,10 +269,7 @@ fn timeline_images_are_off_by_default_and_on_with_their_rows() {
         rows("[ui]\ntimeline = { images = \"on\", image_rows = 12 }\n"),
         ImageRows::new(12)
     );
-    assert_eq!(
-        rows("[ui.timeline]\nimages = \"on\"\n"),
-        Some(ImageRows::default())
-    );
+    assert_eq!(rows("[ui.timeline]\nimages = \"on\"\n"), ImageRows::new(16));
     assert_eq!(
         rows("[ui.timeline]\nimages = \"off\"\nimage_rows = 12\n"),
         None

@@ -64,7 +64,8 @@ reactions follow the message as `👍 2` (yours in bold). Images show as
 `[sticker: …]`, `(deleted)`, `(unable to decrypt)` (the key may still
 arrive) and `(unsupported: …)`. With `ui.timeline.images = "on"` (see
 [Configuration](configuration.md#uitimeline)), an image's or a sticker's
-preview follows its line, at most `ui.timeline.image_rows` rows tall.
+preview follows its line, at most `ui.timeline.image_rows` rows tall (16
+by default).
 A message taller than the pane is cut with `[+N lines]`; `<CR>` shows it in
 full. Date dividers and a `new messages` line, where you stopped reading,
 come between messages.
@@ -235,7 +236,7 @@ editors' own `/` shows only the current match, while you type it.
 | `e` | `message.edit` | edit your own text message (the composer must be empty) |
 | `dd` | `message.delete` | delete your own message, after `y` |
 | `yy` | `message.yank` | copy the message's text |
-| `+` | `message.react` | react with the emoji picker; an emoji you already chose removes your reaction |
+| `+` | `message.react` | react with the emoji picker, which lists the reactions under the message first; an emoji you already chose removes your reaction |
 | `gx` | `message.open` | open the link, or download and open the attachment |
 | `gd` | `message.goto_reply` | go to the message this one replies to |
 | `R` | `message.resend` | send a message marked `failed` again |
@@ -243,6 +244,13 @@ editors' own `/` shows only the current match, while you type it.
 
 A message that failed for a passing reason, such as a lost connection, also
 goes out by itself once the sync is back; `R` is for the others.
+
+The emoji picker lists, before you type, the reactions already on the
+message in the order they are shown under it, yours among them, so `+<CR>`
+toggles the first one and `+<C-n><CR>` the second; then the common
+reactions and every other emoji, each once. Typing searches shortcodes and
+names. Up to mxt 0.1.5, your own reactions came first, then the common
+ones.
 
 `t` did nothing in the timeline before mxt had threads. It is in
 `timeline`, which comes before `normal`, so if your configuration binds
