@@ -2,9 +2,9 @@ use std::collections::HashSet;
 
 use super::timeline::{event, item, local, msg, opened, remote, reset, status};
 use super::*;
-use crate::action::FocusMode;
+use crate::action::{FocusMode, ReactWith};
 use crate::effect::{Outgoing, OutgoingKind};
-use crate::emoji;
+use crate::emoji::{self, Emoji};
 use crate::ids::{SendId, TxnId, UserId};
 use crate::mention::{Member, MentionRef, RenderedBody, render_mentions};
 use crate::rich::{Block, Inline, MentionTarget, RichText, Style};
@@ -1365,9 +1365,13 @@ fn react_with_an_index_toggles_the_reaction_shown_there() {
     assert_eq!(no_timers(keys(&mut app, "g1")), vec![toggle(1, "👍")]);
     // The user's own reaction: its key, which removes it.
     assert_eq!(no_timers(keys(&mut app, "g2")), vec![toggle(1, "\u{2764}")]);
-    // Another user's reaction with the emoji the user reacted with: the
-    // user's key, so their reaction goes, as with `:react heart`.
-    assert_eq!(no_timers(keys(&mut app, "g3")), vec![toggle(1, "\u{2764}")]);
+    // Another user's reaction with the emoji the user reacted with under
+    // another key: its own key, so the user's joins it rather than removing
+    // the second chip.
+    assert_eq!(
+        no_timers(keys(&mut app, "g3")),
+        vec![toggle(1, "\u{2764}\u{fe0f}")]
+    );
     assert_eq!(no_timers(keys(&mut app, "g4")), vec![toggle(1, "lgtm")]);
     // Past the last reaction: a status, and nothing is sent.
     assert_eq!(no_timers(keys(&mut app, "g5")), vec![]);
@@ -1382,10 +1386,90 @@ fn react_with_an_index_toggles_the_reaction_shown_there() {
     );
     assert_eq!(no_timers(keys(&mut app, "g1")), vec![toggle(1, "👍")]);
 
+    // The SDK shows the user's ❤️ after `g3`, next to their ❤: the second
+    // `g3` removes it with its key, and `g2` still removes the ❤.
+    let mut joined = shown(false);
+    joined[2] = group("\u{2764}\u{fe0f}", 2, true);
+    reset(&mut app, vec![with(msg(1), |item| item.reactions = joined)]);
+    assert_eq!(
+        no_timers(keys(&mut app, "g3")),
+        vec![toggle(1, "\u{2764}\u{fe0f}")]
+    );
+    assert_eq!(no_timers(keys(&mut app, "g2")), vec![toggle(1, "\u{2764}")]);
+
     // A message without reactions has none to toggle.
     reset(&mut app, vec![msg(2)]);
     assert_eq!(no_timers(keys(&mut app, "g1")), vec![]);
     assert_eq!(status(&app), Some("The message has no reaction 1"));
+}
+
+/// `gN` toggles the key the emoji picker's N-th entry toggles, whichever
+/// chip is shown at N: the user's own, another user's, one with the emoji of
+/// the user's own under another key, or a key that is no emoji.
+#[test]
+fn react_with_an_index_toggles_the_key_of_the_emoji_pickers_entry_there() {
+    let group = |key: &str, mine: bool| ReactionGroup {
+        key: key.into(),
+        count: 2,
+        mine,
+    };
+    let chips = vec![
+        group("\u{2764}\u{fe0f}", true),
+        group("👍", false),
+        group("\u{2764}", false),
+        group("lgtm", true),
+        group("🎉", true),
+        group("lol", false),
+        group("😂", false),
+        group("👍🏽", true),
+        group("🙏", false),
+    ];
+    let mut app = opened();
+    reset(
+        &mut app,
+        vec![with(msg(1), |item| item.reactions = chips.clone())],
+    );
+    for (n, chip) in (1..).zip(&chips) {
+        let index = no_timers(keys(&mut app, &format!("g{n}")));
+        assert_eq!(index, vec![toggle(1, &chip.key)], "g{n}");
+        keys(&mut app, "+");
+        let next = "<C-n>".repeat(n - 1);
+        let picked = no_timers(keys(&mut app, &format!("{next}<CR>")));
+        assert_eq!(picked, index, "the picker's entry {n}");
+    }
+}
+
+/// The `emoji` argument names an emoji, not a chip: the user's own key with
+/// that emoji, else the emoji itself, under the chips where `g3` joins ❤️.
+#[test]
+fn react_with_an_emoji_keeps_the_users_own_key_under_any_chips() {
+    let heart = Emoji::parse("heart").unwrap();
+    let bound = Binding::single(Action::MessageReact(ReactWith::Emoji(heart)));
+    let mut app = app_with(vec![(TableId::Timeline, seq("<F2>"), bound)]);
+    keys(&mut app, "<CR>");
+    let group = |key: &str, count: u32, mine: bool| ReactionGroup {
+        key: key.into(),
+        count,
+        mine,
+    };
+    reset(
+        &mut app,
+        vec![with(msg(1), |item| {
+            item.reactions = vec![
+                group("👍", 2, false),
+                group("\u{2764}", 1, true),
+                group("\u{2764}\u{fe0f}", 1, false),
+            ];
+        })],
+    );
+    assert_eq!(
+        command(&mut app, "react heart"),
+        vec![toggle(1, "\u{2764}")]
+    );
+    assert_eq!(
+        no_timers(keys(&mut app, "<F2>")),
+        vec![toggle(1, "\u{2764}")]
+    );
 }
 
 #[test]

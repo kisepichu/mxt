@@ -2947,14 +2947,18 @@ counted from 1 in the order the timeline draws the chips (`👍 2  ❤️ 1`:
 `index = 1` is 👍). That order is `TimelineItem::shown_reactions`, the
 single source the tui draws the chips from and the emoji picker lists
 them in, so the core and the pane cannot disagree. After the same checks
-of the cursor's message, the key sent is the group's key when the user is
-among its senders, which removes their reaction; otherwise, as for
-`emoji`, the key of the user's own reaction with the same emoji when
-there is one, and else the group's key, so the user's reaction joins the
-group shown (`❤ 2` becomes `❤ 3` rather than `❤ 2  ❤️ 1`) and a second
-press removes it. A key `emojis` does not know (a reaction with text) is
-sent as it is. Without a reaction at that place the status line says
-`The message has no reaction <N>` and nothing is
+of the cursor's message, the key sent is that chip's own key, the key the
+emoji picker's entry for it toggles: when the user is among its senders,
+it removes their reaction; otherwise their reaction joins the chip
+(`❤ 2` becomes `❤ 3` rather than `❤ 2  ❤️ 1`), and a second press
+removes it. This holds when the user reacted with the same emoji under
+another key too: under `❤ 1` (the user's) `❤️ 1`, `index = 2` sends `❤️`
+and joins the second chip rather than removing the first, since the
+user presses the chip they see, and `index = 1` removes their `❤`.
+`emoji` keeps its own rule, the user's own key with that emoji, since it
+names an emoji rather than a chip. A key `emojis` does not know (a
+reaction with text) is sent as it is. Without a reaction at that place
+the status line says `The message has no reaction <N>` and nothing is
 sent. `index` and `emoji` are exclusive: a binding with both is rejected
 when the configuration is loaded, as `pick` with `query` is; an `index`
 that is not a positive integer (`index = 0`, `index = "1"`) is an error of
