@@ -1247,17 +1247,7 @@ fn react_acts_on_the_open_rooms_timeline_cursor_from_the_room_list_too() {
     );
 }
 
-/// `!c` open, with `g1` to `g5` bound to `message.react` with `index = 1`
-/// to `5`.
-fn indexed() -> App {
-    let bindings = (1..=5)
-        .map(|n| (TableId::Timeline, seq(&format!("g{n}")), react_at(n)))
-        .collect();
-    let mut app = app_with(bindings);
-    keys(&mut app, "<CR>");
-    app
-}
-
+/// `g1` to `g9`, bound by default in `timeline`.
 #[test]
 fn react_with_an_index_toggles_the_reaction_shown_there() {
     let group = |key: &str, count: u32, mine: bool| ReactionGroup {
@@ -1265,7 +1255,7 @@ fn react_with_an_index_toggles_the_reaction_shown_there() {
         count,
         mine,
     };
-    let mut app = indexed();
+    let mut app = opened();
     let shown = |thumbs_mine: bool| {
         vec![
             group("👍", 2, thumbs_mine),
@@ -1322,7 +1312,7 @@ fn react_and_plus_say_why_they_do_nothing() {
         assert_eq!(status(app).map(str::to_owned), said);
         said
     };
-    let mut app = app_with(vec![(TableId::Timeline, seq("g1"), react_at(1))]);
+    let mut app = app();
     // `+` is bound in the timeline, which has focus without an open room.
     keys(&mut app, "<C-w>l");
     assert_eq!(react(&mut app).as_deref(), Some("No room is open"));
@@ -1333,6 +1323,32 @@ fn react_and_plus_say_why_they_do_nothing() {
         vec![with(msg(1), |item| item.content = MessageContent::Redacted)],
     );
     assert_eq!(react(&mut app).as_deref(), Some("The message is deleted"));
+}
+
+#[test]
+fn g_and_a_digit_in_the_composers_normal_mode_go_to_the_editor_and_never_react() {
+    let mut app = opened();
+    let thumbs = ReactionGroup {
+        key: "👍".into(),
+        count: 1,
+        mine: false,
+    };
+    reset(
+        &mut app,
+        vec![with(msg(1), |item| item.reactions = vec![thumbs])],
+    );
+    keys(&mut app, "i");
+    let replay = |text: &str| ui(UiEffect::ReplayKeys(seq(text).keys().to_vec()));
+    // `g` waits for no binding here, so edtui gets it and waits for its
+    // `gg`: the digit goes to edtui without the keymap.
+    assert_eq!(normal(&mut app, "g"), vec![replay("g")]);
+    assert_eq!(
+        no_timers(keys_in(&mut app, "1", Some(EditorMode::AwaitingChar))),
+        vec![replay("1")]
+    );
+    // A digit in normal mode is no count in the composer either.
+    assert_eq!(normal(&mut app, "g2"), vec![replay("g"), replay("2")]);
+    assert_eq!(app.focus(), Focus::Composer);
 }
 
 /// `R`, bound by default, resends the failed local echo under the cursor.

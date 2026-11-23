@@ -385,13 +385,15 @@ fn an_unknown_emoji_points_at_its_argument() {
 
 #[test]
 fn a_reaction_index_loads_and_its_errors_point_at_it() {
+    // Over the default `g1`, `index = 1`.
     let c = ok(&format!(
-        "{MINIMAL}[keymap.timeline]\n\"g1\" = {{ action = \"message.react\", index = 1 }}\n"
+        "{MINIMAL}[keymap.timeline]\n\"g1\" = {{ action = \"message.react\", index = 3 }}\n"
     ));
     let g1 = [Key::char('g'), Key::char('1')];
     let react = c.keymap.effective(InputContext::Timeline).get(&g1);
-    let first = Action::MessageReact(ReactWith::Index(std::num::NonZeroUsize::MIN));
-    assert_eq!(react, Some(&Binding::single(first)));
+    let third = std::num::NonZeroUsize::new(3).unwrap();
+    let third = Action::MessageReact(ReactWith::Index(third));
+    assert_eq!(react, Some(&Binding::single(third)));
 
     let header =
         |args: &str| format!("{MINIMAL}[keymap.timeline.g1]\naction = \"message.react\"\n{args}");

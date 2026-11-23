@@ -287,8 +287,7 @@ fn t_in_a_thread_keeps_it() {
 
 #[test]
 fn react_with_an_index_in_a_thread_counts_the_reactions_of_the_threads_message() {
-    let mut app = app_with(vec![(TableId::Timeline, seq("g1"), react_at(1))]);
-    keys(&mut app, "<CR>");
+    let mut app = opened();
     let reacted = |mut entry: TimelineEntry, key: &str| {
         if let TimelineEntry::Item(item) = &mut entry {
             item.reactions = vec![ReactionGroup {

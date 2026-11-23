@@ -1,5 +1,5 @@
 use super::*;
-use crate::action::{Action, ArgValue, Binding};
+use crate::action::{Action, Binding};
 use crate::effect::{Effect, MatrixEffect, RecoveryKey, UiEffect};
 use crate::ids::{RoomId, TimelineId, Timestamp, UserId};
 use crate::keymap::{Keymap, TableId};
@@ -106,11 +106,6 @@ fn last_timer(effects: &[Effect]) -> TimerId {
 /// The number of grapheme clusters on the recovery key prompt.
 fn secret_len(app: &App) -> Option<usize> {
     app.secret_prompt().map(|secret| secret.clusters)
-}
-/// `message.react` with `index = n`, built as the configuration builds it.
-fn react_at(n: i64) -> Binding {
-    let index = [("index".to_owned(), ArgValue::Integer(n))];
-    Binding::single(Action::from_spec("message.react", &index).unwrap())
 }
 
 #[test]

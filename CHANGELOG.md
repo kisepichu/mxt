@@ -11,8 +11,16 @@ marked **Breaking:**.
 ### Added
 
 - `message.react` takes `index = N` and toggles the N-th reaction shown
-  under the message (yours added or removed); for example
-  `"g1" = { action = "message.react", index = 1 }` in `[keymap.timeline]`.
+  under the message (yours added or removed); `g1` … `g9` in the timeline
+  (and in a thread) are the default keys for `index = 1` … `9`, so under
+  `👍 2  ❤️ 1`, `g1` toggles 👍. In the composer, `g` and a digit still go
+  to the editor.
+
+### Changed
+
+- `g1` … `g9` in the timeline react, so a binding of them in
+  `[keymap.normal]` no longer applies while the timeline has focus; bind it
+  in `[keymap.timeline]` too to keep it there.
 
 ## [0.1.5] - 2026-11-23
 

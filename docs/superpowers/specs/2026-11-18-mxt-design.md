@@ -711,8 +711,8 @@ covered by unit tests.
     it (the next key matched no binding, or `ui.timeoutlen` passed). Keys
     resolved afresh with that release still go through the keymap (see
     "Keymap resolver"); keys typed after it go to edtui. No default binding
-    in those tables starts with `g`: `gg`, `gx` and `gd` are in `room_list`
-    and `timeline`.
+    in those tables starts with `g`: `gg` is in `room_list` and `timeline`,
+    and `gx`, `gd` and `g1` … `g9` are in `timeline`.
   - The black hole register (added after 0.1.4): `"` in the editors'
     normal and visual mode, with no key waiting, is mxt's. edtui binds no
     key sequence that starts with `"` in these modes (it appears only in
@@ -1232,6 +1232,7 @@ instead, and it never takes more than half of the width.
 | `timeline` | `dd` | `message.delete` (own messages only, after confirmation) | delete line |
 | `timeline` | `yy` | `message.yank` | same |
 | `timeline` | `+` | `message.react` (opens the emoji picker) | |
+| `timeline` | `g1` … `g9` | `{ action = "message.react", index = 1 }` … `index = 9` (the reaction shown at that place under the message) | |
 | `timeline` | `gx` | `message.open` (link or attachment) | `gx` |
 | `timeline` | `gd` | `message.goto_reply` (the replied-to message) | go to definition |
 | `timeline` | `R` | `message.resend` (a failed message) | |
@@ -1285,6 +1286,16 @@ shown, so a binding of them in `normal` still works in the main timeline.
 `t` is in `timeline`, which comes before `normal`: a binding of `t` in
 `normal` no longer applies while the timeline has focus, unless it is also
 written in `timeline` (see "Threads").
+
+`g1` … `g9` (added after 0.1.5) did nothing in the timeline before: `g`
+waited for `gg`, `gx` or `gd`, and a digit after it matched none, so the
+`g` was dropped and the digit started a count. Like `t`, they are in
+`timeline`, so a binding of them in `normal` no longer applies while the
+timeline has focus unless it is also written in `timeline`; a shown
+thread gets them through `thread`'s fallback to `timeline`. No table of
+the editors falls back to `timeline` (see "Tables and resolution"), so in
+the composer's and the message view's normal mode `g` still goes to
+edtui, which takes the digit as the key after its `g` and drops both.
 
 `<Esc>` in `message_view` was `view.close` up to 0.1.4, in normal and
 visual mode alike, so `V` then `<Esc>` closed the view where vim leaves
@@ -1661,8 +1672,8 @@ Opening:
   without the unread mark.
 - Every key of the timeline works on the thread's items as on the main
   timeline's: the cursor moves and their counts, `/`, `n`, `N`, `<CR>`,
-  `r`, `e`, `dd`, `yy`, `+` and `:react`, `gx`, `gd` (see "Going to the
-  replied-to message" below), `R`, `i` and `a`, and back
+  `r`, `e`, `dd`, `yy`, `+` and `:react`, `g1` … `g9`, `gx`, `gd` (see
+  "Going to the replied-to message" below), `R`, `i` and `a`, and back
   pagination near the oldest item. `room.mark_read`, `room.mute` and
   `room.unmute` act on the room.
 
@@ -2932,10 +2943,8 @@ the status line says `The message has no reaction <N>` and nothing is
 sent. `index` and `emoji` are exclusive: a binding with both is rejected
 when the configuration is loaded, as `pick` with `query` is; an `index`
 that is not a positive integer (`index = 0`, `index = "1"`) is an error of
-the wrong type. `:react` takes no index. There is no default key; no
-default binding starts with `g` and a digit, which are kept for bindings
-such as `"g1" = { action = "message.react", index = 1 }` in
-`[keymap.timeline]`.
+the wrong type. `:react` takes no index. `g1` … `g9` in `timeline` are
+the default keys for `index = 1` … `9` (see "Default keymap").
 
 `room.join` (added after the first release) takes `target`, a non-empty
 string, required: a room alias, a room ID, a user ID, a matrix.to link or
