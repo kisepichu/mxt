@@ -1152,7 +1152,8 @@ fn the_emoji_picker_lists_the_shown_reactions_then_common_emoji_and_toggles_one(
     );
     let picker = app.picker().unwrap();
     assert_eq!(picker.items[2].label, "lol");
-    assert_eq!(picker.items[3].label, ":heart: ❤️");
+    // Labelled with the key as sent, which lacks the variation selector.
+    assert_eq!(picker.items[3].label, ":heart: \u{2764}");
     // Each emoji once: the shown ones are not listed again.
     let labels: HashSet<&str> = picker.items.iter().map(|i| i.label.as_str()).collect();
     assert_eq!(labels.len(), picker.items.len());
@@ -1200,6 +1201,52 @@ fn the_emoji_picker_lists_the_shown_reactions_then_common_emoji_and_toggles_one(
     assert_eq!(keys(&mut app, "<Esc>"), vec![]);
     assert!(app.picker().is_none());
     assert_eq!(app.timeline_cursor(), Some(0));
+}
+
+#[test]
+fn the_emoji_picker_toggles_each_shown_reaction_with_its_own_key() {
+    let mut app = opened();
+    let open = |app: &mut App, reactions: Vec<ReactionGroup>| {
+        reset(app, vec![with(msg(1), |item| item.reactions = reactions)]);
+        keys(app, "+");
+    };
+    let labels = |app: &App, n: usize| -> Vec<String> {
+        let items = &app.picker().unwrap().items[..n];
+        items.iter().map(|item| item.label.clone()).collect()
+    };
+    // Another user's ❤ without its variation selector: choosing it joins
+    // their reaction, and ❤️ is not listed again among the common emoji.
+    open(&mut app, vec![reacted("\u{2764}", false)]);
+    assert_eq!(labels(&app, 1), [":heart: \u{2764}"]);
+    assert_eq!(first_keys(&app, 3), reaction_keys(["\u{2764}", "👍", "😂"]));
+    let qualified = PickerKey::Reaction("\u{2764}\u{fe0f}".into());
+    let items = &app.picker().unwrap().items;
+    assert!(items.iter().all(|item| item.key != qualified));
+    assert_eq!(keys(&mut app, "<CR>"), vec![toggle(1, "\u{2764}")]);
+
+    // Another user's ❤ and the user's own ❤️: two entries in the shown
+    // order, told apart by their labels, each toggling its own key.
+    open(
+        &mut app,
+        vec![
+            reacted("\u{2764}", false),
+            reacted("\u{2764}\u{fe0f}", true),
+        ],
+    );
+    assert_eq!(
+        labels(&app, 2),
+        [":heart: \u{2764}", ":heart: \u{2764}\u{fe0f}"]
+    );
+    assert_eq!(
+        first_keys(&app, 3),
+        reaction_keys(["\u{2764}", "\u{2764}\u{fe0f}", "👍"])
+    );
+    assert_eq!(keys(&mut app, "<CR>"), vec![toggle(1, "\u{2764}")]);
+    keys(&mut app, "+");
+    assert_eq!(
+        keys(&mut app, "<C-n><CR>"),
+        vec![toggle(1, "\u{2764}\u{fe0f}")]
+    );
 }
 
 #[test]

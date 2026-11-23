@@ -1310,11 +1310,16 @@ from Enter.
 
 The emoji picker lists, for an empty query, the reactions already on the
 message first, in the order the timeline shows them under it (others' and
-the user's own; `TimelineItem::shown_reactions` is that order for both), so
-`+<CR>` toggles the first one and `+<C-n><CR>` the second; then the most
-common reactions, then every other emoji, each once (changed after 0.1.5:
-the user's own reactions came first, then the common ones). A query is
-matched against shortcodes and names.
+the user's own; `TimelineItem::shown_reactions` is that order for both),
+each toggling its own key, so choosing another user's reaction (`❤`
+without the variation selector, or a key that is no emoji) joins it;
+`+<CR>` toggles the first one and `+<C-n><CR>` the second. Then come the
+most common reactions, then every other emoji, each once (changed after
+0.1.5: the user's own reactions came first, then the common ones). A shown
+entry whose key is not its emoji's fully qualified form (`Emoji::as_str`)
+is labelled with the key as sent, `:heart: ❤` next to `:heart: ❤️`, so two
+reactions with one emoji can be told apart. A query is matched against
+shortcodes and names.
 
 `]u` opens the topmost unread room in the room list's order other than
 the open one (`pick = "first"`, which skips the open room; changed after
@@ -2916,8 +2921,9 @@ without `emoji`, the action opens the emoji picker, as before. With `emoji`,
 it toggles that reaction: the key sent is the key of the user's own reaction
 on that message when it is the same emoji (compared through `Emoji::get`,
 so `❤` without the variation selector matches `❤️`), otherwise the emoji
-itself (`Emoji::as_str`), the same choice the emoji picker makes, so a
-second `:react heart` removes the reaction rather than adding a second one.
+itself (`Emoji::as_str`), the same choice the emoji picker makes for a
+query, so a second `:react heart` removes the reaction rather than adding a
+second one.
 A binding such as `{ action = "message.react", emoji = "thumbsup" }` reacts
 with one key.
 

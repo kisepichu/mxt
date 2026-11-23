@@ -265,9 +265,10 @@ fn link_items(urls: &[String], query: &str) -> Vec<PickerItem> {
 
 /// The emoji for `query`, each once. An empty query lists the reactions on
 /// the item first, in the order the timeline shows them (others' and the
-/// user's own), each toggling its own key; then the most common reactions,
-/// then every other emoji in `emojis` order. A query ranks every emoji, each
-/// toggling the key from [`reaction_key`].
+/// user's own), each toggling its own key and labelled with it, so two
+/// reactions with one emoji (`❤` and `❤️`) can be told apart; then the most
+/// common reactions, then every other emoji in `emojis` order. A query ranks
+/// every emoji, each toggling the key from [`reaction_key`].
 fn emoji_items(query: &str, shown: &[ReactionGroup]) -> Vec<PickerItem> {
     let item = |label: String, key: String| PickerItem {
         label,
@@ -288,7 +289,7 @@ fn emoji_items(query: &str, shown: &[ReactionGroup]) -> Vec<PickerItem> {
             if let Some(emoji) = emoji {
                 listed.insert(emoji.as_str());
             }
-            let label = emoji.map_or_else(|| group.key.clone(), Emoji::label);
+            let label = emoji.map_or_else(|| group.key.clone(), |emoji| emoji.label_as(&group.key));
             item(label, group.key.clone())
         })
         .collect();
