@@ -45,7 +45,7 @@ pub enum ReactWith {
     /// The reaction with this emoji.
     Emoji(Emoji),
     /// The reaction shown at this place under the message, from 1, in the
-    /// order of `TimelineItem::reactions`, which the timeline draws.
+    /// order of `TimelineItem::shown_reactions`, which the timeline draws.
     Index(NonZeroUsize),
 }
 

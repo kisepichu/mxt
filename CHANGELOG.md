@@ -14,7 +14,7 @@ marked **Breaking:**.
   under the message (yours added or removed); `g1` … `g9` in the timeline
   (and in a thread) are the default keys for `index = 1` … `9`, so under
   `👍 2  ❤️ 1`, `g1` toggles 👍. In the composer, `g` and a digit still go
-  to the editor.
+  to the editor. mxt 0.1.5 ignores a binding with `index` with a warning.
 
 ### Changed
 
