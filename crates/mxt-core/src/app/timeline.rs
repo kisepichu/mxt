@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use super::jumps::AfterGone;
 use super::{App, Confirm, Focus, Motion, StatusKind, View};
 use crate::effect::{Effect, MatrixEffect, UiEffect, ViewContent};
-use crate::ids::{EventId, RoomId, TimelineId, Timestamp};
+use crate::ids::{EventId, RoomId, TimelineId, Timestamp, UserId};
 use crate::msg::{EditorMode, Pane};
 use crate::rich::is_web_url;
 use crate::settings::ImagePreview;
@@ -416,10 +416,11 @@ impl App {
     /// sticker shows its details (a sticker's body as its name), and its
     /// image is fetched unless previews are off; other items show their
     /// text, with the search's matches on it while the highlight is shown.
-    /// An image or a sticker that is still a local echo is refused:
-    /// the adapter fetches media by remote event. Keys resolved again after
-    /// it are resolved in normal mode, the mode the tui opens the view's
-    /// editor in.
+    /// Either comes with the lines of who reacted (`reaction_lines`), which
+    /// the view shows as they are now: it is a snapshot. An image or a
+    /// sticker that is still a local echo is refused: the adapter fetches
+    /// media by remote event. Keys resolved again after it are resolved in
+    /// normal mode, the mode the tui opens the view's editor in.
     pub(super) fn view_message(&mut self, effects: &mut Vec<Effect>) {
         let (Some(room), Some(item)) = (&self.open_room, self.timeline.cursor_item()) else {
             return;
@@ -439,12 +440,14 @@ impl App {
                 name: name.clone(),
                 size: *size,
                 dimensions: *dimensions,
+                reactions: reaction_lines(item, &self.me),
             },
             MessageContent::Sticker { body, dimensions } => ViewContent::Image {
                 item: item.id.clone(),
                 name: body.clone(),
                 size: None,
                 dimensions: *dimensions,
+                reactions: reaction_lines(item, &self.me),
             },
             content => {
                 let text = content.plain_text();
@@ -452,7 +455,11 @@ impl App {
                     Some(needle) => needle.find_in(&text),
                     None => Vec::new(),
                 };
-                ViewContent::Text { text, matches }
+                ViewContent::Text {
+                    text,
+                    matches,
+                    reactions: reaction_lines(item, &self.me),
+                }
             }
         };
         let fetch = matches!(content, ViewContent::Image { .. })
@@ -475,6 +482,7 @@ impl App {
         let content = ViewContent::Text {
             text,
             matches: Vec::new(),
+            reactions: Vec::new(),
         };
         effects.push(Effect::Ui(UiEffect::OpenView(content)));
         self.view = Some(View::Help);
@@ -742,6 +750,46 @@ impl App {
             None => self.set_status(StatusKind::Error, "Nothing to resend"),
         }
     }
+}
+
+/// The message view's lines of who reacted to `item` (design, "Who
+/// reacted"): one per reaction in the order the timeline shows them,
+/// `<key> <names>`, the senders in their order (oldest first) joined by
+/// `, `, each written `you` when it is `me`, else as its name, else as its
+/// user ID. A line break in a name or a key would split its line, so each
+/// control character and each line or paragraph separator in them is
+/// written as a space.
+fn reaction_lines(item: &TimelineItem, me: &UserId) -> Vec<String> {
+    item.shown_reactions()
+        .iter()
+        .map(|group| {
+            let mut line = String::new();
+            push_on_one_line(&mut line, &group.key);
+            for (n, sender) in group.senders.iter().enumerate() {
+                line.push_str(if n == 0 { " " } else { ", " });
+                let name = if sender.user == *me {
+                    "you"
+                } else {
+                    sender.name.as_deref().unwrap_or(sender.user.as_str())
+                };
+                push_on_one_line(&mut line, name);
+            }
+            line
+        })
+        .collect()
+}
+
+/// Appends `text` to `line` with each control character (`\n`, `\r`, `\t`
+/// and the rest) and each U+2028 and U+2029 as a space.
+fn push_on_one_line(line: &mut String, text: &str) {
+    let flat = |c: char| {
+        if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+            ' '
+        } else {
+            c
+        }
+    };
+    line.extend(text.chars().map(flat));
 }
 
 fn as_item(entry: &TimelineEntry) -> Option<&TimelineItem> {

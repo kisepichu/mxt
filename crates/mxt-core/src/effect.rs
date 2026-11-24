@@ -226,24 +226,31 @@ pub enum MatrixEffect {
     },
 }
 
-/// What the message view shows.
+/// What the message view shows. A message's `reactions` are one line per
+/// reaction shown under it, in that order, with who reacted (design, "Who
+/// reacted"), which the view appends after an empty line; empty for the
+/// help views and for a message without reactions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ViewContent {
     /// The text for the scratch editor: a message's or a help view's. A
     /// message's has the byte ranges of the search's matches on it while
     /// the highlight is shown (design, "Search and jumps"); a help view's
-    /// has none.
+    /// has none. The matches are in `text`, which comes first, never in the
+    /// reaction lines.
     Text {
         text: String,
         matches: Vec<Range<usize>>,
+        reactions: Vec<String>,
     },
     /// An image message or a sticker: its name (a sticker's body), size and
-    /// dimensions, and the image once `UiEffect::ShowImage` brings it.
+    /// dimensions, which the reaction lines follow, and the image once
+    /// `UiEffect::ShowImage` brings it.
     Image {
         item: ItemRef,
         name: String,
         size: Option<u64>,
         dimensions: Option<(u32, u32)>,
+        reactions: Vec<String>,
     },
 }
 

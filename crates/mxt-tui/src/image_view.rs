@@ -236,6 +236,20 @@ impl Images {
     }
 }
 
+#[cfg(test)]
+impl Images {
+    /// Images as sixel for tmux to store, in cells of `cell` pixels,
+    /// without asking the terminal or tmux: in a test buffer, an image's
+    /// first cell holds its sixel.
+    pub(crate) fn tmux_sixel_in(cell: FontSize) -> Images {
+        Images {
+            encoder: Encoder::TmuxSixel(cell),
+            kept: Recent::new(KEPT),
+            failure: None,
+        }
+    }
+}
+
 /// How timeline previews are encoded, from [`Images::preview_encoder`].
 #[derive(Clone)]
 pub(crate) enum PreviewEncoder {

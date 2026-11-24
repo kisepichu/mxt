@@ -10,8 +10,7 @@ use crate::mention::{Member, MentionRef, RenderedBody, render_mentions};
 use crate::rich::{Block, Inline, MentionTarget, RichText, Style};
 use crate::rooms::{Pick, RoomFilter, RoomTarget};
 use crate::timeline::{
-    Draft, ItemRef, MessageContent, ReactionGroup, ReactionSender, SendState, TimelineDiff,
-    TimelineEntry, TimelineItem,
+    Draft, ItemRef, MessageContent, ReactionGroup, SendState, TimelineDiff, TimelineEntry,
 };
 
 const C: &str = "!c:example.org";
@@ -19,13 +18,6 @@ const B: &str = "!b:example.org";
 const A: &str = "!a:example.org";
 const ALICE: &str = "@alice:example.org";
 
-/// Changes the item of `entry`.
-fn with(mut entry: TimelineEntry, change: impl FnOnce(&mut TimelineItem)) -> TimelineEntry {
-    if let TimelineEntry::Item(item) = &mut entry {
-        change(item);
-    }
-    entry
-}
 /// An item sent by the user.
 fn own(id: ItemRef, body: &str) -> TimelineEntry {
     with(item(id, body), |item| item.sender = UserId::new(ME))
@@ -1089,18 +1081,6 @@ fn opening_another_room_or_losing_the_open_room_closes_what_belongs_to_it() {
     assert_eq!(app.confirmation(), None);
 }
 
-/// The reactions with `key` from `senders`, oldest first, without names.
-fn group(key: &str, senders: &[&str], mine: bool) -> ReactionGroup {
-    let senders = senders.iter().map(|user| ReactionSender {
-        user: UserId::new(*user),
-        name: None,
-    });
-    ReactionGroup {
-        key: key.into(),
-        senders: senders.collect(),
-        mine,
-    }
-}
 /// The keys of the open picker's first `n` items.
 fn first_keys(app: &App, n: usize) -> Vec<PickerKey> {
     let items = &app.picker().unwrap().items[..n];
@@ -1119,10 +1099,10 @@ fn the_emoji_picker_lists_the_shown_reactions_then_common_emoji_and_toggles_one(
             // ❤ without its variation selector, as some clients send it,
             // and a key that is no emoji.
             item.reactions = vec![
-                group("👍", &[ALICE], false),
-                group("🎉", &[ME], true),
-                group("lol", &[ALICE], false),
-                group("\u{2764}", &[ME], true),
+                group("👍", &[ALICE]),
+                group("🎉", &[ME]),
+                group("lol", &[ALICE]),
+                group("\u{2764}", &[ME]),
             ];
         })],
     );
@@ -1221,7 +1201,7 @@ fn the_emoji_picker_toggles_each_shown_reaction_with_its_own_key() {
     };
     // Another user's ❤ without its variation selector: choosing it joins
     // their reaction, and ❤️ is not listed again among the common emoji.
-    open(&mut app, vec![group("\u{2764}", &[ALICE], false)]);
+    open(&mut app, vec![group("\u{2764}", &[ALICE])]);
     assert_eq!(labels(&app, 1), [":heart: \u{2764}"]);
     assert_eq!(first_keys(&app, 3), reaction_keys(["\u{2764}", "👍", "😂"]));
     let qualified = PickerKey::Reaction("\u{2764}\u{fe0f}".into());
@@ -1234,8 +1214,8 @@ fn the_emoji_picker_toggles_each_shown_reaction_with_its_own_key() {
     open(
         &mut app,
         vec![
-            group("\u{2764}", &[ALICE], false),
-            group("\u{2764}\u{fe0f}", &[ME], true),
+            group("\u{2764}", &[ALICE]),
+            group("\u{2764}\u{fe0f}", &[ME]),
         ],
     );
     assert_eq!(
@@ -1291,7 +1271,7 @@ fn react_with_an_emoji_toggles_it_with_the_users_own_key() {
     }
     // Without the user's own reaction (another user's does not count), the
     // emoji itself.
-    let heart = |mine: bool| group("\u{2764}", if mine { &[ME] } else { &[ALICE] }, mine);
+    let heart = |mine: bool| group("\u{2764}", if mine { &[ME] } else { &[ALICE] });
     reset(
         &mut app,
         vec![with(msg(1), |item| item.reactions = vec![heart(false)])],
@@ -1345,13 +1325,13 @@ fn react_with_an_index_toggles_the_reaction_shown_there() {
     let shown = |thumbs_mine: bool| {
         let thumbs: &[&str] = if thumbs_mine { &[ALICE, ME] } else { &[ALICE] };
         vec![
-            group("👍", thumbs, thumbs_mine),
+            group("👍", thumbs),
             // The user's heart, without the variation selector.
-            group("\u{2764}", &[ME], true),
+            group("\u{2764}", &[ME]),
             // Another user's heart, with it.
-            group("\u{2764}\u{fe0f}", &[ALICE], false),
+            group("\u{2764}\u{fe0f}", &[ALICE]),
             // Not an emoji `emojis` knows.
-            group("lgtm", &[ALICE], false),
+            group("lgtm", &[ALICE]),
         ]
     };
     reset(
@@ -1386,7 +1366,7 @@ fn react_with_an_index_toggles_the_reaction_shown_there() {
     // The SDK shows the user's ❤️ after `g3`, next to their ❤: the second
     // `g3` removes it with its key, and `g2` still removes the ❤.
     let mut joined = shown(false);
-    joined[2] = group("\u{2764}\u{fe0f}", &[ALICE, ME], true);
+    joined[2] = group("\u{2764}\u{fe0f}", &[ALICE, ME]);
     reset(&mut app, vec![with(msg(1), |item| item.reactions = joined)]);
     assert_eq!(
         no_timers(keys(&mut app, "g3")),
@@ -1406,15 +1386,15 @@ fn react_with_an_index_toggles_the_reaction_shown_there() {
 #[test]
 fn react_with_an_index_toggles_the_key_of_the_emoji_pickers_entry_there() {
     let chips = vec![
-        group("\u{2764}\u{fe0f}", &[ME], true),
-        group("👍", &[ALICE], false),
-        group("\u{2764}", &[ALICE], false),
-        group("lgtm", &[ME], true),
-        group("🎉", &[ME], true),
-        group("lol", &[ALICE], false),
-        group("😂", &[ALICE], false),
-        group("👍🏽", &[ME], true),
-        group("🙏", &[ALICE], false),
+        group("\u{2764}\u{fe0f}", &[ME]),
+        group("👍", &[ALICE]),
+        group("\u{2764}", &[ALICE]),
+        group("lgtm", &[ME]),
+        group("🎉", &[ME]),
+        group("lol", &[ALICE]),
+        group("😂", &[ALICE]),
+        group("👍🏽", &[ME]),
+        group("🙏", &[ALICE]),
     ];
     let mut app = opened();
     reset(
@@ -1443,9 +1423,9 @@ fn react_with_an_emoji_keeps_the_users_own_key_under_any_chips() {
         &mut app,
         vec![with(msg(1), |item| {
             item.reactions = vec![
-                group("👍", &[ALICE], false),
-                group("\u{2764}", &[ME], true),
-                group("\u{2764}\u{fe0f}", &[ALICE], false),
+                group("👍", &[ALICE]),
+                group("\u{2764}", &[ME]),
+                group("\u{2764}\u{fe0f}", &[ALICE]),
             ];
         })],
     );
@@ -1489,7 +1469,7 @@ fn react_and_plus_say_why_they_do_nothing() {
 #[test]
 fn g_and_a_digit_in_the_composers_normal_mode_go_to_the_editor_and_never_react() {
     let mut app = opened();
-    let thumbs = group("👍", &[ALICE], false);
+    let thumbs = group("👍", &[ALICE]);
     reset(
         &mut app,
         vec![with(msg(1), |item| item.reactions = vec![thumbs])],

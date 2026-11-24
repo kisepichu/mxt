@@ -140,18 +140,25 @@ pub(crate) struct View {
 }
 
 impl View {
-    /// An image's details are its name, then its size and dimensions. A
-    /// text's search matches are underlined and bold (design, "Search and
-    /// jumps"): the editor draws a selection reversed, and a selection's
-    /// style replaces a highlight's.
+    /// An image's details are its name, then its size and dimensions. The
+    /// lines of who reacted follow the text or the details after an empty
+    /// line (design, "Who reacted"). A text's search matches, byte ranges
+    /// in the message's text, which comes first, are underlined and bold
+    /// (design, "Search and jumps"): the editor draws a selection
+    /// reversed, and a selection's style replaces a highlight's.
     pub(crate) fn new(content: ViewContent, register: SharedRegister) -> View {
-        let (text, matches, image) = match content {
-            ViewContent::Text { text, matches } => (text, matches, None),
+        let (mut text, matches, reactions, image) = match content {
+            ViewContent::Text {
+                text,
+                matches,
+                reactions,
+            } => (text, matches, reactions, None),
             ViewContent::Image {
                 item,
                 name,
                 size,
                 dimensions,
+                reactions,
             } => {
                 let details: Vec<String> = size
                     .map(file_size)
@@ -163,13 +170,19 @@ impl View {
                 } else {
                     format!("{name}\n{}", details.join(GAP))
                 };
-                (text, Vec::new(), Some(item))
+                (text, Vec::new(), reactions, Some(item))
             }
         };
+        let highlights = match_highlights(&text, &matches);
+        if !reactions.is_empty() {
+            text.push('\n');
+            for line in &reactions {
+                text.push('\n');
+                text.push_str(line);
+            }
+        }
         let mut editor = Editor::new(&text, register);
-        editor
-            .state
-            .set_highlights(match_highlights(&text, &matches));
+        editor.state.set_highlights(highlights);
         View { editor, image }
     }
 
@@ -179,16 +192,21 @@ impl View {
     }
 
     /// Over `area`: the editor, and for an image the image a row below
-    /// the details, once `images` keeps it.
+    /// the details, once `images` keeps it. The details take the rows they
+    /// need, up to a limit of half the height inside the block, the limit
+    /// never under two rows, and scroll within it, so that many reaction
+    /// lines leave the image room.
     fn draw(&mut self, frame: &mut Frame, area: Rect, images: Option<&mut Images>) {
         let block = Block::new().padding(Padding::horizontal(1));
         let Some(item) = &self.image else {
             self.editor.draw(frame, area, block, true);
             return;
         };
-        let rows = self.editor.rows(usize::from(block.inner(area).width));
+        let inner = block.inner(area);
+        let rows = self.editor.rows(usize::from(inner.width));
+        let limit = (inner.height / 2).max(2);
         let [details, _, image] = Layout::vertical([
-            Constraint::Length(u16::try_from(rows).unwrap_or(u16::MAX)),
+            Constraint::Length(u16::try_from(rows).unwrap_or(u16::MAX).min(limit)),
             Constraint::Length(1),
             Constraint::Fill(1),
         ])
@@ -994,6 +1012,8 @@ pub(crate) mod tests {
         timeline: TimelinePane,
         overlays: Overlays,
         pub(crate) previews: Option<Previews>,
+        /// The message view's images.
+        images: Option<Images>,
         /// Whether the last frame must be drawn again on a cleared screen
         /// (see `Previews::finish_frame`).
         pub(crate) again: bool,
@@ -1018,6 +1038,7 @@ pub(crate) mod tests {
                 timeline: TimelinePane::new(),
                 overlays: Overlays::default(),
                 previews: None,
+                images: None,
                 again: false,
             }
         }
@@ -1035,7 +1056,7 @@ pub(crate) mod tests {
                         room_list_layout: self.room_list_layout,
                         timeline: &mut self.timeline,
                         view,
-                        images: None,
+                        images: self.images.as_mut(),
                         previews: self.previews.as_mut(),
                         composer: None,
                         overlays: &mut self.overlays,
@@ -1112,11 +1133,12 @@ pub(crate) mod tests {
         }
     }
 
-    /// The view of message 3's text, without matches.
+    /// The view of message 3's text, without matches or reactions.
     fn message_3() -> ViewContent {
         ViewContent::Text {
             text: "message 3".to_owned(),
             matches: Vec::new(),
+            reactions: Vec::new(),
         }
     }
 
@@ -1240,6 +1262,7 @@ pub(crate) mod tests {
         let content = ViewContent::Text {
             text: "see foo.bar(baz) now".to_owned(),
             matches: Vec::new(),
+            reactions: Vec::new(),
         };
         let mut view = View::new(content, register.clone());
         type_in_view(&mut app, &mut view, "wllviWy");
@@ -1260,6 +1283,7 @@ pub(crate) mod tests {
         let content = ViewContent::Text {
             text: "日本のテキスト\nmatch".to_owned(),
             matches: vec![9..15, 22..27],
+            reactions: Vec::new(),
         };
         let mut view = View::new(content, SharedRegister::default());
         screen.draw(&app, Some(&mut view));
@@ -1290,6 +1314,140 @@ pub(crate) mod tests {
             assert!(!modifier.contains(matched), "{x}");
         }
         assert!(screen.cell(7, 0).modifier.contains(matched));
+    }
+
+    /// The item of the image views.
+    fn image_item() -> ItemRef {
+        ItemRef::Remote(EventId::new("$1:example.org"))
+    }
+
+    #[test]
+    fn the_message_view_shows_who_reacted_after_the_text_or_the_details_and_an_empty_line() {
+        let reactions = || vec!["👍 Alice, you".to_owned(), "🎉 @bob:example.org".to_owned()];
+        let content = ViewContent::Text {
+            text: "message 3".to_owned(),
+            matches: Vec::new(),
+            reactions: reactions(),
+        };
+        let view = View::new(content, SharedRegister::default());
+        assert_eq!(
+            view.editor.state.lines.to_string(),
+            "message 3\n\n👍 Alice, you\n🎉 @bob:example.org"
+        );
+        let content = ViewContent::Image {
+            item: image_item(),
+            name: "cat.png".to_owned(),
+            size: Some(2048),
+            dimensions: Some((640, 480)),
+            reactions: reactions(),
+        };
+        let view = View::new(content, SharedRegister::default());
+        assert_eq!(
+            view.editor.state.lines.to_string(),
+            "cat.png\n2.0 KiB  640x480\n\n👍 Alice, you\n🎉 @bob:example.org"
+        );
+    }
+
+    #[test]
+    fn a_reaction_line_of_many_names_wraps_at_the_views_width() {
+        let names: Vec<String> = (1..=30).map(|n| format!("Name{n:02}")).collect();
+        // `👍 ` 3 columns, the names 180, the separators 58.
+        let line = format!("👍 {}", names.join(", "));
+        assert_eq!(text_width(&line), 241);
+        let content = ViewContent::Text {
+            text: "hi".to_owned(),
+            matches: Vec::new(),
+            reactions: vec![line],
+        };
+        let mut view = View::new(content, SharedRegister::default());
+        // 38 columns inside the padding: 6 full rows, then 13 columns.
+        let mut screen = Screen::of(40, 12, RoomListLayout::default());
+        screen.draw(&app(), Some(&mut view));
+        let rows = screen_rows(&screen);
+        assert_eq!(
+            rows[..3],
+            [" hi", "", " 👍 Name01, Name02, Name03, Name04, Nam"]
+        );
+        assert_eq!(rows[8..10], [" ame29, Name30", ""]);
+    }
+
+    /// An image view of `content`, whose item is `image_item()`, with its
+    /// image kept, drawn 40 columns wide in a view `height` rows high: the
+    /// rows above the image without the padding, and the row the image
+    /// starts on.
+    fn draw_image_view(content: ViewContent, height: u16) -> (Vec<String>, u16) {
+        let mut images = Images::tmux_sixel_in(ratatui_image::FontSize::new(10, 20));
+        // 10 by 6 cells.
+        let mut png = Vec::new();
+        image::RgbImage::new(100, 120)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let screen_size = ratatui::layout::Size::new(40, height);
+        images.insert(image_item(), &png, screen_size).unwrap();
+        let mut screen = Screen::of(40, height + 1, RoomListLayout::default());
+        screen.images = Some(images);
+        let mut view = View::new(content, SharedRegister::default());
+        screen.draw(&app(), Some(&mut view));
+        // The sixel, in the first cell of the image's area.
+        let image = (0..height)
+            .find(|&y| screen.cell(1, y).symbol().starts_with('\u{1b}'))
+            .expect("the image is drawn");
+        let rows = (0..image).map(|y| screen.row(y).trim().to_owned());
+        (rows.collect(), image)
+    }
+
+    #[test]
+    fn an_images_details_take_at_most_half_of_the_view_and_the_image_the_rest() {
+        let image = |reactions| ViewContent::Image {
+            item: image_item(),
+            name: "cat.png".to_owned(),
+            size: Some(2048),
+            dimensions: Some((640, 480)),
+            reactions,
+        };
+        // 18 rows of details in a view 20 rows high: the first 10, the gap,
+        // then the image.
+        let lines = (1..=15).map(|n| format!("👍 Name{n:02}")).collect();
+        let (rows, image_row) = draw_image_view(image(lines), 20);
+        assert_eq!(image_row, 11);
+        assert_eq!(rows[..4], ["cat.png", "2.0 KiB  640x480", "", "👍 Name01"]);
+        assert_eq!(rows[9..], ["👍 Name07", ""]);
+
+        // Without reactions the details keep their two rows, and a sticker
+        // without size and dimensions its one.
+        let (rows, image_row) = draw_image_view(image(Vec::new()), 20);
+        assert_eq!(rows, ["cat.png", "2.0 KiB  640x480", ""]);
+        assert_eq!(image_row, 3);
+        let sticker = ViewContent::Image {
+            item: image_item(),
+            name: "a happy cat".to_owned(),
+            size: None,
+            dimensions: None,
+            reactions: Vec::new(),
+        };
+        let (rows, image_row) = draw_image_view(sticker, 20);
+        assert_eq!(rows, ["a happy cat", ""]);
+        assert_eq!(image_row, 2);
+    }
+
+    #[test]
+    fn a_yank_of_the_whole_message_view_takes_the_reaction_lines_too() {
+        use edtui::clipboard::ClipboardTrait as _;
+        let mut app = app();
+        press(&mut app, "<CR>");
+        app.update(reset("!a:example.org", 1..4));
+        press(&mut app, "<CR>");
+        let register = SharedRegister::default();
+        let content = ViewContent::Text {
+            text: "message 3".to_owned(),
+            matches: Vec::new(),
+            reactions: vec!["👍 Alice, you".to_owned()],
+        };
+        let mut view = View::new(content, register.clone());
+        type_in_view(&mut app, &mut view, "ggVGy");
+        // The yank holds the message, then the reaction line.
+        let yanked = register.for_editor().get_text();
+        assert!(yanked.ends_with("message 3\n\n👍 Alice, you"), "{yanked:?}");
     }
 
     #[test]

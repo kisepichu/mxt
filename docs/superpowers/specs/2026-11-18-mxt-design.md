@@ -1072,7 +1072,10 @@ covered by unit tests.
     scroll in the editor within the limit, and the image gets the rest
     below the gap row, so a long list of reactions never leaves the image
     without room. Before, the details took the rows they needed, one or
-    two.
+    two. edtui scrolls by whole lines of the text, not by rows on the
+    screen, so a single reaction line that wraps to more rows than the
+    limit is cut off at the limit and its last rows cannot be scrolled
+    to: widen the terminal or yank the line.
 - Replacing edtui later (with another editor widget or an in-house vim engine)
   only touches `mxt-tui`.
 
