@@ -528,15 +528,16 @@ on the room under the room list's cursor.
 
 `:mute`, `:unmute` and `:notify` change your account's push rules on the
 homeserver, so other clients, such as Beeper or Element on your phone,
-notify the same way. A bridged channel that the bridge set to mentions
-only counts among the rooms that notify (the `notify` sort key and
-`filter = "notify"`, see [Sort keys](configuration.md#sort-keys)) after
-`:notify all` from its next message on: the messages already unread keep
-their dim count until you read them, since each message counts as the
-rules were when it arrived. Likewise, after `:notify mentions` the unread
-messages that notified stay a bold count until read. `:notify all` on a
-muted room unmutes it, `:unmute` leaves a room set with `:notify` alone,
-and `:mute` then `:unmute` goes back to the account's default. mxt shows
+notify the same way. Each message counts as the rules were when it
+arrived, so after `:notify all` a bridged channel that the bridge set to
+mentions only keeps its dim count until its next message; from then on
+its bold count counts the messages since the change, not the ones already
+unread, and the room is among the rooms that notify (the `notify` sort
+key and `filter = "notify"`, see [Sort keys](configuration.md#sort-keys)).
+Likewise, after `:notify mentions` the unread messages that notified stay
+a bold count until read. `:notify all` or `:notify mentions` on a muted
+room unmutes it, `:unmute` leaves a room set with `:notify` alone, and
+`:mute` then `:unmute` goes back to the account's default. mxt shows
 no label for these settings, only `Muted` for muted rooms, which comes and
 goes as you run `:mute`, `:unmute` or `:notify`; if the change fails, the
 setting goes back and the status line shows the error.

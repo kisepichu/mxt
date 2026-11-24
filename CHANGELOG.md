@@ -21,13 +21,14 @@ marked **Breaking:**.
   alone shows the room's setting, and the status line says what changed or
   that it already was so. The action is `room.notify` with `mode = "all"`
   or `"mentions"`. This is your account's push rule, so other clients,
-  such as Beeper on your phone, notify the same way. A bridged channel set
-  to mentions only then counts among the rooms that notify (the `notify`
-  sort key, `filter = "notify"`) from its next message on; messages that
-  were already unread keep their dim count until read. `:notify all` on a
-  muted room unmutes it, and `:mute` then `:unmute` goes back to the
-  account's default. mxt 0.1.5 ignores a binding of `room.notify` with a
-  warning.
+  such as Beeper on your phone, notify the same way. After `:notify all`,
+  a bridged channel set to mentions only keeps its dim count until its
+  next message; from then on its bold count counts the messages since the
+  change, not the ones already unread, and the room is among the rooms
+  that notify (the `notify` sort key, `filter = "notify"`). `:notify
+  all` or `:notify mentions` on a muted room unmutes it, and `:mute` then
+  `:unmute` goes back to the account's default. mxt 0.1.5 ignores a
+  binding of `room.notify` with a warning.
 
 ### Changed
 
