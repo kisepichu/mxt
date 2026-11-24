@@ -473,13 +473,12 @@ mod tests {
         }
         let open = format!("{:<1$}Open a room by its name", ":open <room>", longest + 2);
         assert_eq!(entries[0], open);
-        // As long as `:react [<emoji>]`, the longest usage.
-        let notify = format!(
-            "{:<1$}Set the room's notifications to all messages or mentions only, or show them",
-            ":notify [<mode>]",
-            longest + 2
-        );
-        assert_eq!(entries[4], notify);
-        assert_eq!(longest, ":react [<emoji>]".len());
+        // `:notify`'s usage does not move the column (design, "Commands").
+        let without_notify = COMMANDS
+            .iter()
+            .filter(|command| command.name != "notify")
+            .map(|command| command.usage().len())
+            .max();
+        assert_eq!(without_notify, Some(longest));
     }
 }

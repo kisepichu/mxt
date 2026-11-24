@@ -326,6 +326,17 @@ fn unmute_leaves_a_room_that_is_not_muted_alone() {
     keys(&mut app, "j");
     assert_eq!(no_timers(keys(&mut app, ":unmute<CR>")), vec![]);
     assert_eq!(status(&app), Some("b:example.org is not muted"));
+
+    // Set with `:notify all` a moment ago: refused at once, before the echo.
+    let mut app = on_b(NotificationMode::Default);
+    assert_eq!(
+        no_timers(keys(&mut app, ":notify all<CR>")),
+        vec![set_mode(B, NotificationMode::AllMessages)]
+    );
+    assert_eq!(no_timers(keys(&mut app, ":unmute<CR>")), vec![]);
+    assert_eq!(app.status().unwrap().kind, StatusKind::Error);
+    assert_eq!(status(&app), Some("b:example.org is not muted"));
+    assert_eq!(mode_of(&app, B), NotificationMode::AllMessages);
 }
 
 #[test]
