@@ -435,11 +435,8 @@ fn message_view_opens_and_closes() {
 }
 
 /// `entry`, an item, with `reactions` under it.
-pub(super) fn reacted(mut entry: TimelineEntry, reactions: Vec<ReactionGroup>) -> TimelineEntry {
-    if let TimelineEntry::Item(item) = &mut entry {
-        item.reactions = reactions;
-    }
-    entry
+pub(super) fn reacted(entry: TimelineEntry, reactions: Vec<ReactionGroup>) -> TimelineEntry {
+    with(entry, |item| item.reactions = reactions)
 }
 
 /// `group(key, senders)` with the senders' `names`, in their order.
@@ -489,11 +486,7 @@ fn the_message_view_lists_who_reacted_in_the_order_of_the_chips() {
 fn the_message_view_of_an_image_or_a_sticker_lists_who_reacted_too() {
     let mut app = opened();
     let with_content = |n: u32, content: MessageContent, reactions| {
-        let mut entry = reacted(msg(n), reactions);
-        if let TimelineEntry::Item(item) = &mut entry {
-            item.content = content;
-        }
-        entry
+        with(reacted(msg(n), reactions), |item| item.content = content)
     };
     let image = MessageContent::Image {
         name: "cat.png".into(),

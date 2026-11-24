@@ -600,7 +600,8 @@ The composer:
   reply started by mistake ends with `<Esc>` and nothing typed is lost.
 
 The message view (`<CR>` on a message; on a thread root with replies, in
-its thread) holds the message's text in an editor, so motions, `/` search,
+its thread) holds the message's text and who reacted (see
+[`timeline`](#timeline)) in an editor, so motions, `/` search,
 visual selection and yanks work on messages taller than the screen. `i`
 and other edits work too, but are discarded when the view closes. `q`
 closes it in normal and visual mode, and `<Esc>` in normal mode; in visual

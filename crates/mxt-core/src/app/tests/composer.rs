@@ -11,7 +11,6 @@ use crate::rich::{Block, Inline, MentionTarget, RichText, Style};
 use crate::rooms::{Pick, RoomFilter, RoomTarget};
 use crate::timeline::{
     Draft, ItemRef, MessageContent, ReactionGroup, SendState, TimelineDiff, TimelineEntry,
-    TimelineItem,
 };
 
 const C: &str = "!c:example.org";
@@ -19,13 +18,6 @@ const B: &str = "!b:example.org";
 const A: &str = "!a:example.org";
 const ALICE: &str = "@alice:example.org";
 
-/// Changes the item of `entry`.
-fn with(mut entry: TimelineEntry, change: impl FnOnce(&mut TimelineItem)) -> TimelineEntry {
-    if let TimelineEntry::Item(item) = &mut entry {
-        change(item);
-    }
-    entry
-}
 /// An item sent by the user.
 fn own(id: ItemRef, body: &str) -> TimelineEntry {
     with(item(id, body), |item| item.sender = UserId::new(ME))

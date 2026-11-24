@@ -7,7 +7,7 @@ use crate::keys::KeySeq;
 use crate::msg::{EditorMode, Msg, Pane};
 use crate::room::{NotificationMode, RoomKind, RoomName, RoomSummary, UnreadCounts};
 use crate::settings::Settings;
-use crate::timeline::{ReactionGroup, ReactionSender};
+use crate::timeline::{ReactionGroup, ReactionSender, TimelineEntry, TimelineItem};
 
 mod composer;
 mod files;
@@ -35,6 +35,14 @@ fn group(key: &str, senders: &[&str]) -> ReactionGroup {
         senders: users.collect(),
         mine: senders.contains(&ME),
     }
+}
+
+/// Changes the item of `entry`.
+fn with(mut entry: TimelineEntry, change: impl FnOnce(&mut TimelineItem)) -> TimelineEntry {
+    if let TimelineEntry::Item(item) = &mut entry {
+        change(item);
+    }
+    entry
 }
 
 fn space() -> KeySeq {

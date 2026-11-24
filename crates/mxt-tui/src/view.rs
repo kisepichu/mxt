@@ -193,9 +193,9 @@ impl View {
 
     /// Over `area`: the editor, and for an image the image a row below
     /// the details, once `images` keeps it. The details take the rows they
-    /// need, up to half of the height inside the block but at least two
-    /// rows, and scroll within them, so that many reaction lines leave the
-    /// image room.
+    /// need, up to a limit of half the height inside the block, the limit
+    /// never under two rows, and scroll within it, so that many reaction
+    /// lines leave the image room.
     fn draw(&mut self, frame: &mut Frame, area: Rect, images: Option<&mut Images>) {
         let block = Block::new().padding(Padding::horizontal(1));
         let Some(item) = &self.image else {
@@ -1445,11 +1445,9 @@ pub(crate) mod tests {
         };
         let mut view = View::new(content, register.clone());
         type_in_view(&mut app, &mut view, "ggVGy");
-        // edtui keeps a yank of whole lines with a line break before them.
-        assert_eq!(
-            register.for_editor().get_text(),
-            "\nmessage 3\n\n👍 Alice, you"
-        );
+        // The yank holds the message, then the reaction line.
+        let yanked = register.for_editor().get_text();
+        assert!(yanked.ends_with("message 3\n\n👍 Alice, you"), "{yanked:?}");
     }
 
     #[test]

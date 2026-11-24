@@ -5,7 +5,8 @@
 use std::num::NonZeroU32;
 
 use super::timeline::{
-    done, event, item, local, msg, opened, paginate, receipt, remote, reset, status, viewport,
+    done, event, item, local, msg, opened, paginate, reacted, receipt, remote, reset, status,
+    viewport,
 };
 use super::*;
 use crate::action::FocusMode;
@@ -13,8 +14,8 @@ use crate::effect::{Outgoing, OutgoingKind, ViewContent};
 use crate::ids::{EventId, SendId};
 use crate::mention::render_mentions;
 use crate::timeline::{
-    Draft, ItemRef, MessageContent, ReactionGroup, ReplyPreview, ThreadSummary, TimelineDiff,
-    TimelineEntry, TimelineItem,
+    Draft, ItemRef, MessageContent, ReplyPreview, ThreadSummary, TimelineDiff, TimelineEntry,
+    TimelineItem,
 };
 
 const A: &str = "!a:example.org";
@@ -366,12 +367,6 @@ fn enter_bound_to_message_view_in_the_timeline_shows_a_root_as_before() {
 #[test]
 fn react_with_an_index_in_a_thread_counts_the_reactions_of_the_threads_message() {
     let mut app = opened();
-    let reacted = |mut entry: TimelineEntry, reactions: &[ReactionGroup]| {
-        if let TimelineEntry::Item(item) = &mut entry {
-            item.reactions = reactions.to_vec();
-        }
-        entry
-    };
     let toggle = |key: &str| {
         vec![Effect::Matrix(MatrixEffect::ToggleReaction {
             room: id(C),
@@ -379,19 +374,15 @@ fn react_with_an_index_in_a_thread_counts_the_reactions_of_the_threads_message()
             key: key.into(),
         })]
     };
-    let root = || with_replies(2, reacted(msg(2), &[group("👀", &[BOB])]));
+    let root = || with_replies(2, reacted(msg(2), vec![group("👀", &[BOB])]));
     reset(
         &mut app,
-        vec![msg(1), root(), reacted(msg(3), &[group("😂", &[BOB])])],
+        vec![msg(1), root(), reacted(msg(3), vec![group("😂", &[BOB])])],
     );
     keys(&mut app, "kt");
     // The user's ❤ without the variation selector, another user's ❤️.
-    let hearts = [group("\u{2764}", &[ME]), group("\u{2764}\u{fe0f}", &[BOB])];
-    thread_reset(
-        &mut app,
-        2,
-        vec![root(), msg(10), reacted(msg(11), &hearts)],
-    );
+    let hearts = vec![group("\u{2764}", &[ME]), group("\u{2764}\u{fe0f}", &[BOB])];
+    thread_reset(&mut app, 2, vec![root(), msg(10), reacted(msg(11), hearts)]);
     // On the newest reply, which the cursor follows: `g2` joins the second
     // chip with its key, `g1` removes the user's own.
     assert_eq!(no_timers(keys(&mut app, "g2")), toggle("\u{2764}\u{fe0f}"));
