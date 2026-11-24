@@ -13,17 +13,21 @@ thread `<CR>` shows every message.
 
 **Architecture:** I1 adds `NotificationMode::AllMessages`, the action
 `room.notify` with its command, and replaces `MatrixEffect::SetMute` with
-`SetMode`, which `mxt-matrix` runs through `NotificationSettings` in the
-same ordered task; the room list task reports a mode change as the new
-`Msg::RoomModeChanged`, which carries no counts. I2 is two tasks. Task I2a
-(slot a) gives each `ReactionGroup` its senders, oldest reaction first,
-with display names that `mxt-matrix` reads from the SDK's store before it
-forwards a batch of timeline diffs; nothing a user sees changes. Task I2b
-(slot b) has the core build one line per reaction for the message view
-(`ViewContent`'s new `reactions`), which the tui appends to the view
-editor's text. I3 adds the action `message.enter` (a thread root with
-replies opens its thread, anything else the message view) on `<CR>` in
-`timeline`, and binds `<CR>` in `thread` to `message.view`.
+`SetMode { room, mode: NotificationMode }`, which `mxt-matrix` runs
+through `NotificationSettings` in the same ordered task. The core sets a
+room's mode as it sends `SetMode`, as optimistic clearing sets counts;
+the room list task reports a mode change as the new
+`Msg::RoomModeChanged`, which carries no counts, and the effect task
+sends it with the SDK's mode when a change fails. I2 is two tasks. Task
+I2a (slot a) gives each `ReactionGroup` its senders, oldest reaction
+first, with display names that `mxt-matrix` reads from the SDK's store
+before it forwards a batch of timeline diffs; nothing a user sees
+changes. Task I2b (slot b) has the core build one line per reaction for
+the message view (`ViewContent`'s new `reactions`), which the tui
+appends to the view editor's text. I3 adds the action `message.enter` (a
+thread root with replies opens its thread, anything else the message
+view, and every message while a thread is shown) on `<CR>` in
+`timeline`, which threads reach through `thread`'s fallback.
 
 **Tech Stack:** Rust 2024; matrix-sdk and matrix-sdk-ui 0.19.1
 (`NotificationSettings::set_room_notification_mode`,
@@ -79,13 +83,13 @@ tests; the edtui fork at `0f85e23` (the view editor); ratatui 0.30.
   breaking, each for the reason in its task. None renames or removes a
   configuration key, keymap table, action or command, none makes a
   configuration stop loading or gives a name another meaning, and none
-  moves stored data. I3 changes what the default `<CR>` does and adds a
-  default to `thread` that hides a `[keymap.timeline]` binding of `<CR>`
-  while a thread is shown: behaviour that leaves setups working, as `t`
-  in 0.1.4 and `g1` … `g9` after 0.1.5 hid `normal` bindings, so a
-  `### Changed` line that says how to get the old `<CR>` back. I1 and I2b
-  add features: `### Added` lines. The next release stays a patch
-  release.
+  moves stored data. I3 changes what the default `<CR>` does and hides no
+  binding (`thread` gets no `<CR>` of its own, so a `[keymap.timeline]`
+  `<CR>` still reaches threads): behaviour that leaves setups working, so
+  a `### Changed` line that says how to get the old `<CR>` back. I1 adds
+  a feature, an `### Added` line, and shows `:mute`'s and `:unmute`'s
+  label change at once, a `### Changed` line; I2b adds a feature, an
+  `### Added` line. The next release stays a patch release.
 
 ## Order and slots
 
@@ -198,11 +202,13 @@ helper), the action and command tests;
 **Breaking:** no. A new action (`room.notify`, its argument `mode` with
 the values `"all"` and `"mentions"`) and a new command (`:notify`, an
 unknown command before); `room.mute` and `room.unmute` keep their names
-and behaviour, and `:unmute` still refuses a room that is not muted. mxt
-0.1.5 reads a binding of `room.notify` as an unknown action, a warning
-that ignores it. Mapping a notifying room rule to `AllMessages` instead
-of `Default` shows nowhere (neither has a label). `SetMode` and
-`RoomModeChanged` are internal.
+and what they send, and `:unmute` still refuses a room that is not
+muted; their `Muted` label now changes at once instead of with the next
+sync (the optimistic mode), a `### Changed` line. mxt 0.1.5 reads a
+binding of `room.notify` as an unknown action, a warning that ignores
+it. Mapping a notifying room rule to `AllMessages` instead of `Default`
+shows nowhere (neither has a label). `SetMode` and `RoomModeChanged` are
+internal.
 
 Core:
 
@@ -228,19 +234,23 @@ Core:
 - [ ] `app/command_line.rs` `candidates`: `Some(("notify", prefix))`
   gives `notify all` and `notify mentions` that start with the trimmed
   prefix, in that order; the doc comment says so.
-- [ ] `effect.rs`: `pub enum ModeChange { Mute, Unmute, AllMessages,
-  MentionsAndKeywords }` and `MatrixEffect::SetMode { room: RoomId,
-  change: ModeChange }`, replacing `SetMute`, documented with the
-  design's "Notification modes" (run in order; the room's mode changes
-  when the SDK reports it).
+- [ ] `effect.rs`: `MatrixEffect::SetMode { room: RoomId, mode:
+  NotificationMode }`, replacing `SetMute`, documented with the design's
+  "Notification modes": the mode to reach, `Default` removing the room's
+  rules; run in order; the core has set the room's mode already, and a
+  failure sends `RoomModeChanged` with the SDK's mode.
 - [ ] `msg.rs`: `Msg::RoomModeChanged { room: RoomId, mode:
   NotificationMode }`, documented: the mode alone, the room's counts and
-  place stay.
+  place stay; sent by the room list task when the push rules change, and
+  by the effect task, with the SDK's mode, when a change fails.
 - [ ] `rooms.rs`: `RoomList::set_mode(&mut self, id: &RoomId, mode:
   NotificationMode)` sets the summary's mode in place and places nothing
-  (no sort key reads the mode); a room not in the list is ignored.
-- [ ] `app/rooms.rs`: `set_mute` sends `SetMode` with `Mute` or `Unmute`
-  (its texts and the refusal stay). `notify(mode: Option<NotifyMode>)`
+  (no sort key reads the mode); a room not in the list is ignored. The
+  core calls it when it sends `SetMode` and for `RoomModeChanged`.
+- [ ] `app/rooms.rs`: `set_mute` sends `SetMode` with `Mute` or
+  `Default` and sets the room's mode to it with `RoomList::set_mode` (its
+  texts and the refusal stay; the doc comment says the label changes at
+  once and a failure puts it back). `notify(mode: Option<NotifyMode>)`
   on `target_room()` ("No room" as an error without one): `None` shows
   the mode as info ("<room> notifies for every message", "<room>
   notifies for mentions and keywords only", "<room> is muted", "<room>
@@ -248,46 +258,64 @@ Core:
   mode (`All` and `AllMessages`, `Mentions` and `MentionsAndKeywords`)
   shows "<room> already notifies for every message" (or "… for mentions
   and keywords only") and sends nothing; otherwise it sends `SetMode`
-  with `AllMessages` or `MentionsAndKeywords` and shows "<room> now
-  notifies for every message" (or "… for mentions and keywords only").
-  `app.rs` runs `Action::RoomNotify` and applies `Msg::RoomModeChanged`
-  with `set_mode`.
+  with `AllMessages` or `MentionsAndKeywords`, sets the room's mode to it
+  and shows "<room> now notifies for every message" (or "… for mentions
+  and keywords only"). `app.rs` runs `Action::RoomNotify` and applies
+  `Msg::RoomModeChanged` with `set_mode`.
 - [ ] Core tests (`app/tests/room_actions.rs`, `command.rs`,
   `action.rs`): `:notify all` with the room list focused on a room with
-  `MentionsAndKeywords` gives `SetMode { room, AllMessages }` and "now
-  notifies for every message"; with the timeline focused it acts on the
-  open room, also while a thread is shown; `:notify mentions` likewise;
-  `:notify all` on an `AllMessages` room and `:notify mentions` on a
-  `MentionsAndKeywords` room send nothing and say "already …"; on a
-  `Mute` room `:notify all` sends the change; `:notify` alone shows each
-  of the four texts and sends nothing; no room gives "No room"; `:notify
-  x` and `:notify All` give the unknown mode error and no effect;
-  `:notify ` with `<Tab>` cycles `all`, `mentions`, and `:notify m<Tab>`
-  gives `notify mentions`; `:help` has a line for `:notify [<mode>]`;
-  `room.notify` from a binding with `mode = "all"`, without `mode`, with
-  `mode = "mute"` (`ActionError` of an unknown value) and with `mode = 1`
-  (wrong type); `RoomModeChanged` after `room.mark_read` on a room under
-  the room list's cursor keeps its zeroed counts and its index, changes
+  `MentionsAndKeywords` gives `SetMode { room, mode: AllMessages }`, "now
+  notifies for every message", and the room's mode `AllMessages` at
+  once; with the timeline focused it acts on the open room, also while a
+  thread is shown; `:notify mentions` likewise; `:notify all` on an
+  `AllMessages` room and `:notify mentions` on a `MentionsAndKeywords`
+  room send nothing and say "already …"; `:notify all` twice with no
+  `RoomModeChanged` in between sends one `SetMode` and the second says
+  "already …"; the reversal: on a `MentionsAndKeywords` room, `:notify
+  all` then `:notify mentions` with no `RoomModeChanged` in between sends
+  two `SetMode`s, `AllMessages` then `MentionsAndKeywords`, and the status
+  line says "<room> now notifies for mentions and keywords only"; a
+  failure: `:notify all` on a `MentionsAndKeywords` room, then
+  `RoomModeChanged { room, MentionsAndKeywords }` and `EffectFailed`
+  "Changing the room's notifications failed: …" leave the mode
+  `MentionsAndKeywords`, the status line the error, and a following
+  `:notify all` sends `SetMode` again; on a `Mute` room `:notify all`
+  sends the change; `:notify` alone shows each of the four texts and
+  sends nothing; no room gives "No room"; `:notify x` and `:notify All`
+  give the unknown mode error and no effect; `:notify ` with `<Tab>`
+  cycles `all`, `mentions`, and `:notify m<Tab>` gives `notify
+  mentions`; `:help` has a line for `:notify [<mode>]`; `room.notify`
+  from a binding with `mode = "all"`, without `mode`, with `mode =
+  "mute"` (`ActionError` of an unknown value) and with `mode = 1` (wrong
+  type); `RoomModeChanged` after `room.mark_read` on a room under the
+  room list's cursor keeps its zeroed counts and its index, changes
   `mode`, and a following `room.unmute` on a room now `Mute` is sent;
-  `room.mute` and `room.unmute` send `SetMode` with `Mute` and `Unmute`.
+  `room.mute` and `room.unmute` send `SetMode` with `Mute` and `Default`,
+  and `:mute` then `:unmute` on a room without a rule, with no
+  `RoomModeChanged` in between, sends both, the room showing `Muted`
+  after the first and no label after the second.
 
 `mxt-matrix`:
 
 - [ ] `rooms.rs`: `notification_mode` maps `None` to `Default`,
   `AllMessages` to `AllMessages`, `MentionsAndKeywordsOnly` to
-  `MentionsAndKeywords` and `Mute` to `Mute`; `refresh_modes` sends
-  `Msg::RoomModeChanged { room, mode }` for each room whose mode changed
+  `MentionsAndKeywords` and `Mute` to `Mute`, and becomes `pub(crate)`
+  for the effect task; `refresh_modes` sends `Msg::RoomModeChanged {
+  room, mode }` for each room whose mode differs from its stored facts
   (and updates the stored facts' mode), no longer `RoomUpserted`; the doc
   comments of `notification_mode`, `refresh_modes` and `run` say so.
-- [ ] `adapter.rs`: `MatrixEffect::SetMode { room, change }` goes to the
+- [ ] `adapter.rs`: `MatrixEffect::SetMode { room, mode }` goes to the
   ordered task, renamed `set_modes`; `set_mode(client, settings, room,
-  change)` runs `set_room_notification_mode(Mute)`,
-  `delete_user_defined_room_rules`,
-  `set_room_notification_mode(AllMessages)` or
-  `set_room_notification_mode(MentionsAndKeywordsOnly)`; a failure is
-  reported with "Muting the room failed", "Unmuting the room failed" or
-  "Changing the room's notifications failed". The doc comments of
-  `run_effects` and the task follow.
+  mode)` runs `delete_user_defined_room_rules` for `Default` and
+  otherwise `set_room_notification_mode` with `Mute`, `AllMessages` or
+  `MentionsAndKeywordsOnly`. On a failure the task sends
+  `Msg::RoomModeChanged { room, mode }` with `notification_mode(settings,
+  room)` (the SDK's rules, unchanged by a failed change), then reports
+  the error with the text chosen by the target: "Muting the room failed"
+  for `Mute`, "Unmuting the room failed" for `Default`, "Changing the
+  room's notifications failed" for the other two. A success sends
+  nothing: the sync's echo does. The doc comments of `run_effects` and
+  the task follow.
 - [ ] Tests with `MatrixMockServer`, the push rules synced as global
   account data (`add_global_account_data` with an `m.push_rules` event)
   before the effects run: a room with a room rule without actions,
@@ -295,15 +323,24 @@ Core:
   `/pushrules/global/room/!room:example.org` whose body's actions are
   `notify` and the default sound (`mock_set_push_rules(RuleKind::Room,
   ..)` with `.expect(1)` and a matcher on the body) and no `DELETE`; a
-  muted room (an override rule with a `room_id` condition), `SetMode`
-  `AllMessages` sends that `PUT` and a `DELETE` of the override rule; a
-  room without a rule, `MentionsAndKeywords` sends a `PUT` with no
-  actions; `Unmute` on a muted room sends the `DELETE` only; a `PUT`
-  answered 500 gives `EffectFailed` "Changing the room's notifications
-  failed: …". `notification_mode` for each of the four rule sets. A sync
-  whose account data changes one room's rule to a notifying one makes
-  the room list task send `RoomModeChanged { room, AllMessages }` for
-  that room and nothing for the others, and no `RoomUpserted` for it.
+  room whose room rule already notifies, `SetMode` `AllMessages` makes no
+  `PUT` and no `DELETE` (`mock_set_push_rules` and
+  `mock_delete_push_rules` for `RuleKind::Room` and `RuleKind::Override`
+  with `PushRuleIdSpec::Any` and `.expect(0)`) and sends the core
+  nothing; a muted room (an override rule with a
+  `room_id` condition), `SetMode` `AllMessages` sends that `PUT` and a
+  `DELETE` of the override rule; a room without a rule,
+  `MentionsAndKeywords` sends a `PUT` with no actions; `Default` on a
+  muted room sends the `DELETE` only; on a room with a room rule without
+  actions, a `PUT` answered 403 with `{"errcode": "M_FORBIDDEN"}`
+  (`respond_with` a `ResponseTemplate`; permanent, so `.expect(1)` holds
+  and nothing waits for a retry, which a 5xx would get) gives
+  `RoomModeChanged { room, MentionsAndKeywords }` and then `EffectFailed`
+  "Changing the room's notifications failed: …". `notification_mode` for
+  each of the four rule sets. A sync whose account data changes one
+  room's rule to a notifying one makes the room list task send
+  `RoomModeChanged { room, AllMessages }` for that room and nothing for
+  the others, and no `RoomUpserted` for it.
 
 Docs:
 
@@ -320,8 +357,8 @@ Docs:
   read, and after `:notify mentions` unread messages that notified stay
   bold until read; `:notify all` on a muted room unmutes it, `:unmute`
   leaves a room set with `:notify` alone, and `:mute` then `:unmute`
-  (once `Muted` shows) goes back to the account's default; mxt shows no
-  label for these settings, only `Muted`. The badge table's note ("Muted
+  goes back to the account's default; mxt shows no label for these
+  settings, only `Muted`. The badge table's note ("Muted
   rooms also show `Muted`") points to `:notify`. The arguments line
   (`:mute`, `:unmute` … take no argument) and the `:react` / `:mute`
   focus sentence name `:notify`. "Actions without a default key":
@@ -348,6 +385,10 @@ Docs:
   muted room unmutes it, and `:mute` then `:unmute` goes back to the
   account's default. mxt 0.1.5 ignores a binding of `room.notify` with a
   warning."
+- [ ] CHANGELOG `### Changed`: "`:mute` and `:unmute` show or remove the
+  `Muted` label at once, not when the next sync brings the new setting
+  back, so `:unmute` right after `:mute` works; if the change fails, the
+  label goes back and the status line shows the error."
 
 ## Task I3: `<CR>` opens a thread with replies
 
@@ -358,30 +399,30 @@ Docs:
 `README.md`, `CHANGELOG.md`.
 **Breaking:** no. A new action; `message.view` and `thread.open` keep
 their names and meaning and stay bindable. The default `<CR>` in
-`timeline` does something else on a thread root with replies, and the
-new default `<CR>` in `thread` hides a `[keymap.timeline]` binding of
-`<CR>` while a thread is shown. A `[keymap.normal]` binding of `<CR>` is
-not affected: `timeline` has bound `<CR>` since the first release, so it
-never applied in the timeline. Configurations load as before, so this is
-a `### Changed` line with the way back, as for `t` in 0.1.4 and `g1` …
-`g9` after 0.1.5.
+`timeline` does something else on a thread root with replies; it hides
+nothing new. A `[keymap.normal]` binding of `<CR>` is not affected:
+`timeline` has bound `<CR>` since the first release, so it never applied
+in the timeline. `thread` gets no `<CR>` of its own (the supervisor's
+decision, 14:35: `message.enter` already shows every message of a shown
+thread, so a binding there would only stop a `[keymap.timeline]` `<CR>`
+from reaching threads), so such a binding still applies in threads.
+Configurations load as before, so this is a `### Changed` line with the
+way back.
 
 - [ ] `action.rs`: `Action::MessageEnter` (`message.enter`), no
   arguments, documented: the thread of a thread root with replies while
   no thread is shown, otherwise the message view.
 - [ ] `keymap.rs`: `<CR>` in `TableId::Timeline` becomes
-  `Action::MessageEnter`; `<CR>` in `TableId::Thread` is
-  `Action::MessageView`, with a comment (every message of a shown
-  thread, the root included; it hides a `timeline` binding of `<CR>` in
-  threads, as the design's "Default keymap" says).
+  `Action::MessageEnter`; `TableId::Thread` keeps only `q` and `<Esc>`,
+  so a thread reaches `<CR>` through its fallback to `timeline`.
 - [ ] `app/thread.rs`: `enter_message(&mut self, effects)`: when no
   thread is shown and the cursor's item has a `thread_summary`,
   `open_thread`; otherwise `view_message`. `app.rs` runs it.
-- [ ] Tests: keymap: `<CR>` in `InputContext::Timeline` resolves to
-  `MessageEnter` and in `InputContext::Thread` to `MessageView`; a user
+- [ ] Tests: keymap: `<CR>` in `InputContext::Timeline` and in
+  `InputContext::Thread` resolves to `MessageEnter`; a user
   `[keymap.timeline] "<CR>" = "message.react"` applies in the timeline
-  and not in a thread, where `thread`'s default wins. App: `<CR>` on a
-  root with `ThreadSummary` gives `SubscribeThread` for it, shows the
+  and in a thread. App: `<CR>` on a root with `ThreadSummary` gives
+  `SubscribeThread` for it, shows the
   thread and records a jump (`<C-o>` goes back to the root in the
   timeline); on a deleted root with replies it opens the thread too; on
   a message without a summary it gives `OpenView` and no subscription;
@@ -399,9 +440,7 @@ a `### Changed` line with the way back, as for `t` in 0.1.4 and `g1` …
   the thread of a message with replies, as `t`, otherwise the message in
   full); the paragraph under the table (up to mxt 0.1.5 `<CR>` showed
   every message; `"<CR>" = "message.view"` in `[keymap.timeline]` keeps
-  that); the `thread` table gains `<CR>` (`message.view`) and its
-  paragraph says that a `<CR>` bound in `[keymap.timeline]` no longer
-  applies in a thread unless also bound in `[keymap.thread]`; Threads:
+  that); the `thread` table stays as it is (`q` and `<Esc>`); Threads:
   the first paragraph (`t`, or `<CR>` on a root with replies) and "In a
   thread" (`<CR>` shows every message in full, the root too); The jump
   list (opening a thread with `t` or `<CR>`). `docs/configuration.md`,
@@ -410,12 +449,9 @@ a `### Changed` line with the way back, as for `t` in 0.1.4 and `g1` …
 - [ ] CHANGELOG `### Changed`: "`<CR>` in the timeline opens the thread
   of a message that has replies, as `t` does, and shows any other
   message in full as before (the new action `message.enter`); in a
-  thread, `<CR>` shows every message in full, the root included
-  (`message.view`, now bound in `[keymap.thread]`). `t` still opens or
-  starts a thread on any message. `"<CR>" = "message.view"` in
-  `[keymap.timeline]` brings back the old `<CR>`. A binding of `<CR>` in
-  `[keymap.timeline]` no longer applies while a thread is shown; write it
-  in `[keymap.thread]` too to keep it there."
+  thread, `<CR>` shows every message in full, the root included. `t`
+  still opens or starts a thread on any message. `"<CR>" =
+  "message.view"` in `[keymap.timeline]` brings back the old `<CR>`."
 
 ## Task I2b: Who reacted, in the message view
 
@@ -436,27 +472,37 @@ its tests; `docs/keys.md`, `docs/configuration.md`, `README.md`,
 - [ ] `app/timeline.rs`: `fn reaction_lines(item: &TimelineItem, me:
   &UserId) -> Vec<String>`: for each group of `item.shown_reactions()`,
   `"<key> <names>"`, the senders in their order joined by `", "`, each
-  `you` when it is `me`, else its name, else its user ID.
-  `view_message` fills `reactions` for text, images and stickers (the
-  `matches` are still computed on the message's text alone);
-  `view_help` leaves it empty.
+  `you` when it is `me`, else its name, else its user ID; in the key and
+  the names, each control character (`char::is_control`) and each U+2028
+  and U+2029 becomes a space, so a reaction stays one line (the design's
+  "Who reacted"). `view_message` fills `reactions` for text, images and
+  stickers (the `matches` are still computed on the message's text
+  alone); `view_help` leaves it empty.
 - [ ] `view.rs`: `View::new` appends `"\n\n"` and the lines joined by
   `"\n"` to the text, or to an image's details, when there are any; the
   `match_highlights` input stays the message's text and ranges. `draw`
-  gives an image's details `min(rows, max(2, area.height / 2))` rows, the
-  gap row, and the rest to the image.
+  gives an image's details `min(rows, max(2, block.inner(area).height /
+  2))` rows, `rows` being what `Editor::rows` gives at
+  `block.inner(area).width` as now, then the gap row, and the rest to the
+  image.
 - [ ] Tests: core: the view of a text message with 👍 from Alice (named)
   and the user, and 🎉 from `@bob:example.org` (no name), has
   `reactions` `["👍 Alice, you", "🎉 @bob:example.org"]` in the chips'
   order; an image and a sticker carry the lines too; a message without
   reactions and `:help` have none; with the search highlight on, the
-  `matches` are those of the text alone. tui: the view's editor text is
-  the message, an empty line, then the lines; an image's details are the
-  name, the info line, an empty line, then the lines; a line of 30 names
-  in a 40-column view takes the rows `Editor::rows` gives; an image view
-  20 rows high with 15 reaction lines draws the details in 10 rows and
-  the image below the gap, and with no reactions the details take their
-  two rows as before; a visual `ggVGy` in the view yanks the lines too.
+  `matches` are those of the text alone; a sender named `Al\nice` and
+  one named `Bo\tb` read `Al ice` and `Bo b`, and a key `a\nb` reads
+  `a b`. tui: the view's editor text is the message, an empty line, then
+  the lines; an image's details are the name, the info line, an empty
+  line, then the lines; a text message `hi` with one reaction line, 👍
+  from 30 senders named `Name01` … `Name30` (241 columns: `👍 ` 3, the
+  names 180, the separators 58), drawn in a view 40 columns wide (38
+  inside the padding), takes 7 rows: the view's rows 3 to 9, counting
+  from 1, hold it, and row 9 reads `ame29, Name30`; an image view 20
+  rows high with 15 reaction lines draws the details in 10 rows and the
+  image below the gap, and with no reactions the details take their two
+  rows as before (one for a sticker without size and dimensions); a
+  visual `ggVGy` in the view yanks the lines too.
 - [ ] Docs: `docs/keys.md`: the `timeline` table's `<CR>` row (with who
   reacted) and a paragraph after it: the view lists each reaction shown
   under the message, in that order, with who reacted (`👍 Alice, Bob,
@@ -489,19 +535,20 @@ After I1:
 1. With the test room open and the timeline focused, `:notify`: note
    which of the four texts it shows (the original mode).
 2. `:notify all`: "<room> now notifies for every message" (or "already
-   …" if that was the original). After the next sync (a few seconds),
-   `:notify` says "notifies for every message"; a `Muted` label the room
-   had is gone. `:notify all` again says "already …". While the test room
-   is set so, the owner's phone notifies for every message in it.
-3. `:notify mentions`: "now notifies for mentions and keywords only";
-   after the sync `:notify` says so, and `:notify mentions` says
-   "already …".
+   …" if that was the original). `:notify` then says "notifies for every
+   message" at once, and a `Muted` label the room had is gone. `:notify
+   all` again says "already …". While the test room is set so, the
+   owner's phone notifies for every message in it.
+3. Right away, before a sync can bring the rules back: `:notify
+   mentions`: "now notifies for mentions and keywords only"; `:notify`
+   says so, and `:notify mentions` says "already …". A few seconds later
+   (after the sync), `:notify` still says so.
 4. `:notify x`: `unknown mode "x"; expected "all" or "mentions"`.
 5. Restore the original: "notifies for every message", `:notify all`;
    "mentions and keywords only", nothing; "is muted", `:mute`; "follows
-   the account's default", `:mute`, wait until the `Muted` label shows,
-   then `:unmute`. After the sync, `:notify` shows the original text
-   again. The log has no errors.
+   the account's default", `:mute` then `:unmute`, without waiting. A few
+   seconds later, `:notify` shows the original text again. The log has no
+   errors.
 
 After I3, in the test room: `<CR>` on a message with replies (create one
 with `t` and a reply if the room has none) shows its thread; `<CR>` on
@@ -514,28 +561,28 @@ and 👍; `<CR>` on it shows the text, an empty line and `👍 you`, and on a
 message with others' reactions their display names, not user IDs. On an
 image message (upload a small test PNG with `:upload` if there is none),
 react and `<CR>`: `👍 you` sits under the size line and the image below.
-Remove the reactions (`g1` on each). The log has no errors.
+Remove the reactions (`g<N>` on your own chip, or `+` and the same
+emoji). The log has no errors.
 
 ## Questions for the owner
 
 Each is decided as recommended in the design; the task follows the
 answer if it differs.
 
-1. I3: keep `thread`'s default `<CR>` (`message.view`), as decided, or
-   drop it? `message.enter` already shows the message in a thread, so
-   without it `<CR>` would do the same and hide no `[keymap.timeline]`
-   binding of `<CR>` in threads. Recommendation: keep it. It shows in
-   `:map`, it gives a sensible `<CR>` in threads to someone who rebinds
-   the timeline's `<CR>` to `thread.open`, and the hidden binding is
-   documented as for `t` and `g1` … `g9`.
+1. I3, decided by the supervisor (14:35), no longer a question: `thread`
+   gets no default `<CR>`. `message.enter`, which a thread reaches
+   through `thread`'s fallback to `timeline`, already shows every message
+   of a shown thread, the root included, so a `thread` binding of `<CR>`
+   to `message.view` would only stop a `[keymap.timeline]` `<CR>` from
+   reaching threads.
 2. I1: `:notify` without an argument shows the room's setting. It is
    beyond the two commands asked for, but no label shows the setting
    (only `Muted`), and the account check has to record the test room's
    original mode in mxt. Recommendation: keep it.
 3. I1: no `:notify default` that removes the room's rule; `:mute` then
-   `:unmute` goes back to the account's default. Recommendation: not now;
-   a `mode` value added later is a warning to older versions, not an
-   error.
+   `:unmute` goes back to the account's default, now without a wait.
+   Recommendation: not now; a `mode` value added later is a warning to
+   older versions, not an error, and `SetMode` already carries `Default`.
 4. I1: on a room without a rule of its own, `:notify all` writes a rule
    and says "now notifies …" even when the account's default already
    notifies for every message, since finding the default needs the
