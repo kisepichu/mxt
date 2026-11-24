@@ -3,7 +3,7 @@ use crate::effect::ViewContent;
 use crate::ids::{EventId, TxnId, UserId};
 use crate::rich::{Block, Inline, RichText, Style};
 use crate::timeline::{
-    ItemRef, MessageContent, ReplyPreview, TimelineDiff, TimelineEntry, TimelineItem,
+    ItemRef, MessageContent, ReactionGroup, ReplyPreview, TimelineDiff, TimelineEntry, TimelineItem,
 };
 
 pub(super) fn event(n: u32) -> EventId {
@@ -402,6 +402,7 @@ fn message_view_opens_and_closes() {
         vec![Effect::Ui(UiEffect::OpenView(ViewContent::Text {
             text: "first line\nsecond line".into(),
             matches: Vec::new(),
+            reactions: Vec::new(),
         }))]
     );
     assert!(app.view_open());
@@ -431,6 +432,116 @@ fn message_view_opens_and_closes() {
     assert!(!app.view_open());
     assert_eq!(app.mode_label(None), "NORMAL");
     assert_eq!(app.focus(), Focus::Timeline);
+}
+
+/// `entry`, an item, with `reactions` under it.
+pub(super) fn reacted(entry: TimelineEntry, reactions: Vec<ReactionGroup>) -> TimelineEntry {
+    with(entry, |item| item.reactions = reactions)
+}
+
+/// `group(key, senders)` with the senders' `names`, in their order.
+fn named(key: &str, senders: &[&str], names: &[Option<&str>]) -> ReactionGroup {
+    let mut group = group(key, senders);
+    for (sender, name) in group.senders.iter_mut().zip(names) {
+        sender.name = name.map(str::to_owned);
+    }
+    group
+}
+
+/// The reaction lines of the view `<CR>` opens, which is closed again.
+fn view_reactions(app: &mut App) -> Vec<String> {
+    let reactions = match keys(app, "<CR>").as_slice() {
+        [
+            Effect::Ui(UiEffect::OpenView(
+                ViewContent::Text { reactions, .. } | ViewContent::Image { reactions, .. },
+            )),
+            ..,
+        ] => reactions.clone(),
+        other => panic!("{other:?}"),
+    };
+    keys_in(app, "q", Some(EditorMode::Normal));
+    reactions
+}
+
+#[test]
+fn the_message_view_lists_who_reacted_in_the_order_of_the_chips() {
+    let mut app = opened();
+    let thumbs = named("👍", &["@alice:example.org", ME], &[Some("Alice"), None]);
+    let party = group("🎉", &["@bob:example.org"]);
+    reset(
+        &mut app,
+        vec![reacted(item(remote(1), "hi"), vec![thumbs, party])],
+    );
+    assert_eq!(
+        keys(&mut app, "<CR>"),
+        vec![Effect::Ui(UiEffect::OpenView(ViewContent::Text {
+            text: "hi".into(),
+            matches: Vec::new(),
+            reactions: vec!["👍 Alice, you".into(), "🎉 @bob:example.org".into()],
+        }))]
+    );
+}
+
+#[test]
+fn the_message_view_of_an_image_or_a_sticker_lists_who_reacted_too() {
+    let mut app = opened();
+    let with_content = |n: u32, content: MessageContent, reactions| {
+        with(reacted(msg(n), reactions), |item| item.content = content)
+    };
+    let image = MessageContent::Image {
+        name: "cat.png".into(),
+        size: Some(2048),
+        dimensions: Some((640, 480)),
+    };
+    let sticker = MessageContent::Sticker {
+        body: "a happy cat".into(),
+        dimensions: None,
+    };
+    reset(
+        &mut app,
+        vec![
+            with_content(1, image, vec![group("👍", &[ME])]),
+            with_content(2, sticker, vec![group("🎉", &["@bob:example.org"])]),
+        ],
+    );
+    // The view, before the image's fetch.
+    let open_view = |app: &mut App| keys(app, "<CR>").into_iter().next();
+    assert_eq!(
+        open_view(&mut app),
+        Some(Effect::Ui(UiEffect::OpenView(ViewContent::Image {
+            item: remote(2),
+            name: "a happy cat".into(),
+            size: None,
+            dimensions: None,
+            reactions: vec!["🎉 @bob:example.org".into()],
+        })))
+    );
+    keys_in(&mut app, "q", Some(EditorMode::Normal));
+    keys(&mut app, "k");
+    assert_eq!(
+        open_view(&mut app),
+        Some(Effect::Ui(UiEffect::OpenView(ViewContent::Image {
+            item: remote(1),
+            name: "cat.png".into(),
+            size: Some(2048),
+            dimensions: Some((640, 480)),
+            reactions: vec!["👍 you".into()],
+        })))
+    );
+}
+
+#[test]
+fn the_message_view_writes_line_breaks_and_control_characters_in_names_and_keys_as_spaces() {
+    let mut app = opened();
+    let senders = ["@alice:example.org", ME, "@bob:example.org"];
+    let thumbs = named("👍", &senders, &[Some("Al\nice"), None, Some("Bo\tb")]);
+    let carol = Some("Ca\u{2028}r\u{2029}ol\r");
+    let other = named("a\nb", &["@carol:example.org"], &[carol]);
+    reset(&mut app, vec![reacted(msg(1), vec![thumbs, other])]);
+    assert_eq!(
+        view_reactions(&mut app),
+        ["👍 Al ice, you, Bo b", "a b Ca r ol "]
+    );
 }
 
 #[test]

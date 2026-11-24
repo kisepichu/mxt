@@ -4,7 +4,7 @@
 
 use std::ops::Range;
 
-use super::timeline::{item, msg, opened, remote, reset, status};
+use super::timeline::{item, msg, opened, reacted, remote, reset, status};
 use super::*;
 use crate::effect::ViewContent;
 use crate::search::Needle;
@@ -17,11 +17,13 @@ fn hello() -> Option<Needle> {
     Some(Needle::new("hello"))
 }
 
-/// The message view of `text` with the search's `matches` on it.
+/// The message view of `text` with the search's `matches` on it, and no
+/// reactions.
 fn message_view(text: &str, matches: Vec<Range<usize>>) -> Effect {
     Effect::Ui(UiEffect::OpenView(ViewContent::Text {
         text: text.into(),
         matches,
+        reactions: Vec::new(),
     }))
 }
 
@@ -101,5 +103,24 @@ fn the_message_view_gets_the_matches_while_the_highlight_is_shown() {
     assert_eq!(
         keys(&mut app, "<CR>"),
         vec![message_view("Hello, hello", Vec::new())]
+    );
+}
+
+#[test]
+fn the_message_views_matches_are_in_its_text_not_in_the_reaction_lines() {
+    let mut app = opened();
+    let thumbs = group("👍", &["@hello:example.org"]);
+    reset(
+        &mut app,
+        vec![reacted(item(remote(1), "hello, say hello"), vec![thumbs])],
+    );
+    keys(&mut app, "/hello<CR>");
+    assert_eq!(
+        keys(&mut app, "<CR>"),
+        vec![Effect::Ui(UiEffect::OpenView(ViewContent::Text {
+            text: "hello, say hello".into(),
+            matches: vec![0..5, 11..16],
+            reactions: vec!["👍 @hello:example.org".into()],
+        }))]
     );
 }

@@ -15,6 +15,13 @@ marked **Breaking:**.
   (and in a thread) are the default keys for `index = 1` … `9`, so under
   `👍 2  ❤️ 1`, `g1` toggles 👍. In the composer, `g` and a digit still go
   to the editor. mxt 0.1.5 ignores a binding with `index` with a warning.
+- The message view (`<CR>`) lists the message's reactions under its text,
+  or under an image's size line, one line per reaction in the order shown
+  under the message, with who reacted: `👍 Alice, Bob, you`. Names are the
+  room members' display names, or user IDs where mxt has none. The lines
+  are part of the view's text, so `y` and `/` there see them (the
+  timeline's `yy` still copies the message alone), and the view shows the
+  reactions as they were when it opened.
 - `:notify all` and `:notify mentions` set whether every message of a room
   notifies you or only mentions and keywords, on the room under the cursor
   in the room list, otherwise the open room, as `:mute` does; `:notify`

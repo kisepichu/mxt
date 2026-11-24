@@ -7,6 +7,7 @@ use crate::keys::KeySeq;
 use crate::msg::{EditorMode, Msg, Pane};
 use crate::room::{NotificationMode, RoomKind, RoomName, RoomSummary, UnreadCounts};
 use crate::settings::Settings;
+use crate::timeline::{ReactionGroup, ReactionSender, TimelineEntry, TimelineItem};
 
 mod composer;
 mod files;
@@ -21,6 +22,28 @@ mod timeline;
 
 /// The user's own ID.
 const ME: &str = "@me:example.org";
+
+/// The reactions with `key` from `senders`, oldest first, without names;
+/// the user's own among them exactly when `ME` is among the senders.
+fn group(key: &str, senders: &[&str]) -> ReactionGroup {
+    let users = senders.iter().map(|user| ReactionSender {
+        user: UserId::new(*user),
+        name: None,
+    });
+    ReactionGroup {
+        key: key.into(),
+        senders: users.collect(),
+        mine: senders.contains(&ME),
+    }
+}
+
+/// Changes the item of `entry`.
+fn with(mut entry: TimelineEntry, change: impl FnOnce(&mut TimelineItem)) -> TimelineEntry {
+    if let TimelineEntry::Item(item) = &mut entry {
+        change(item);
+    }
+    entry
+}
 
 fn space() -> KeySeq {
     KeySeq::parse("<Space>", &KeySeq::default()).unwrap()
@@ -1070,6 +1093,7 @@ fn text_view(text: String) -> Effect {
     Effect::Ui(UiEffect::OpenView(crate::effect::ViewContent::Text {
         text,
         matches: Vec::new(),
+        reactions: Vec::new(),
     }))
 }
 

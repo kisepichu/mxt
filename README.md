@@ -25,7 +25,8 @@ user interface around it. It runs on Linux and macOS.
   bridged one or a bridge bot's room included, and creates an encrypted
   one only after asking.
 - A timeline with formatted messages, replies, edits, reactions and read
-  receipts, and a full-screen view for long messages and images.
+  receipts, and a full-screen view for long messages and images, with who
+  reacted.
 - A composer with vim modes, Markdown, `@` mention completion, replies and
   edits, and an external editor for long text.
 - Reactions from an emoji picker or with `:react <emoji>`, editing and
