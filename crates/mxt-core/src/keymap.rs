@@ -244,7 +244,9 @@ const DEFAULTS: &[(&[TableId], &str, Action)] = &[
         "a",
         Action::ComposerFocus(FocusMode::Insert),
     ),
-    (&[TableId::Timeline], "<CR>", Action::MessageView),
+    // A thread binds no `<CR>`: it gets this one through its fallback to
+    // `timeline`, and so does a user's `<CR>` in `[keymap.timeline]`.
+    (&[TableId::Timeline], "<CR>", Action::MessageEnter),
     (&[TableId::Timeline], "r", Action::MessageReply),
     (&[TableId::Timeline], "e", Action::MessageEdit),
     (&[TableId::Timeline], "dd", Action::MessageDelete),
@@ -727,6 +729,23 @@ mod tests {
         assert_eq!(action(timeline, "x"), Some(one(Action::MessageDelete)));
         assert!(InputContext::Thread.counts());
         assert_eq!(InputContext::Thread.sink(), KeySink::Drop);
+    }
+
+    #[test]
+    fn enter_is_message_enter_in_the_timeline_and_through_the_fallback_in_a_thread() {
+        let enter = |km: &Keymap, context| km.effective(context).get(seq("<CR>").keys()).cloned();
+        let km = Keymap::new(&space(), []);
+        for context in [InputContext::Timeline, InputContext::Thread] {
+            let action = enter(&km, context);
+            assert_eq!(action, Some(one(Action::MessageEnter)), "{context:?}");
+        }
+        // `thread` binds no `<CR>`, so a user's `<CR>` in `timeline` applies
+        // in a thread too.
+        let react = one(spec("message.react", &[]));
+        let km = Keymap::new(&space(), [(TableId::Timeline, seq("<CR>"), react.clone())]);
+        for context in [InputContext::Timeline, InputContext::Thread] {
+            assert_eq!(enter(&km, context), Some(react.clone()), "{context:?}");
+        }
     }
 
     #[test]

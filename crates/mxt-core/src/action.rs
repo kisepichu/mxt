@@ -94,6 +94,10 @@ pub enum Action {
     MessageGotoReply,
     MessageResend,
     MessageView,
+    /// The thread of the message under the cursor when it is a thread root
+    /// with replies and no thread is shown, as [`Action::ThreadOpen`];
+    /// otherwise the message view, as [`Action::MessageView`].
+    MessageEnter,
     ComposerFocus(FocusMode),
     ComposerSend,
     ComposerNewline,
@@ -226,6 +230,7 @@ impl Action {
             "message.goto_reply" => Action::MessageGotoReply,
             "message.resend" => Action::MessageResend,
             "message.view" => Action::MessageView,
+            "message.enter" => Action::MessageEnter,
             "composer.send" => Action::ComposerSend,
             "composer.newline" => Action::ComposerNewline,
             "composer.cancel" => Action::ComposerCancel,
@@ -301,6 +306,7 @@ impl Action {
             Action::MessageGotoReply => "message.goto_reply",
             Action::MessageResend => "message.resend",
             Action::MessageView => "message.view",
+            Action::MessageEnter => "message.enter",
             Action::ComposerFocus(_) => "composer.focus",
             Action::ComposerSend => "composer.send",
             Action::ComposerNewline => "composer.newline",
@@ -736,6 +742,7 @@ mod tests {
             "message.goto_reply",
             "message.resend",
             "message.view",
+            "message.enter",
             "composer.focus",
             "composer.send",
             "composer.newline",

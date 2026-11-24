@@ -27,6 +27,12 @@ marked **Breaking:**.
 - `g1` … `g9` in the timeline react, so a binding of them in
   `[keymap.normal]` no longer applies while the timeline has focus; bind it
   in `[keymap.timeline]` too to keep it there.
+- `<CR>` in the timeline opens the thread of a message that has replies,
+  as `t` does, and shows any other message in full as before (the new
+  action `message.enter`); in a thread, `<CR>` shows every message in
+  full, the root included. `t` still opens or starts a thread on any
+  message. `"<CR>" = "message.view"` in `[keymap.timeline]` brings back
+  the old `<CR>`.
 
 ## [0.1.5] - 2026-11-23
 
