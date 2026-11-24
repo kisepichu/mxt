@@ -1,6 +1,6 @@
 //! Threads (design, "Threads"): a thread shown in place of the open room's
-//! main timeline, which is kept aside meanwhile, `thread.open` and
-//! `thread.close`.
+//! main timeline, which is kept aside meanwhile, `thread.open`,
+//! `thread.close` and `message.enter`.
 
 use super::jumps::AfterGone;
 use super::timeline::{NOT_SENT, Timeline};
@@ -73,6 +73,24 @@ impl App {
         };
         self.record_jump();
         self.enter_thread(root, effects);
+    }
+
+    /// `message.enter`: the thread of the item under the cursor when it is
+    /// a thread root with replies (a deleted one too) and no thread is
+    /// shown, as `thread.open`; otherwise the message view, as
+    /// `message.view`, so in a thread every message shows in the view, the
+    /// root included.
+    pub(super) fn enter_message(&mut self, effects: &mut Vec<Effect>) {
+        let root_with_replies = self.thread.is_none()
+            && self
+                .timeline
+                .cursor_item()
+                .is_some_and(|item| item.thread_summary.is_some());
+        if root_with_replies {
+            self.open_thread(effects);
+        } else {
+            self.view_message(effects);
+        }
     }
 
     /// `thread.close`: records the position in the thread as a jump and

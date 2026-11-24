@@ -30,8 +30,9 @@ user interface around it. It runs on Linux and macOS.
   edits, and an external editor for long text.
 - Reactions from an emoji picker or with `:react <emoji>`, editing and
   deleting your own messages, and resending messages that failed.
-- Threads: `t` shows a message's thread in place of the timeline, where the
-  timeline's keys work and the composer sends into the thread.
+- Threads: `t`, or `<CR>` on a message with replies, shows its thread in
+  place of the timeline, where the timeline's keys work and the composer
+  sends into the thread.
 - Muting rooms, downloading and opening attachments, uploading files, and
   image previews in sixel, kitty or iTerm2 graphics, or in half blocks, in
   a full-screen view and, if you turn them on, in the timeline.

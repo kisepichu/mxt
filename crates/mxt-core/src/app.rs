@@ -786,6 +786,7 @@ impl App {
             Action::RoomUnmute => self.set_mute(false, effects),
             Action::RoomJoin { target } => self.join(target, effects),
             Action::MessageView => self.view_message(effects),
+            Action::MessageEnter => self.enter_message(effects),
             Action::ViewClose => self.close_view(effects),
             Action::ViewLeave => self.leave_view(effects),
             Action::HelpCommands => self.view_help(help_text(COMMANDS), effects),

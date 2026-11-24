@@ -9,7 +9,7 @@ use super::timeline::{
 };
 use super::*;
 use crate::action::FocusMode;
-use crate::effect::{Outgoing, OutgoingKind};
+use crate::effect::{Outgoing, OutgoingKind, ViewContent};
 use crate::ids::{EventId, SendId};
 use crate::mention::render_mentions;
 use crate::timeline::{
@@ -283,6 +283,82 @@ fn t_in_a_thread_keeps_it() {
     assert_eq!(keys(&mut app, "kt"), vec![]);
     assert_eq!(app.shown_timeline(), Some(thread_of(C, 2)));
     assert_eq!(cursor_event(&app), on(11));
+}
+
+/// The message view of `message <n>`, without search matches.
+fn text_view(n: u32) -> Effect {
+    Effect::Ui(UiEffect::OpenView(ViewContent::Text {
+        text: format!("message {n}"),
+        matches: Vec::new(),
+    }))
+}
+
+#[test]
+fn enter_on_a_root_with_replies_opens_its_thread_as_t_does() {
+    let mut app = on_the_root();
+    assert_eq!(keys(&mut app, "<CR>"), vec![subscribe(2)]);
+    assert_eq!(app.shown_timeline(), Some(thread_of(C, 2)));
+    assert!(!app.view_open());
+    thread_reset(&mut app, 2, thread_entries());
+    // A jump: `<C-o>` goes back to the root in the timeline.
+    assert_eq!(no_timers(keys(&mut app, "<C-o>")), vec![unsubscribe(2)]);
+    assert_eq!(app.shown_timeline(), Some(main_of(C)));
+    assert_eq!(cursor_event(&app), on(2));
+
+    // A deleted root keeps its replies.
+    let mut app = opened();
+    reset(&mut app, vec![with_replies(1, deleted(1)), msg(2)]);
+    assert_eq!(keys(&mut app, "k<CR>"), vec![subscribe(1)]);
+}
+
+#[test]
+fn enter_on_a_message_without_replies_shows_it_and_only_t_starts_a_thread() {
+    let mut app = on_the_root();
+    assert_eq!(keys(&mut app, "j<CR>"), vec![text_view(3)]);
+    assert!(app.view_open());
+    assert_eq!(app.shown_timeline(), Some(main_of(C)));
+    keys(&mut app, "q");
+    assert_eq!(keys(&mut app, "t"), vec![subscribe(3)]);
+
+    // Nothing under the cursor: nothing happens.
+    let mut app = opened();
+    assert_eq!(keys(&mut app, "<CR>"), vec![]);
+    assert!(!app.view_open());
+}
+
+#[test]
+fn enter_in_a_thread_shows_every_message_the_root_included() {
+    let mut app = on_the_root();
+    keys(&mut app, "<CR>");
+    // The root has its `💬` row in the thread too.
+    thread_reset(&mut app, 2, vec![with_replies(2, msg(2)), msg(10), msg(11)]);
+    assert_eq!(keys(&mut app, "<CR>"), vec![text_view(11)]);
+    keys(&mut app, "q");
+    keys(&mut app, "kk");
+    assert_eq!(keys(&mut app, "<CR>"), vec![text_view(2)]);
+    assert_eq!(app.shown_timeline(), Some(thread_of(C, 2)));
+}
+
+#[test]
+fn message_enter_bound_in_thread_shows_the_root_where_thread_open_keeps_the_focus() {
+    let enter = Binding::single(Action::MessageEnter);
+    let mut app = app_with(vec![(TableId::Thread, seq("o"), enter)]);
+    keys(&mut app, "<CR>");
+    reset(&mut app, main_entries());
+    keys(&mut app, "k<CR>");
+    thread_reset(&mut app, 2, vec![with_replies(1, msg(2)), msg(10)]);
+    keys(&mut app, "k");
+    assert_eq!(keys(&mut app, "o"), vec![text_view(2)]);
+}
+
+#[test]
+fn enter_bound_to_message_view_in_the_timeline_shows_a_root_as_before() {
+    let view = Binding::single(Action::MessageView);
+    let mut app = app_with(vec![(TableId::Timeline, seq("<CR>"), view)]);
+    keys(&mut app, "<CR>");
+    reset(&mut app, main_entries());
+    assert_eq!(keys(&mut app, "k<CR>"), vec![text_view(2)]);
+    assert_eq!(app.shown_timeline(), Some(main_of(C)));
 }
 
 #[test]
