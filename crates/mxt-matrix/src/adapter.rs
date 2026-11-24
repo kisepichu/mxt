@@ -497,7 +497,7 @@ async fn send_messages(
 /// applies a change to them only after all its requests succeeded), so
 /// the mode it reads goes to the core as `Msg::RoomModeChanged`, which
 /// puts the core's mode back, before the error (design, "Notification
-/// modes").
+/// modes"). The core's room IDs come from the SDK, so they parse.
 async fn set_modes(
     client: Client,
     settings: NotificationSettings,
@@ -505,16 +505,6 @@ async fn set_modes(
     to_core: UnboundedSender<Msg>,
 ) {
     while let Some((room, mode)) = changes.recv().await {
-        let Err(error) = set_mode(&client, &settings, &room, mode).await else {
-            continue;
-        };
-        if let Ok(id) = ruma::RoomId::parse(room.as_str()) {
-            let sdk_mode = rooms::notification_mode(&settings, &id).await;
-            let _ = to_core.send(Msg::RoomModeChanged {
-                room,
-                mode: sdk_mode,
-            });
-        }
         let what = match mode {
             NotificationMode::Mute => "Muting the room failed",
             NotificationMode::Default => "Unmuting the room failed",
@@ -522,6 +512,18 @@ async fn set_modes(
                 "Changing the room's notifications failed"
             }
         };
+        let Ok(id) = ruma::RoomId::parse(room.as_str()) else {
+            report(&to_core, what, &Error::UnknownRoom);
+            continue;
+        };
+        let Err(error) = set_mode(&client, &settings, &id, mode).await else {
+            continue;
+        };
+        let sdk_mode = rooms::notification_mode(&settings, &id).await;
+        let _ = to_core.send(Msg::RoomModeChanged {
+            room,
+            mode: sdk_mode,
+        });
         report(&to_core, what, &error);
     }
 }
@@ -531,15 +533,15 @@ async fn set_modes(
 /// `set_room_notification_mode`, which puts the room's new rule and then
 /// deletes its other rules, and does nothing when the room has the mode
 /// already; `Default` removes the room's rules, so the account default
-/// applies again.
+/// applies again. A room the client does not know fails before any
+/// request.
 async fn set_mode(
     client: &Client,
     settings: &NotificationSettings,
-    room: &RoomId,
+    room: &ruma::RoomId,
     mode: NotificationMode,
 ) -> Result<(), Error> {
-    let room = sdk_room(client, room)?;
-    let room = room.room_id();
+    client.get_room(room).ok_or(Error::UnknownRoom)?;
     let changed = match mode {
         NotificationMode::Default => settings.delete_user_defined_room_rules(room).await,
         NotificationMode::AllMessages => {
