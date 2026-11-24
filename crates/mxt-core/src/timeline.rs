@@ -62,9 +62,29 @@ pub struct ReplyPreview {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReactionGroup {
     pub key: String,
-    pub count: u32,
+    /// Who reacted, oldest reaction first (design, "Reactions" in "Matrix
+    /// adapter"), the user among them.
+    pub senders: Vec<ReactionSender>,
     /// Whether the user is among the senders.
     pub mine: bool,
+}
+
+impl ReactionGroup {
+    /// How many reacted with the key: the number of senders, so the count
+    /// the timeline shows and the list of who reacted always agree.
+    pub fn count(&self) -> usize {
+        self.senders.len()
+    }
+}
+
+/// One sender of a reaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReactionSender {
+    pub user: UserId,
+    /// The display name of the sender's member event in the SDK's store;
+    /// `None` without one, or with an empty one. The matrix adapter looks
+    /// up no name for the user's own reactions.
+    pub name: Option<String>,
 }
 
 /// The summary of the thread an item is the root of (design, "Threads"):

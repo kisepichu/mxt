@@ -28,7 +28,8 @@ use mxt_core::{
     ids::TimelineId,
     mention::RenderedBody,
     timeline::{
-        ItemRef, MessageContent, SendState, TimelineDiff, TimelineEntry, TimelineItem, apply_diff,
+        ItemRef, MessageContent, ReactionGroup, ReactionSender, SendState, TimelineDiff,
+        TimelineEntry, TimelineItem, apply_diff,
     },
 };
 use tokio::time::timeout;
@@ -436,6 +437,46 @@ async fn a_refused_reaction_is_dropped_from_the_timeline_and_reported() {
         })
         .await;
     assert!(adapter.queued().await.is_empty());
+}
+
+/// The senders of a message's reactions, oldest first, with the display
+/// names their member events in the store give; the user's own reaction
+/// has no name, since the core shows it as the user's.
+#[tokio::test]
+async fn reactions_arrive_with_their_senders_names_from_the_store() {
+    let mut adapter = Adapter::start().await;
+    let f = EventFactory::new();
+    let me = ruma::UserId::parse(ME).unwrap();
+    let bob = ruma::UserId::parse("@bob:example.org").unwrap();
+    let room_id = ruma::RoomId::parse(ROOM).unwrap();
+    let event = ruma::EventId::parse(SENT).unwrap();
+    // The member events first, so the store has them when the reactions
+    // come.
+    let members = JoinedRoomBuilder::new(&room_id)
+        .add_state_event(f.member(&me).display_name("Alice"))
+        .add_state_event(f.member(&bob).display_name("Bob"));
+    adapter.server.sync_room(&adapter.client, members).await;
+    let reactions = JoinedRoomBuilder::new(&room_id)
+        .add_timeline_event(f.reaction(&event, "👍").sender(&bob))
+        .add_timeline_event(f.reaction(&event, "👍").sender(&me));
+    adapter.server.sync_room(&adapter.client, reactions).await;
+
+    let both = |entries: &[TimelineEntry]| {
+        item(entries, &sent()).is_some_and(|item| item.reactions.iter().any(|g| g.count() == 2))
+    };
+    adapter.core.until("both reactions", both).await;
+    let sender = |user: &str, name: Option<&str>| ReactionSender {
+        user: UserId::new(user),
+        name: name.map(Into::into),
+    };
+    assert_eq!(
+        item(&adapter.core.entries, &sent()).unwrap().reactions,
+        [ReactionGroup {
+            key: "👍".into(),
+            senders: vec![sender(bob.as_str(), Some("Bob")), sender(ME, None)],
+            mine: true,
+        }]
+    );
 }
 
 /// The adapter, and secret storage with the key description of

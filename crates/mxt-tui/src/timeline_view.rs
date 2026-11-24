@@ -867,8 +867,8 @@ fn reply_line(reply: &ReplyPreview, width: usize) -> Line<'_> {
     Line::from(fit(&segments, width).0)
 }
 
-/// `key count` chips in [`TimelineItem::shown_reactions`]'s order; the
-/// user's own reactions are bold.
+/// `key count` chips in [`TimelineItem::shown_reactions`]'s order, the
+/// count being the number of senders; the user's own reactions are bold.
 fn reactions(groups: &[ReactionGroup]) -> Vec<Part<'_>> {
     let mut parts = Vec::with_capacity(groups.len() * 3);
     for (index, group) in groups.iter().enumerate() {
@@ -877,7 +877,7 @@ fn reactions(groups: &[ReactionGroup]) -> Vec<Part<'_>> {
         }
         let style = if group.mine { BOLD } else { PLAIN };
         parts.push(Part::new(group.key.as_str(), style));
-        parts.push(Part::new(format!(" {}", group.count), style));
+        parts.push(Part::new(format!(" {}", group.count()), style));
     }
     parts
 }
@@ -1449,7 +1449,7 @@ mod tests {
     use crate::view::tests::{self as view, Screen, app, press};
     use mxt_core::ids::{EventId, RoomId, TimelineId, TxnId, UserId};
     use mxt_core::msg::Msg;
-    use mxt_core::timeline::TimelineDiff;
+    use mxt_core::timeline::{ReactionSender, TimelineDiff};
     use ratatui::layout::Size;
     use ratatui_image::FontSize;
 
@@ -2113,6 +2113,38 @@ mod tests {
 
     fn text(row: &[(String, Style)]) -> String {
         row.iter().map(|(text, _)| text.as_str()).collect()
+    }
+
+    /// The reactions with `key` from `senders`, oldest first, without names.
+    fn group(key: &str, senders: &[&str], mine: bool) -> ReactionGroup {
+        let senders = senders.iter().map(|user| ReactionSender {
+            user: UserId::new(*user),
+            name: None,
+        });
+        ReactionGroup {
+            key: key.into(),
+            senders: senders.collect(),
+            mine,
+        }
+    }
+
+    #[test]
+    fn reaction_chips_count_the_senders_and_the_users_own_are_bold() {
+        let mut entry = remote(0, 1);
+        if let TimelineEntry::Item(item) = &mut entry {
+            item.reactions = vec![
+                group("👍", &["@alice:example.org", "@bob:example.org"], false),
+                group("🎉", &["@me:example.org"], true),
+            ];
+        }
+        let row = last_row(entry, None);
+        assert_eq!(text(&row), "👍 2  🎉 1");
+        let bold: Vec<_> = row
+            .iter()
+            .filter(|(_, style)| *style == BOLD)
+            .cloned()
+            .collect();
+        assert_eq!(text(&bold), "🎉 1");
     }
 
     #[test]

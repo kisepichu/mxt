@@ -2,7 +2,12 @@
 //! matrix-sdk-ui `Timeline` subscriptions, their back pagination, and the
 //! conversion of their items into core entries.
 
-use std::{collections::HashSet, num::NonZeroU32, pin::pin, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    num::NonZeroU32,
+    pin::pin,
+    sync::Arc,
+};
 
 use futures_util::{Stream, StreamExt as _};
 use matrix_sdk::{
@@ -38,8 +43,8 @@ use mxt_core::{
     msg::Msg,
     rich::{Block, Inline, RichText},
     timeline::{
-        ItemRef, MessageContent, ReactionGroup, ReplyPreview, SendState, ThreadSummary,
-        TimelineDiff, TimelineEntry, TimelineItem,
+        ItemRef, MessageContent, ReactionGroup, ReactionSender, ReplyPreview, SendState,
+        ThreadSummary, TimelineDiff, TimelineEntry, TimelineItem,
     },
 };
 use tokio::{
@@ -87,7 +92,9 @@ impl Subscription {
     /// profiles of senders, the user's own included; with the main timeline
     /// of a room of up to `MEMBERS_FETCH_LIMIT` joined members the room's
     /// members are loaded in the background, and the senders' names arrive
-    /// as `Set` diffs; a thread's timeline does not load them again.
+    /// as `Set` diffs; a thread's timeline does not load them again. The
+    /// names of the reactions' senders are read from the store before the
+    /// items they are on are converted (see `ReactorNames`).
     pub(crate) async fn start(
         sdk_room: &Room,
         id: TimelineId,
@@ -113,14 +120,27 @@ impl Subscription {
             to_fetch,
         };
         items.iter().for_each(|item| replies.see(item));
-        let entries = items.iter().map(|item| entry(item, &me)).collect();
+        let mut names = ReactorNames::default();
+        names
+            .learn(sdk_room, &me, items.iter().map(|item| &**item))
+            .await;
+        let entries = items.iter().map(|item| entry(item, &me, &names)).collect();
         let reset = vec![TimelineDiff::Reset(entries)];
         let _ = to_core.send(Msg::Timeline {
             timeline: id.clone(),
             diffs: reset,
         });
         let mut tasks = JoinSet::new();
-        tasks.spawn(forward(id.clone(), me, diffs, replies, to_core));
+        let room = sdk_room.clone();
+        tasks.spawn(forward(
+            id.clone(),
+            room,
+            me,
+            diffs,
+            replies,
+            names,
+            to_core,
+        ));
         tasks.spawn(fetch_reply_details(timeline.clone(), fetches));
         if id.thread.is_none() && sdk_room.joined_members_count() <= MEMBERS_FETCH_LIMIT {
             let members = timeline.clone();
@@ -197,18 +217,23 @@ impl Subscription {
 
 async fn forward(
     id: TimelineId,
+    room: Room,
     me: OwnedUserId,
     diffs: impl Stream<Item = Vec<VectorDiff<Arc<sdk::TimelineItem>>>>,
     mut replies: ReplyDetails,
+    mut names: ReactorNames,
     to_core: UnboundedSender<Msg>,
 ) {
     let mut diffs = pin!(diffs);
     while let Some(batch) = diffs.next().await {
+        names
+            .learn(&room, &me, batch.iter().flat_map(diff_items))
+            .await;
         let diffs = batch
             .into_iter()
             .map(|diff| {
                 replies.see_diff(&diff);
-                timeline_diff(diff, &me)
+                timeline_diff(diff, &me, &names)
             })
             .collect();
         let changed = Msg::Timeline {
@@ -218,6 +243,75 @@ async fn forward(
         if to_core.send(changed).is_err() {
             return;
         }
+    }
+}
+
+/// The items `diff` adds or replaces.
+fn diff_items(
+    diff: &VectorDiff<Arc<sdk::TimelineItem>>,
+) -> impl Iterator<Item = &sdk::TimelineItem> {
+    let (values, value) = match diff {
+        VectorDiff::Append { values } | VectorDiff::Reset { values } => (Some(values), None),
+        VectorDiff::PushFront { value }
+        | VectorDiff::PushBack { value }
+        | VectorDiff::Insert { value, .. }
+        | VectorDiff::Set { value, .. } => (None, Some(value)),
+        VectorDiff::Clear
+        | VectorDiff::PopFront
+        | VectorDiff::PopBack
+        | VectorDiff::Remove { .. }
+        | VectorDiff::Truncate { .. } => (None, None),
+    };
+    values
+        .into_iter()
+        .flatten()
+        .chain(value)
+        .map(|item| &**item)
+}
+
+/// The display names of the reactions' senders (design, "Reactions" in
+/// "Matrix adapter"), each read once from the SDK's store, which the SDK's
+/// timeline takes the senders' own names from, and kept for the
+/// subscription's life: a member renamed meanwhile keeps the old name. A
+/// sender the store has no name for is not kept, so their name is looked
+/// up again with the next batch that carries an item with their reaction,
+/// and a member event that reaches the store later shows then.
+#[derive(Default)]
+struct ReactorNames(HashMap<OwnedUserId, String>);
+
+impl ReactorNames {
+    /// Reads the names of the senders of the reactions on `items`' events,
+    /// other than `me` and those already known, each once. From the store
+    /// only (`Room::get_member_no_sync`): no request. A member without a
+    /// display name or with an empty one has none; a failed read, which the
+    /// user cannot act on, goes to `debug` only.
+    async fn learn<'a>(
+        &mut self,
+        room: &Room,
+        me: &ruma::UserId,
+        items: impl Iterator<Item = &'a sdk::TimelineItem>,
+    ) {
+        let unknown: HashSet<&ruma::UserId> = items
+            .filter_map(|item| item.as_event()?.content().reactions())
+            .flat_map(|reactions| reactions.values().flat_map(|senders| senders.keys()))
+            .map(|user| &**user)
+            .filter(|user| *user != me && !self.0.contains_key(*user))
+            .collect();
+        for user in unknown {
+            match room.get_member_no_sync(user).await {
+                Ok(member) => {
+                    let name = member.as_ref().and_then(|member| member.display_name());
+                    if let Some(name) = name.filter(|name| !name.is_empty()) {
+                        self.0.insert(user.to_owned(), name.to_owned());
+                    }
+                }
+                Err(error) => debug!("Reading a reaction sender's name failed: {error}"),
+            }
+        }
+    }
+
+    fn get(&self, user: &ruma::UserId) -> Option<String> {
+        self.0.get(user).cloned()
     }
 }
 
@@ -237,22 +331,10 @@ struct ReplyDetails {
 
 impl ReplyDetails {
     fn see_diff(&mut self, diff: &VectorDiff<Arc<sdk::TimelineItem>>) {
-        match diff {
-            VectorDiff::Clear => self.asked.clear(),
-            VectorDiff::Reset { values } => {
-                self.asked.clear();
-                values.iter().for_each(|item| self.see(item));
-            }
-            VectorDiff::Append { values } => values.iter().for_each(|item| self.see(item)),
-            VectorDiff::PushFront { value }
-            | VectorDiff::PushBack { value }
-            | VectorDiff::Insert { value, .. }
-            | VectorDiff::Set { value, .. } => self.see(value),
-            VectorDiff::PopFront
-            | VectorDiff::PopBack
-            | VectorDiff::Remove { .. }
-            | VectorDiff::Truncate { .. } => {}
+        if matches!(diff, VectorDiff::Clear | VectorDiff::Reset { .. }) {
+            self.asked.clear();
         }
+        diff_items(diff).for_each(|item| self.see(item));
     }
 
     /// The SDK fetches details only for remote events.
@@ -502,19 +584,25 @@ fn outgoing_content(body: &RenderedBody) -> RoomMessageEventContentWithoutRelati
     content.add_mentions(Mentions::with_user_ids(users))
 }
 
-fn timeline_diff(diff: VectorDiff<Arc<sdk::TimelineItem>>, me: &ruma::UserId) -> TimelineDiff {
+fn timeline_diff(
+    diff: VectorDiff<Arc<sdk::TimelineItem>>,
+    me: &ruma::UserId,
+    names: &ReactorNames,
+) -> TimelineDiff {
     let entries = |items: matrix_sdk_ui::eyeball_im::Vector<Arc<sdk::TimelineItem>>| {
-        items.iter().map(|item| entry(item, me)).collect()
+        items.iter().map(|item| entry(item, me, names)).collect()
     };
     match diff {
         VectorDiff::Append { values } => TimelineDiff::Append(entries(values)),
         VectorDiff::Clear => TimelineDiff::Clear,
-        VectorDiff::PushFront { value } => TimelineDiff::PushFront(entry(&value, me)),
-        VectorDiff::PushBack { value } => TimelineDiff::PushBack(entry(&value, me)),
+        VectorDiff::PushFront { value } => TimelineDiff::PushFront(entry(&value, me, names)),
+        VectorDiff::PushBack { value } => TimelineDiff::PushBack(entry(&value, me, names)),
         VectorDiff::PopFront => TimelineDiff::PopFront,
         VectorDiff::PopBack => TimelineDiff::PopBack,
-        VectorDiff::Insert { index, value } => TimelineDiff::Insert(index, entry(&value, me)),
-        VectorDiff::Set { index, value } => TimelineDiff::Set(index, entry(&value, me)),
+        VectorDiff::Insert { index, value } => {
+            TimelineDiff::Insert(index, entry(&value, me, names))
+        }
+        VectorDiff::Set { index, value } => TimelineDiff::Set(index, entry(&value, me, names)),
         VectorDiff::Remove { index } => TimelineDiff::Remove(index),
         VectorDiff::Truncate { length } => TimelineDiff::Truncate(length),
         VectorDiff::Reset { values } => TimelineDiff::Reset(entries(values)),
@@ -523,25 +611,29 @@ fn timeline_diff(diff: VectorDiff<Arc<sdk::TimelineItem>>, me: &ruma::UserId) ->
 
 /// Every SDK item becomes one entry, so indices stay the SDK's: what the
 /// first release does not show becomes `Hidden`.
-fn entry(item: &sdk::TimelineItem, me: &ruma::UserId) -> TimelineEntry {
+fn entry(item: &sdk::TimelineItem, me: &ruma::UserId, names: &ReactorNames) -> TimelineEntry {
     match item.kind() {
         TimelineItemKind::Virtual(VirtualTimelineItem::DateDivider(day)) => {
             TimelineEntry::DateDivider(timestamp(*day))
         }
         TimelineItemKind::Virtual(VirtualTimelineItem::ReadMarker) => TimelineEntry::ReadMarker,
         TimelineItemKind::Virtual(VirtualTimelineItem::TimelineStart) => TimelineEntry::Hidden,
-        TimelineItemKind::Event(event) => event_entry(event, me),
+        TimelineItemKind::Event(event) => event_entry(event, me, names),
     }
 }
 
 /// Messages and other message-like events, calls included, are items; state
 /// events and membership changes are hidden.
-fn event_entry(event: &EventTimelineItem, me: &ruma::UserId) -> TimelineEntry {
+fn event_entry(
+    event: &EventTimelineItem,
+    me: &ruma::UserId,
+    names: &ReactorNames,
+) -> TimelineEntry {
     let (content, reply, reactions, edited, thread) = match event.content() {
         TimelineItemContent::MsgLike(msg_like) => (
             msg_like_content(&msg_like.kind),
             msg_like.in_reply_to.as_ref().map(reply_preview),
-            reaction_groups(&msg_like.reactions, me),
+            reaction_groups(&msg_like.reactions, me, names),
             matches!(&msg_like.kind, MsgLikeKind::Message(message) if message.is_edited()),
             thread_summary(msg_like.thread_summary.as_ref()),
         ),
@@ -745,14 +837,29 @@ fn message_preview(msgtype: &MessageType, body: &str) -> String {
     html_body(formatted).map_or_else(|| body.to_owned(), |rich| rich.to_plain_hiding_spoilers())
 }
 
-/// One group per key, in the SDK's order.
-fn reaction_groups(reactions: &ReactionsByKeyBySender, me: &ruma::UserId) -> Vec<ReactionGroup> {
+/// One group per key, in the SDK's order, with its senders sorted by the
+/// reaction's timestamp, oldest first (design, "Reactions" in "Matrix
+/// adapter"). The sort is stable, so the SDK's order, the order in which
+/// the timeline applied the reactions, breaks ties.
+fn reaction_groups(
+    reactions: &ReactionsByKeyBySender,
+    me: &ruma::UserId,
+    names: &ReactorNames,
+) -> Vec<ReactionGroup> {
     reactions
         .iter()
-        .map(|(key, senders)| ReactionGroup {
-            key: key.clone(),
-            count: u32::try_from(senders.len()).unwrap_or(u32::MAX),
-            mine: senders.contains_key(me),
+        .map(|(key, by_sender)| {
+            let mut sorted: Vec<_> = by_sender.iter().collect();
+            sorted.sort_by_key(|(_, info)| info.timestamp);
+            let senders = sorted.into_iter().map(|(user, _)| ReactionSender {
+                user: UserId::new(user.as_str()),
+                name: names.get(user),
+            });
+            ReactionGroup {
+                key: key.clone(),
+                senders: senders.collect(),
+                mine: by_sender.contains_key(me),
+            }
         })
         .collect()
 }
@@ -804,22 +911,32 @@ fn timestamp(ts: MilliSecondsSinceUnixEpoch) -> Timestamp {
 
 #[cfg(test)]
 mod tests {
-    use matrix_sdk::ruma::{
-        OwnedMxcUri, UInt,
-        events::{
-            StateEventType,
-            room::{
-                ImageInfo,
-                message::{
-                    AudioInfo, AudioMessageEventContent, EmoteMessageEventContent, FileInfo,
-                    FileMessageEventContent, ImageMessageEventContent, LocationMessageEventContent,
-                    NoticeMessageEventContent, TextMessageEventContent,
+    use std::time::Duration;
+
+    use matrix_sdk::{
+        ruma::{
+            OwnedMxcUri, UInt, event_id,
+            events::{
+                StateEventType,
+                room::{
+                    ImageInfo,
+                    message::{
+                        AudioInfo, AudioMessageEventContent, EmoteMessageEventContent, FileInfo,
+                        FileMessageEventContent, ImageMessageEventContent,
+                        LocationMessageEventContent, NoticeMessageEventContent,
+                        TextMessageEventContent,
+                    },
                 },
             },
+            owned_device_id, owned_event_id, owned_user_id, room_id, user_id,
         },
-        owned_event_id, owned_user_id,
+        test_utils::mocks::MatrixMockServer,
     };
-    use matrix_sdk_ui::timeline::{EmbeddedEvent, MsgLikeContent, ReactionInfo};
+    use matrix_sdk_test::{JoinedRoomBuilder, event_factory::EventFactory};
+    use matrix_sdk_ui::{
+        eyeball_im::Vector,
+        timeline::{EmbeddedEvent, MsgLikeContent, ReactionInfo},
+    };
     use mxt_core::{
         mention::{MentionRef, render_mentions},
         rich::Style,
@@ -1012,34 +1129,125 @@ mod tests {
     }
 
     #[test]
-    fn reactions_are_grouped_by_key_with_the_own_reaction() {
+    fn reactions_are_grouped_by_key_with_their_senders_oldest_first() {
         let me = owned_user_id!("@me:example.org");
-        let info = || ReactionInfo {
-            timestamp: MilliSecondsSinceUnixEpoch(UInt::from(0u32)),
+        let bob = owned_user_id!("@bob:example.org");
+        let carol = owned_user_id!("@carol:example.org");
+        let dave = owned_user_id!("@dave:example.org");
+        let at = |millis: u32| ReactionInfo {
+            timestamp: MilliSecondsSinceUnixEpoch(UInt::from(millis)),
             send_state: None,
         };
         let mut reactions = ReactionsByKeyBySender::default();
         let thumbs = reactions.entry("👍".to_owned()).or_default();
-        thumbs.insert(owned_user_id!("@alice:example.org"), info());
-        thumbs.insert(owned_user_id!("@bob:example.org"), info());
+        thumbs.insert(carol.clone(), at(30));
+        thumbs.insert(bob.clone(), at(10));
+        thumbs.insert(me.clone(), at(20));
+        // Equal timestamps keep the SDK's order.
         let party = reactions.entry("🎉".to_owned()).or_default();
-        party.insert(owned_user_id!("@alice:example.org"), info());
-        party.insert(me.clone(), info());
+        party.insert(dave.clone(), at(10));
+        party.insert(bob.clone(), at(10));
+        let names = ReactorNames(HashMap::from([(bob.clone(), "Bob".to_owned())]));
+        let sender = |user: &ruma::UserId, name: Option<&str>| ReactionSender {
+            user: UserId::new(user.as_str()),
+            name: name.map(Into::into),
+        };
+        let groups = reaction_groups(&reactions, &me, &names);
         assert_eq!(
-            reaction_groups(&reactions, &me),
+            groups,
             vec![
                 ReactionGroup {
                     key: "👍".into(),
-                    count: 2,
-                    mine: false,
+                    senders: vec![
+                        sender(&bob, Some("Bob")),
+                        sender(&me, None),
+                        sender(&carol, None),
+                    ],
+                    mine: true,
                 },
                 ReactionGroup {
                     key: "🎉".into(),
-                    count: 2,
-                    mine: true,
+                    senders: vec![sender(&dave, None), sender(&bob, Some("Bob"))],
+                    mine: false,
                 },
             ]
         );
+        assert_eq!(groups[0].count(), 3);
+    }
+
+    /// The items of `timeline` once its items carry `reactions` reactions
+    /// in all: the event cache takes a sync's events in a task of its own.
+    async fn items_once_reacted(
+        timeline: &Timeline,
+        reactions: usize,
+    ) -> Vector<Arc<sdk::TimelineItem>> {
+        let count = |items: &Vector<Arc<sdk::TimelineItem>>| -> usize {
+            let reactions = items
+                .iter()
+                .filter_map(|item| item.as_event()?.content().reactions());
+            reactions
+                .flat_map(|reactions| reactions.values())
+                .map(|senders| senders.len())
+                .sum()
+        };
+        let (mut items, diffs) = timeline.subscribe().await;
+        let mut diffs = pin!(diffs);
+        while count(&items) < reactions {
+            let batch = tokio::time::timeout(Duration::from_secs(10), diffs.next());
+            let batch = batch.await.expect("waited for the reactions").unwrap();
+            batch.into_iter().for_each(|diff| diff.apply(&mut items));
+        }
+        items
+    }
+
+    /// Names from the member events in the store, none for a member with an
+    /// empty one or without one, the user's own not looked up; a member
+    /// event that reaches the store later counts with the next lookup.
+    #[tokio::test]
+    async fn reactor_names_are_the_display_names_of_the_member_events_in_the_store() {
+        let server = MatrixMockServer::new().await;
+        let me = user_id!("@alice:example.org");
+        let client = server
+            .client_builder()
+            .logged_in_with_token("1234".to_owned(), me.to_owned(), owned_device_id!("DEVICE"))
+            // Plain HTTP; see the adapter's tests.
+            .on_builder(|builder| builder.disable_ssl_verification())
+            .build()
+            .await;
+        server.mock_room_state_encryption().plain().mount().await;
+        client.event_cache().subscribe().unwrap();
+        let bob = user_id!("@bob:example.org");
+        let carol = user_id!("@carol:example.org");
+        let dave = user_id!("@dave:example.org");
+        let room_id = room_id!("!room:example.org");
+        let message = event_id!("$message:example.org");
+        let f = EventFactory::new();
+        let reactions = [me, bob, carol, dave]
+            .map(|user| f.reaction(message, "👍").sender(user).into_raw_sync());
+        let joined = JoinedRoomBuilder::new(room_id)
+            .add_state_event(f.member(me).display_name("Alice"))
+            .add_state_event(f.member(bob).display_name("Bob"))
+            .add_state_event(f.member(dave).display_name(""))
+            .add_timeline_event(f.text_msg("hello").sender(bob).event_id(message))
+            .add_timeline_bulk(reactions);
+        let room = server.sync_room(&client, joined).await;
+        let timeline = room.timeline().await.unwrap();
+        let items = items_once_reacted(&timeline, 4).await;
+        let items = || items.iter().map(|item| &**item);
+
+        let mut names = ReactorNames::default();
+        names.learn(&room, me, items()).await;
+        assert_eq!(names.get(bob).as_deref(), Some("Bob"));
+        assert_eq!(names.get(dave), None);
+        assert_eq!(names.get(carol), None);
+        assert_eq!(names.get(me), None);
+
+        let carol_joins =
+            JoinedRoomBuilder::new(room_id).add_state_event(f.member(carol).display_name("Carol"));
+        server.sync_room(&client, carol_joins).await;
+        names.learn(&room, me, items()).await;
+        assert_eq!(names.get(carol).as_deref(), Some("Carol"));
+        assert_eq!(names.get(bob).as_deref(), Some("Bob"));
     }
 
     #[test]
