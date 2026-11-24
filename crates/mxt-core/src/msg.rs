@@ -4,7 +4,7 @@ use crate::ids::{EventId, RoomId, SendId, TimelineId, UserId};
 use crate::keys::Key;
 use crate::mention::Member;
 use crate::resolver::TimerId;
-use crate::room::{Invite, RoomSummary};
+use crate::room::{Invite, NotificationMode, RoomSummary};
 use crate::timeline::{ItemRef, MediaBytes, TimelineDiff};
 
 /// The mode of the edtui editor that has focus, reported with every key.
@@ -70,6 +70,15 @@ pub enum Msg {
     },
     RoomUpserted(RoomSummary),
     RoomRemoved(RoomId),
+    /// The room's notification mode alone (design, "Notification modes"):
+    /// its counts and its place in the room list stay as the core has them.
+    /// Sent by the room list task when the push rules change, and by the
+    /// effect task, with the mode the SDK reads, when a
+    /// `MatrixEffect::SetMode` fails.
+    RoomModeChanged {
+        room: RoomId,
+        mode: NotificationMode,
+    },
     SyncState(SyncState),
     /// Changes of a timeline, in order; ignored unless it is the open room's
     /// main timeline or its open thread.

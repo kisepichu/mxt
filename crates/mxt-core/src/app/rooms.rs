@@ -3,6 +3,7 @@
 use std::cmp::Ordering;
 
 use super::{App, Focus, Motion, StatusKind};
+use crate::action::NotifyMode;
 use crate::effect::{Effect, MatrixEffect};
 use crate::ids::{RoomId, Timestamp};
 use crate::msg::Pane;
@@ -179,9 +180,9 @@ impl App {
         self.focus = Focus::Timeline;
     }
 
-    /// The room that `room.mark_read`, `room.mute` and `room.unmute` act on:
-    /// the room under the cursor when the room list has focus, otherwise the
-    /// open room.
+    /// The room that `room.mark_read`, `room.mute`, `room.unmute` and
+    /// `room.notify` act on: the room under the cursor when the room list
+    /// has focus, otherwise the open room.
     fn target_room(&self) -> Option<&RoomSummary> {
         match self.focus {
             Focus::RoomList => self.room_cursor().map(|index| &self.rooms.rooms()[index]),
@@ -212,10 +213,11 @@ impl App {
         effects.push(Effect::Matrix(MatrixEffect::MarkRoomRead(id)));
     }
 
-    /// `room.mute` / `room.unmute`. The room's mode label changes when the
-    /// SDK reports the new mode. Unmuting removes the room's rule, so
-    /// `room.unmute` on a room that is not muted does nothing: a "Mentions
-    /// only" rule set elsewhere stays.
+    /// `room.mute` / `room.unmute`. The room's `Muted` label changes at
+    /// once, and a failed change puts it back (see `send_mode`). Unmuting
+    /// removes the room's rules, so `room.unmute` on a room that is not
+    /// muted does nothing: a rule for all messages or for mentions and
+    /// keywords only, set elsewhere or with `room.notify`, stays.
     pub(super) fn set_mute(&mut self, muted: bool, effects: &mut Vec<Effect>) {
         let Some(room) = self.target_room() else {
             return self.set_status(StatusKind::Error, "No room");
@@ -224,13 +226,62 @@ impl App {
             let status = format!("{} is not muted", room.name);
             return self.set_status(StatusKind::Error, status);
         }
-        let verb = if muted { "Muted" } else { "Unmuted" };
+        let (verb, mode) = if muted {
+            ("Muted", NotificationMode::Mute)
+        } else {
+            ("Unmuted", NotificationMode::Default)
+        };
         let status = format!("{verb} {}", room.name);
-        effects.push(Effect::Matrix(MatrixEffect::SetMute {
-            room: room.id.clone(),
-            muted,
-        }));
+        let id = room.id.clone();
+        self.send_mode(id, mode, effects);
         self.set_status(StatusKind::Info, status);
+    }
+
+    /// `room.notify` (design, "Notification modes"): without `mode` it
+    /// shows the room's mode. With one it compares the target with the
+    /// room's mode, which the changes sent before have set already: the
+    /// same mode sends nothing and says so, another sends the change.
+    pub(super) fn notify(&mut self, mode: Option<NotifyMode>, effects: &mut Vec<Effect>) {
+        let Some(room) = self.target_room() else {
+            return self.set_status(StatusKind::Error, "No room");
+        };
+        let Some(mode) = mode else {
+            let status = format!("{} {}", room.name, setting(room.mode));
+            return self.set_status(StatusKind::Info, status);
+        };
+        let target = match mode {
+            NotifyMode::All => NotificationMode::AllMessages,
+            NotifyMode::Mentions => NotificationMode::MentionsAndKeywords,
+        };
+        if room.mode == target {
+            let status = format!("{} already {}", room.name, setting(target));
+            return self.set_status(StatusKind::Info, status);
+        }
+        let status = format!("{} now {}", room.name, setting(target));
+        let id = room.id.clone();
+        self.send_mode(id, target, effects);
+        self.set_status(StatusKind::Info, status);
+    }
+
+    /// Sends the change of the room's mode and sets the room's mode to it
+    /// at once, as optimistic clearing sets the counts (design,
+    /// "Notification modes"): the `Muted` label follows, and the next
+    /// action compares with the target. A change that fails is answered
+    /// with `Msg::RoomModeChanged`, which puts the SDK's mode back. No sort
+    /// key reads the mode, so no room moves.
+    fn send_mode(&mut self, room: RoomId, mode: NotificationMode, effects: &mut Vec<Effect>) {
+        self.rooms.set_mode(&room, mode);
+        effects.push(Effect::Matrix(MatrixEffect::SetMode { room, mode }));
+    }
+}
+
+/// How a room in `mode` notifies, after its name in the status line.
+fn setting(mode: NotificationMode) -> &'static str {
+    match mode {
+        NotificationMode::AllMessages => "notifies for every message",
+        NotificationMode::MentionsAndKeywords => "notifies for mentions and keywords only",
+        NotificationMode::Mute => "is muted",
+        NotificationMode::Default => "follows the account's default",
     }
 }
 

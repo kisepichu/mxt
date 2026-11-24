@@ -15,6 +15,19 @@ marked **Breaking:**.
   (and in a thread) are the default keys for `index = 1` … `9`, so under
   `👍 2  ❤️ 1`, `g1` toggles 👍. In the composer, `g` and a digit still go
   to the editor. mxt 0.1.5 ignores a binding with `index` with a warning.
+- `:notify all` and `:notify mentions` set whether every message of a room
+  notifies you or only mentions and keywords, on the room under the cursor
+  in the room list, otherwise the open room, as `:mute` does; `:notify`
+  alone shows the room's setting, and the status line says what changed or
+  that it already was so. The action is `room.notify` with `mode = "all"`
+  or `"mentions"`. This is your account's push rule, so other clients,
+  such as Beeper on your phone, notify the same way. A bridged channel set
+  to mentions only then counts among the rooms that notify (the `notify`
+  sort key, `filter = "notify"`) from its next message on; messages that
+  were already unread keep their dim count until read. `:notify all` on a
+  muted room unmutes it, and `:mute` then `:unmute` goes back to the
+  account's default. mxt 0.1.5 ignores a binding of `room.notify` with a
+  warning.
 
 ### Changed
 
@@ -33,6 +46,10 @@ marked **Breaking:**.
   full, the root included. `t` still opens or starts a thread on any
   message. `"<CR>" = "message.view"` in `[keymap.timeline]` brings back
   the old `<CR>`.
+- `:mute` and `:unmute` show or remove the `Muted` label at once, not when
+  the next sync brings the new setting back, so `:unmute` right after
+  `:mute` works; if the change fails, the label goes back and the status
+  line shows the error.
 
 ## [0.1.5] - 2026-11-23
 

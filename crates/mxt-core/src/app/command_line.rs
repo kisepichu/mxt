@@ -3,6 +3,7 @@
 
 use super::join::join_candidates;
 use super::{App, StatusKind};
+use crate::action::NotifyMode;
 use crate::command::{Argument, COMMANDS, CommandError, parse_command};
 use crate::effect::{Effect, StoreEffect};
 use crate::emoji;
@@ -299,7 +300,8 @@ fn history_of(histories: &LineHistories, kind: LineKind) -> &History {
 /// `join <query>`: the pending invites ranked by name (see
 /// `join_candidates`). For `react <prefix>`: the shortcodes that start with
 /// the prefix, a leading `:` ignored, in alphabetical order, as
-/// `react <shortcode>`.
+/// `react <shortcode>`. For `notify <prefix>`: `all` and `mentions`, those
+/// that start with the prefix, in that order, as `notify <mode>`.
 fn candidates(text: &str, rooms: &RoomList, invites: &[Invite]) -> Vec<String> {
     match text.split_once(char::is_whitespace) {
         None => COMMANDS
@@ -328,6 +330,15 @@ fn candidates(text: &str, rooms: &RoomList, invites: &[Invite]) -> Vec<String> {
             emoji::shortcodes_starting_with(prefix)
                 .iter()
                 .map(|shortcode| format!("react {shortcode}"))
+                .collect()
+        }
+        Some(("notify", prefix)) => {
+            let prefix = prefix.trim();
+            NotifyMode::ALL
+                .into_iter()
+                .map(NotifyMode::config_name)
+                .filter(|mode| mode.starts_with(prefix))
+                .map(|mode| format!("notify {mode}"))
                 .collect()
         }
         Some(_) => Vec::new(),

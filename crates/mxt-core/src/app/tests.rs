@@ -881,6 +881,24 @@ fn completes_shortcodes_for_react_without_colons() {
 }
 
 #[test]
+fn completes_the_modes_of_notify_in_order() {
+    let mut names = app();
+    keys(&mut names, ":noti<Tab>");
+    assert_eq!(line(&names), Some((LineKind::Command, "notify ")));
+    for shown in ["notify all", "notify mentions", "notify "] {
+        keys(&mut names, "<Tab>");
+        assert_eq!(line(&names), Some((LineKind::Command, shown)));
+    }
+    let mut prefix = app();
+    keys(&mut prefix, ":notify m<Tab>");
+    assert_eq!(line(&prefix), Some((LineKind::Command, "notify mentions")));
+    // The modes are lower case.
+    let mut upper = app();
+    keys(&mut upper, ":notify M<Tab>");
+    assert_eq!(line(&upper), Some((LineKind::Command, "notify M")));
+}
+
+#[test]
 fn completes_room_names_for_open() {
     let mut app = app();
     keys(&mut app, ":open c<Tab>");
