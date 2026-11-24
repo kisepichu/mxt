@@ -12,8 +12,9 @@ mxt 0.1.2 did nothing. The leader and the longer bindings work as before.
 ## The screen
 
 - The room list is on the left; `<leader>e` hides and shows it. The open
-  room's timeline is on the right, with the composer below it. `t` shows a
-  message's thread in the timeline's place (see [Threads](#threads)).
+  room's timeline is on the right, with the composer below it. `t`, or
+  `<CR>` on a message with replies, shows the message's thread in the
+  timeline's place (see [Threads](#threads)).
 - The room list is in the order of `ui.room_list.sort`, by latest activity
   unless it says otherwise (see [Sort keys](configuration.md#sort-keys)).
   Opening a room, with `<CR>` or any other way of opening it (`]u`, `[u`,
@@ -67,8 +68,9 @@ arrive) and `(unsupported: …)`. With `ui.timeline.images = "on"` (see
 preview follows its line, at most `ui.timeline.image_rows` rows tall (16
 by default).
 A message taller than the pane is cut with `[+N lines]`; `<CR>` shows it in
-full. Date dividers and a `new messages` line, where you stopped reading,
-come between messages.
+full. On a thread root with replies `<CR>` opens the thread, and `<CR>` on
+the root there shows it in full. Date dividers and a `new messages` line,
+where you stopped reading, come between messages.
 Replies in threads are not in the timeline. Their root ends with a dim row
 `💬 3 · 14:32`: the number of replies and the time of the latest, with its
 date when it is on another day than the root, or `💬 3` alone until mxt
@@ -215,10 +217,11 @@ its lines. `:noh` (or `:nohlsearch`) hides the highlight until the next
 search, and so does opening another room; opening or closing a thread keeps
 it. The room list's names are not highlighted. Matches in the cut-off part
 of a tall message (`[+N lines]`) are not shown, so open the message with
-`<CR>`: its view underlines them in bold, and a visual selection there stays
-reversed. The view keeps the marks it opened with: clearing the highlight
-while it is open, or editing its text, leaves them where they were. The
-editors' own `/` shows only the current match, while you type it.
+`<CR>` (on a thread root with replies, in its thread): its view underlines
+them in bold, and a visual selection there stays reversed. The view keeps
+the marks it opened with: clearing the highlight while it is open, or
+editing its text, leaves them where they were. The editors' own `/` shows
+only the current match, while you type it.
 
 ### `room_list`
 
@@ -231,7 +234,7 @@ editors' own `/` shows only the current match, while you type it.
 | Key | Action | |
 |---|---|---|
 | `i`, `a` | `composer.focus` | write in insert mode |
-| `<CR>` | `message.view` | show the message in full, or the image (of a sticker too) |
+| `<CR>` | `message.enter` | show the thread of a message with replies, as `t` does; any other message in full, or the image (of a sticker too) |
 | `r` | `message.reply` | reply |
 | `e` | `message.edit` | edit your own text message (the composer must be empty) |
 | `dd` | `message.delete` | delete your own message, after `y` |
@@ -242,6 +245,10 @@ editors' own `/` shows only the current match, while you type it.
 | `gd` | `message.goto_reply` | go to the message this one replies to |
 | `R` | `message.resend` | send a message marked `failed` again |
 | `t` | `thread.open` | show the message's thread in place of the timeline (see [Threads](#threads)) |
+
+Up to mxt 0.1.5, `<CR>` showed every message in full, a thread root too;
+`"<CR>" = "message.view"` in `[keymap.timeline]` keeps that, in threads
+too. In a thread, `<CR>` shows every message in full, the root included.
 
 A message that failed for a passing reason, such as a lost connection, also
 goes out by itself once the sync is back; `R` is for the others.
@@ -342,6 +349,7 @@ use the commands below:
 | `room.mute`, `room.unmute` | `:mute`, `:unmute` |
 | `room.join`, with a `target` | `:join <target>` |
 | `message.react` with an `emoji`, for example `emoji = "thumbsup"` | `:react <emoji>` |
+| `message.view`, the message view on any message, a thread root too (`<CR>` up to mxt 0.1.5) | |
 | `composer.clear`, which empties the composer as one change that `u` undoes and keeps a reply or an edit | |
 | `file.upload` | `:upload <path>` |
 | `account.recover`, which asks for the recovery key | `:recover` |
@@ -389,13 +397,15 @@ user_id = "@alice:example.org"
 
 ## Threads
 
-`t` (`thread.open`) shows the thread of the message under the cursor in
-place of the timeline: the root, then its replies, oldest first, under the
-title row `Thread · <sender>: <first line>`. On a message without replies
-the thread is new and empty, and the first message you send there starts
-it. `t` refuses a message that is still being sent (`Wait until the
-message is sent`) and a deleted message without replies (`The message is
-deleted`); in a thread it does nothing more.
+`t` (`thread.open`), or `<CR>` (`message.enter`) on a message with
+replies, shows the thread of the message under the cursor in place of the
+timeline: the root, then its replies, oldest first, under the title row
+`Thread · <sender>: <first line>`. On a message without replies `<CR>`
+shows the message in full, and `t` opens a new, empty thread, which the
+first message you send there starts. `t` refuses a message that is still
+being sent (`Wait until the message is sent`) and a deleted message
+without replies (`The message is deleted`); in a thread it does nothing
+more.
 
 Reading a thread sends a read receipt for its newest reply once the pane
 shows it, as the timeline does for its newest message, and other clients
@@ -413,6 +423,7 @@ In a thread:
   `/`, `n`, `N`, `<CR>`, `e`, `dd`, `yy`, `+`, `g1` … `g9`, `gx`, `R`, `i`
   and `a`, and older replies load as the cursor nears the top.
   `room.mark_read`, `:mute` and `:unmute` act on the room.
+- `<CR>` shows every message in full, the root too.
 - The composer sends into the thread. Each thread has its own draft, as
   each room has: what you leave in a thread's composer waits there for the
   next time you open the thread, and the room's draft, reply or edit is
@@ -436,8 +447,8 @@ loading older replies until it arrives. A message that neither the
 timeline nor a thread that mxt knows holds is not loaded, as before.
 
 Opening and closing a thread are jumps (see [The jump list](#the-jump-list)):
-`<C-o>` after `t` goes back to the root in the timeline, and `<Tab>` into
-the thread again.
+`<C-o>` after `t` or `<CR>` goes back to the root in the timeline, and
+`<Tab>` into the thread again.
 
 ## The jump list
 
@@ -447,7 +458,7 @@ jumps:
 
 - opening another room, whichever way: `<CR>` in the room list, the room
   picker, `]u` and `[u`, `:open` and `:join`;
-- opening a thread with `t`, and closing it with `q` or `<Esc>`;
+- opening a thread with `t` or `<CR>`, and closing it with `q` or `<Esc>`;
 - `gg` and `G` in the timeline;
 - a search in the timeline with `/`, `n` or `N`;
 - `gd`.
@@ -581,14 +592,14 @@ The composer:
   ends it too when the composer is empty (a space counts as text), so a
   reply started by mistake ends with `<Esc>` and nothing typed is lost.
 
-The message view (`<CR>` on a message) holds the message's text in an
-editor, so motions, `/` search, visual selection and yanks work on messages
-taller than the screen. `i` and other edits work too, but are discarded when
-the view closes. `q` closes it in normal and visual mode, and `<Esc>` in
-normal mode; in visual mode `<Esc>` goes back to normal mode with the cursor
-where it is, as in vim, so after `V`, `<Esc>v` starts a selection of
-characters. `:help`, `:map` and `:messages` show their text in the same
-view.
+The message view (`<CR>` on a message; on a thread root with replies, in
+its thread) holds the message's text in an editor, so motions, `/` search,
+visual selection and yanks work on messages taller than the screen. `i`
+and other edits work too, but are discarded when the view closes. `q`
+closes it in normal and visual mode, and `<Esc>` in normal mode; in visual
+mode `<Esc>` goes back to normal mode with the cursor where it is, as in
+vim, so after `V`, `<Esc>v` starts a selection of characters. `:help`,
+`:map` and `:messages` show their text in the same view.
 
 In both editors, in insert and normal mode, `<Up>` on the first line goes to
 the start of the text and `<Down>` on the last line to its end, as in a text
