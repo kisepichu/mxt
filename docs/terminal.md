@@ -84,8 +84,9 @@ go out even while you look at another window.
 
 ## Images
 
-Images appear in the message view (`<CR>` on an image or a sticker) and,
-with `ui.timeline.images = "on"` (see
+Images appear in the message view (`<CR>` on an image or a sticker; on a
+thread root with replies, in its thread) and, with
+`ui.timeline.images = "on"` (see
 [Configuration](configuration.md#uitimeline)), as previews under their
 line in the timeline ([below](#previews-in-the-timeline)). mxt draws them
 with [ratatui-image](https://github.com/benjajaja/ratatui-image) in sixel,

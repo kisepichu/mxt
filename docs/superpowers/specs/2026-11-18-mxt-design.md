@@ -3078,7 +3078,9 @@ list, so mxt does not offer an event-level mention list.
     `message.view` shows it larger. `auto` chooses them inside WSL,
     inside tmux without sixel or kitty, and where nothing better is known.
   - `<CR>` on a sticker shows its image in the message view, as on an
-    image (`ViewContent::Image`, with its body as the name).
+    image (`ViewContent::Image`, with its body as the name); on a thread
+    root with replies, `<CR>` on it inside its thread does (see
+    `message.enter` under "Threads").
 
 ### Clipboard and terminal focus
 
