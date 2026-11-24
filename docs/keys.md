@@ -55,7 +55,9 @@ A room in the list shows at most one badge, the first that applies:
 | `3`, dim | unread messages that do not notify you, as in muted rooms |
 | `U` | marked as unread |
 
-Counts above 99 show as `99+`. Muted rooms also show `Muted`.
+Counts above 99 show as `99+`. Muted rooms also show `Muted`; a room set
+to notify for every message or for mentions and keywords only shows no
+label, and `:notify` shows its setting (see [Commands](#commands)).
 
 In the timeline, each message has a header with its time, the sender, and
 `(edited)`, `sending…` or `failed` when they apply. A reply's header is
@@ -354,6 +356,7 @@ use the commands below:
 | `room.open` with other arguments than `]u` and `[u`, for example a `query` | `:open <room>` |
 | `room.mark_read` | |
 | `room.mute`, `room.unmute` | `:mute`, `:unmute` |
+| `room.notify`, with a `mode` or without | `:notify [<mode>]` |
 | `room.join`, with a `target` | `:join <target>` |
 | `message.react` with an `emoji`, for example `emoji = "thumbsup"` | `:react <emoji>` |
 | `message.view`, the message view on any message, a thread root too (`<CR>` up to mxt 0.1.5) | |
@@ -429,7 +432,7 @@ In a thread:
 - The timeline's keys work on the thread's messages: moving and counts,
   `/`, `n`, `N`, `<CR>`, `e`, `dd`, `yy`, `+`, `g1` … `g9`, `gx`, `R`, `i`
   and `a`, and older replies load as the cursor nears the top.
-  `room.mark_read`, `:mute` and `:unmute` act on the room.
+  `room.mark_read`, `:mute`, `:unmute` and `:notify` act on the room.
 - `<CR>` shows every message in full, the root too.
 - The composer sends into the thread. Each thread has its own draft, as
   each room has: what you leave in a thread's composer waits there for the
@@ -504,8 +507,8 @@ there; the message view passes both to its editor.
 `:` opens the command line. Everything after the command name is one
 argument, so names and paths with spaces need no quotes. `<Tab>` completes
 command names, room names after `:open`, the names of pending invites
-after `:join`, and emoji shortcodes after `:react` (`:react thu` offers
-`thumbsdown` and `thumbsup`).
+after `:join`, emoji shortcodes after `:react` (`:react thu` offers
+`thumbsdown` and `thumbsup`), and `all` and `mentions` after `:notify`.
 
 | Command | What it does |
 |---|---|
@@ -513,6 +516,7 @@ after `:join`, and emoji shortcodes after `:react` (`:react thu` offers
 | `:join <target>` | Joins a room and opens it, or opens a direct message (see [Joining rooms and direct messages](#joining-rooms-and-direct-messages)). |
 | `:mute` | Mutes the room: the room under the cursor in the room list, otherwise the open room. |
 | `:unmute` | Unmutes it: its own notification setting is removed, so the account's default applies. A room that is not muted is left alone. |
+| `:notify [<mode>]` | `:notify all` makes every message of the room notify you, `:notify mentions` only mentions and keywords: the room under the cursor in the room list, otherwise the open room. `:notify` alone shows the room's setting. The status line says what changed, or that the room already was so; any other mode is an error in the status line, and nothing is sent. |
 | `:upload <path>` | Sends the file to the open room, or into the thread shown in place of its timeline, as an image, video, audio or file message, by the type its name suggests. `~/` is your home directory; a relative path is relative to where mxt was started. Anything that is not a regular file, and files larger than the homeserver's upload limit, are refused. |
 | `:react [<emoji>]` | Toggles a reaction with the emoji on the message under the open room's timeline cursor: adds it, or removes yours. The emoji is an emoji (`:react 👍`) or a shortcode with colons on both sides or none (`:react thumbsup`, `:react :+1:`); an unknown one is an error in the status line, and nothing is sent. Without an emoji, it opens the emoji picker, as `+` does. With no open room, on an empty timeline or on a deleted message, both say so in the status line. |
 | `:recover` | Asks for the recovery key in `SECRET` mode and, as on the first start, cross-signs this device with it and lets it fetch room keys from the key backup (see [First start](../README.md#first-start)). An empty key changes nothing. The status line then says `Recovery complete` or why it failed: a wrong key, or an account without secret storage, which needs recovery set up in another client first. |
@@ -524,10 +528,26 @@ after `:join`, and emoji shortcodes after `:react` (`:react thu` offers
 
 `:mute`, `:unmute`, `:recover`, `:help`, `:map`, `:messages`, `:noh`,
 `:nohlsearch` and `:q` take no argument, `:open`, `:join` and `:upload`
-without one show their usage, and `:react`'s argument is optional.
-`:react` acts on the open room's timeline cursor also while the room list
-has focus, whereas `:mute` and `:unmute` there act on the room under the
-room list's cursor.
+without one show their usage, and the arguments of `:react` and `:notify`
+are optional. `:react` acts on the open room's timeline cursor also while
+the room list has focus, whereas `:mute`, `:unmute` and `:notify` there act
+on the room under the room list's cursor.
+
+`:mute`, `:unmute` and `:notify` change your account's push rules on the
+homeserver, so other clients, such as Beeper or Element on your phone,
+notify the same way. Each message counts as the rules were when it
+arrived, so after `:notify all` a bridged channel that the bridge set to
+mentions only keeps its dim count until its next message; from then on
+its bold count counts the messages since the change, not the ones already
+unread, and the room is among the rooms that notify (the `notify` sort
+key and `filter = "notify"`, see [Sort keys](configuration.md#sort-keys)).
+Likewise, after `:notify mentions` the unread messages that notified stay
+a bold count until read. `:notify all` or `:notify mentions` on a muted
+room unmutes it, `:unmute` leaves a room set with `:notify` alone, and
+`:mute` then `:unmute` goes back to the account's default. mxt shows
+no label for these settings, only `Muted` for muted rooms, which comes and
+goes as you run `:mute`, `:unmute` or `:notify`; if the change fails, the
+setting goes back and the status line shows the error.
 
 ### Joining rooms and direct messages
 

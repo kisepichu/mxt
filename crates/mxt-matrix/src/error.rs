@@ -58,7 +58,7 @@ pub enum Error {
     /// An effect names a timeline that is not open: the main timeline of a
     /// room that is not the open one, or a thread that is not subscribed.
     TimelineNotOpen,
-    /// Muting or unmuting a room.
+    /// Changing a room's notification mode.
     NotificationSettings(NotificationSettingsError),
     /// A download asks for a message that has no attachment.
     NoAttachment,

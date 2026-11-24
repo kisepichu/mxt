@@ -18,6 +18,7 @@ use mxt_core::{
     ids::{EventId, RoomId, SendId, TimelineId, UserId},
     mention::Member,
     msg::{Msg, SyncState},
+    room::NotificationMode,
     settings::ReceiptKind,
     timeline::ItemRef,
 };
@@ -49,12 +50,13 @@ pub struct Matrix {
 }
 
 impl Matrix {
-    /// Starts the tasks that turn the joined rooms, the sync responses, room
-    /// info updates and notification settings changes into
-    /// `Msg::RoomUpserted` / `Msg::RoomRemoved`, the sync loop's state into
-    /// `Msg::SyncState`, and edits, reactions and redactions that fail for
-    /// good, and uploads, into `Msg::EffectFailed` (see `send_queue`). The
-    /// effects sent to `effects` run in the background; failures arrive as
+    /// Starts the tasks that turn the joined rooms, the sync responses and
+    /// room info updates into `Msg::RoomUpserted` / `Msg::RoomRemoved`,
+    /// notification settings changes into `Msg::RoomModeChanged`, the sync
+    /// loop's state into `Msg::SyncState`, and edits, reactions and
+    /// redactions that fail for good, and uploads, into `Msg::EffectFailed`
+    /// (see `send_queue`). The effects sent to `effects` run in the
+    /// background; failures arrive as
     /// `Msg::EffectFailed`, and sends are answered with `Msg::SendQueued` or
     /// `Msg::SendFailed`, an edit of a sent message only when it leaves the
     /// send queue. Downloads are saved in `download_dir`
@@ -193,7 +195,7 @@ enum Queued {
 
 /// Subscriptions run in order, so the last one wins; messages and uploads
 /// are queued in the order they were sent, by `send_messages`, and
-/// notification modes change in order, by `set_mutes`; direct message
+/// notification modes change in order, by `set_modes`; direct message
 /// lookups and creations run one at a time (see `DirectMessages`); the rest
 /// runs concurrently.
 async fn run_effects(
@@ -208,13 +210,8 @@ async fn run_effects(
     let mut running = JoinSet::new();
     let (sends, to_send) = mpsc::unbounded_channel();
     running.spawn(send_messages(to_send, edits, to_core.clone()));
-    let (mutes, to_mute) = mpsc::unbounded_channel();
-    running.spawn(set_mutes(
-        client.clone(),
-        settings,
-        to_mute,
-        to_core.clone(),
-    ));
+    let (modes, to_set) = mpsc::unbounded_channel();
+    running.spawn(set_modes(client.clone(), settings, to_set, to_core.clone()));
     // The open room's main timeline, and the thread shown in its place; at
     // most one of each.
     let mut main: Option<Subscription> = None;
@@ -318,8 +315,8 @@ async fn run_effects(
                 Some(MatrixEffect::LoadMembers(room)) => {
                     running.spawn(load_members(client.clone(), room, to_core.clone()));
                 }
-                Some(MatrixEffect::SetMute { room, muted }) => {
-                    let _ = mutes.send((room, muted));
+                Some(MatrixEffect::SetMode { room, mode }) => {
+                    let _ = modes.send((room, mode));
                 }
                 Some(MatrixEffect::Download { room, item }) => {
                     let (client, dir) = (client.clone(), files.download_dir.clone());
@@ -493,44 +490,72 @@ async fn send_messages(
 
 /// Changes notification modes one at a time, in the order they were asked
 /// for: each change reads the push rules the previous one left, so muting
-/// and then unmuting a room ends with the room unmuted. The room's mode in
-/// the room list changes when the push rules arrive with the sync.
-async fn set_mutes(
+/// and then unmuting a room ends with the room unmuted. The core set the
+/// room's mode as it sent the change; a success sends nothing, since the
+/// sync's echo of the new rules reaches the core through the room list
+/// (see `rooms::run`). A failure leaves the SDK's rules as they were (it
+/// applies a change to them only after all its requests succeeded), so
+/// the mode it reads goes to the core as `Msg::RoomModeChanged`, which
+/// puts the core's mode back, before the error (design, "Notification
+/// modes"). The core's room IDs come from the SDK, so they parse.
+async fn set_modes(
     client: Client,
     settings: NotificationSettings,
-    mut changes: UnboundedReceiver<(RoomId, bool)>,
+    mut changes: UnboundedReceiver<(RoomId, NotificationMode)>,
     to_core: UnboundedSender<Msg>,
 ) {
-    while let Some((room, muted)) = changes.recv().await {
-        if let Err(error) = set_mute(&client, &settings, &room, muted).await {
-            let what = if muted {
-                "Muting the room failed"
-            } else {
-                "Unmuting the room failed"
-            };
-            report(&to_core, what, &error);
-        }
+    while let Some((room, mode)) = changes.recv().await {
+        let what = match mode {
+            NotificationMode::Mute => "Muting the room failed",
+            NotificationMode::Default => "Unmuting the room failed",
+            NotificationMode::AllMessages | NotificationMode::MentionsAndKeywords => {
+                "Changing the room's notifications failed"
+            }
+        };
+        let Ok(id) = ruma::RoomId::parse(room.as_str()) else {
+            report(&to_core, what, &Error::UnknownRoom);
+            continue;
+        };
+        let Err(error) = set_mode(&client, &settings, &id, mode).await else {
+            continue;
+        };
+        let sdk_mode = rooms::notification_mode(&settings, &id).await;
+        let _ = to_core.send(Msg::RoomModeChanged {
+            room,
+            mode: sdk_mode,
+        });
+        report(&to_core, what, &error);
     }
 }
 
-/// Muting sets the room's mode to mute; unmuting removes the room's
-/// user-defined rules, so the account default applies again (design,
-/// "Mute").
-async fn set_mute(
+/// Sets the room's mode to `mode` (design, "Notification modes"): `Mute`,
+/// `AllMessages` and `MentionsAndKeywords` through
+/// `set_room_notification_mode`, which puts the room's new rule and then
+/// deletes its other rules, and does nothing when the room has the mode
+/// already; `Default` removes the room's rules, so the account default
+/// applies again. A room the client does not know fails before any
+/// request.
+async fn set_mode(
     client: &Client,
     settings: &NotificationSettings,
-    room: &RoomId,
-    muted: bool,
+    room: &ruma::RoomId,
+    mode: NotificationMode,
 ) -> Result<(), Error> {
-    let room = sdk_room(client, room)?;
-    let changed = if muted {
-        settings
-            .set_room_notification_mode(room.room_id(), RoomNotificationMode::Mute)
-            .await
-    } else {
-        settings
-            .delete_user_defined_room_rules(room.room_id())
-            .await
+    client.get_room(room).ok_or(Error::UnknownRoom)?;
+    let changed = match mode {
+        NotificationMode::Default => settings.delete_user_defined_room_rules(room).await,
+        NotificationMode::AllMessages => {
+            let mode = RoomNotificationMode::AllMessages;
+            settings.set_room_notification_mode(room, mode).await
+        }
+        NotificationMode::MentionsAndKeywords => {
+            let mode = RoomNotificationMode::MentionsAndKeywordsOnly;
+            settings.set_room_notification_mode(room, mode).await
+        }
+        NotificationMode::Mute => {
+            let mode = RoomNotificationMode::Mute;
+            settings.set_room_notification_mode(room, mode).await
+        }
     };
     changed.map_err(Error::NotificationSettings)
 }

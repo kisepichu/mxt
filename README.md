@@ -34,7 +34,8 @@ user interface around it. It runs on Linux and macOS.
 - Threads: `t`, or `<CR>` on a message with replies, shows its thread in
   place of the timeline, where the timeline's keys work and the composer
   sends into the thread.
-- Muting rooms, downloading and opening attachments, uploading files, and
+- Muting rooms and choosing which rooms notify for every message
+  (`:notify`), downloading and opening attachments, uploading files, and
   image previews in sixel, kitty or iTerm2 graphics, or in half blocks, in
   a full-screen view and, if you turn them on, in the timeline.
 - A keymap in the configuration file: every key can be rebound, and a key can

@@ -293,6 +293,7 @@ impl App {
                 self.open_joined(&mut effects);
             }
             Msg::RoomRemoved(id) => self.remove_room(id, &mut effects),
+            Msg::RoomModeChanged { room, mode } => self.rooms.set_mode(&room, mode),
             Msg::SyncState(state) => self.sync_state = state,
             Msg::Timeline { timeline, diffs } => {
                 self.timeline_diffs(&timeline, diffs, &mut effects)
@@ -784,6 +785,7 @@ impl App {
             Action::RoomMarkRead => self.mark_read(effects),
             Action::RoomMute => self.set_mute(true, effects),
             Action::RoomUnmute => self.set_mute(false, effects),
+            Action::RoomNotify(mode) => self.notify(*mode, effects),
             Action::RoomJoin { target } => self.join(target, effects),
             Action::MessageView => self.view_message(effects),
             Action::MessageEnter => self.enter_message(effects),

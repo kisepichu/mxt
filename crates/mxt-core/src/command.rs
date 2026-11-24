@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::fmt::{self, Write as _};
 
-use crate::action::{Action, ReactWith};
+use crate::action::{Action, NotifyMode, ReactWith};
 use crate::emoji::Emoji;
 use crate::rooms::{RoomFilter, RoomTarget};
 
@@ -76,6 +76,25 @@ pub static COMMANDS: &[Command] = &[
         argument: Argument::None,
         description: "Unmute the room, so the account's default notifications apply",
         action: |_| Ok(Action::RoomUnmute),
+    },
+    Command {
+        name: "notify",
+        argument: Argument::Optional(":notify [<mode>]"),
+        description: "Set the room's notifications to all messages or mentions only, or show them",
+        action: |mode| {
+            if mode.is_empty() {
+                return Ok(Action::RoomNotify(None));
+            }
+            match NotifyMode::ALL
+                .into_iter()
+                .find(|known| known.config_name() == mode)
+            {
+                Some(known) => Ok(Action::RoomNotify(Some(known))),
+                None => Err(CommandError::UnknownMode {
+                    mode: mode.to_owned(),
+                }),
+            }
+        },
     },
     Command {
         name: "upload",
@@ -211,6 +230,10 @@ pub enum CommandError {
     UnknownEmoji {
         emoji: String,
     },
+    /// `:notify`'s argument as typed, which is neither `all` nor `mentions`.
+    UnknownMode {
+        mode: String,
+    },
 }
 
 impl fmt::Display for CommandError {
@@ -222,6 +245,12 @@ impl fmt::Display for CommandError {
                 write!(f, ":{command} takes no argument")
             }
             CommandError::UnknownEmoji { emoji } => write!(f, "unknown emoji \"{emoji}\""),
+            CommandError::UnknownMode { mode } => {
+                write!(
+                    f,
+                    "unknown mode \"{mode}\"; expected \"all\" or \"mentions\""
+                )
+            }
         }
     }
 }
@@ -334,6 +363,26 @@ mod tests {
     }
 
     #[test]
+    fn notify_takes_a_mode_or_nothing() {
+        let notify = |mode| Ok(Some(Action::RoomNotify(mode)));
+        assert_eq!(parse_command("notify all"), notify(Some(NotifyMode::All)));
+        assert_eq!(
+            parse_command(" notify  mentions "),
+            notify(Some(NotifyMode::Mentions))
+        );
+        assert_eq!(parse_command("notify"), notify(None));
+        // Lowercase and exact, as the values of `room.notify`'s `mode`.
+        for mode in ["x", "All", "mention", "all messages"] {
+            let error = parse_command(&format!("notify {mode}")).unwrap_err();
+            assert_eq!(error, CommandError::UnknownMode { mode: mode.into() });
+            assert_eq!(
+                error.to_string(),
+                format!("unknown mode \"{mode}\"; expected \"all\" or \"mentions\"")
+            );
+        }
+    }
+
+    #[test]
     fn names_match_exactly() {
         for name in ["h", "o", "qu", "Q", "nohl"] {
             assert_eq!(
@@ -399,6 +448,7 @@ mod tests {
                 ":join",
                 ":mute",
                 ":unmute",
+                ":notify",
                 ":upload",
                 ":react",
                 ":recover",
@@ -423,5 +473,12 @@ mod tests {
         }
         let open = format!("{:<1$}Open a room by its name", ":open <room>", longest + 2);
         assert_eq!(entries[0], open);
+        // `:notify`'s usage does not move the column (design, "Commands").
+        let without_notify = COMMANDS
+            .iter()
+            .filter(|command| command.name != "notify")
+            .map(|command| command.usage().len())
+            .max();
+        assert_eq!(without_notify, Some(longest));
     }
 }

@@ -70,6 +70,28 @@ impl FocusMode {
     }
 }
 
+/// What `room.notify` sets a room's notifications to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotifyMode {
+    /// Every message of the room notifies.
+    All,
+    /// Only mentions and keywords notify.
+    Mentions,
+}
+
+impl NotifyMode {
+    pub const ALL: [NotifyMode; 2] = [NotifyMode::All, NotifyMode::Mentions];
+
+    /// The value of the `mode` argument and of `:notify`'s argument: "all",
+    /// "mentions".
+    pub fn config_name(self) -> &'static str {
+        match self {
+            NotifyMode::All => "all",
+            NotifyMode::Mentions => "mentions",
+        }
+    }
+}
+
 /// An action with checked arguments. [`Action::name`] is its registry name,
 /// `<target>.<verb>`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +106,8 @@ pub enum Action {
     RoomJoin {
         target: String,
     },
+    /// Sets the room's notifications to the mode, or without one shows them.
+    RoomNotify(Option<NotifyMode>),
     MessageReply,
     MessageEdit,
     MessageDelete,
@@ -191,6 +215,8 @@ impl Action {
     /// - `message.react`: either `emoji` (an emoji or a shortcode, see
     ///   [`Emoji::parse`]; non-empty) or `index` (a positive integer)
     /// - `room.join`: `target` (non-empty), required
+    /// - `room.notify`: `mode` (`all` or `mentions`); without it the action
+    ///   shows the room's mode
     ///
     /// Argument names are unique in a configuration table; if one repeats
     /// anyway, its last value counts.
@@ -218,6 +244,11 @@ impl Action {
                 return message_react(Args::new("message.react", &["emoji", "index"], args)?);
             }
             "room.join" => return room_join(Args::new("room.join", &["target"], args)?),
+            "room.notify" => {
+                let args = Args::new("room.notify", &["mode"], args)?;
+                let mode = args.choice("mode", &NotifyMode::ALL, NotifyMode::config_name)?;
+                return Ok(Action::RoomNotify(mode));
+            }
             "room.open_selected" => Action::RoomOpenSelected,
             "room.mark_read" => Action::RoomMarkRead,
             "room.mute" => Action::RoomMute,
@@ -297,6 +328,7 @@ impl Action {
             Action::RoomMute => "room.mute",
             Action::RoomUnmute => "room.unmute",
             Action::RoomJoin { .. } => "room.join",
+            Action::RoomNotify(_) => "room.notify",
             Action::MessageReply => "message.reply",
             Action::MessageEdit => "message.edit",
             Action::MessageDelete => "message.delete",
@@ -392,6 +424,7 @@ impl Action {
                 vec![("index", ArgRef::Integer(index.get()))]
             }
             Action::RoomJoin { target } => vec![("target", ArgRef::String(target))],
+            Action::RoomNotify(Some(mode)) => vec![("mode", ArgRef::String(mode.config_name()))],
             _ => Vec::new(),
         }
     }
@@ -733,6 +766,7 @@ mod tests {
             "room.mark_read",
             "room.mute",
             "room.unmute",
+            "room.notify",
             "message.reply",
             "message.edit",
             "message.delete",
@@ -857,6 +891,15 @@ mod tests {
             (
                 Action::from_spec("room.join", &[s("target", "#mxt:example.org")]),
                 vec![("target", text("#mxt:example.org"))],
+            ),
+            (Action::from_spec("room.notify", &[]), vec![]),
+            (
+                Action::from_spec("room.notify", &[s("mode", "all")]),
+                vec![("mode", text("all"))],
+            ),
+            (
+                Action::from_spec("room.notify", &[s("mode", "mentions")]),
+                vec![("mode", text("mentions"))],
             ),
         ];
         for (action, arguments) in cases {
@@ -1186,6 +1229,48 @@ mod tests {
             Action::from_spec("composer.focus", &[s("mode", "keep")]),
             Ok(Action::ComposerFocus(FocusMode::Keep))
         );
+    }
+
+    #[test]
+    fn room_notify_takes_a_mode_or_shows_the_rooms() {
+        assert_eq!(
+            Action::from_spec("room.notify", &[s("mode", "all")]),
+            Ok(Action::RoomNotify(Some(NotifyMode::All)))
+        );
+        assert_eq!(
+            Action::from_spec("room.notify", &[s("mode", "mentions")]),
+            Ok(Action::RoomNotify(Some(NotifyMode::Mentions)))
+        );
+        assert_eq!(
+            Action::from_spec("room.notify", &[]),
+            Ok(Action::RoomNotify(None))
+        );
+        // A value a later version may add: a warning that ignores the binding.
+        let mute = Action::from_spec("room.notify", &[s("mode", "mute")]).unwrap_err();
+        assert_eq!(
+            mute,
+            ActionError::UnknownValue {
+                action: "room.notify",
+                arg: "mode",
+                value: "mute".into(),
+                allowed: vec!["all", "mentions"]
+            }
+        );
+        assert!(mute.is_unknown_name());
+        assert_eq!(
+            mute.to_string(),
+            "room.notify: unknown \"mode\" value \"mute\"; expected one of \"all\", \"mentions\""
+        );
+        let number = Action::from_spec("room.notify", &[int("mode", 1)]).unwrap_err();
+        assert_eq!(
+            number,
+            ActionError::WrongType {
+                action: "room.notify",
+                arg: "mode",
+                expected: "string"
+            }
+        );
+        assert!(!number.is_unknown_name());
     }
 
     #[test]

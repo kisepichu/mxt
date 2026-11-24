@@ -22,6 +22,20 @@ marked **Breaking:**.
   are part of the view's text, so `y` and `/` there see them (the
   timeline's `yy` still copies the message alone), and the view shows the
   reactions as they were when it opened.
+- `:notify all` and `:notify mentions` set whether every message of a room
+  notifies you or only mentions and keywords, on the room under the cursor
+  in the room list, otherwise the open room, as `:mute` does; `:notify`
+  alone shows the room's setting, and the status line says what changed or
+  that it already was so. The action is `room.notify` with `mode = "all"`
+  or `"mentions"`. This is your account's push rule, so other clients,
+  such as Beeper on your phone, notify the same way. After `:notify all`,
+  a bridged channel set to mentions only keeps its dim count until its
+  next message; from then on its bold count counts the messages since the
+  change, not the ones already unread, and the room is among the rooms
+  that notify (the `notify` sort key, `filter = "notify"`). `:notify
+  all` or `:notify mentions` on a muted room unmutes it, and `:mute` then
+  `:unmute` goes back to the account's default. mxt 0.1.5 ignores a
+  binding of `room.notify` with a warning.
 
 ### Changed
 
@@ -40,6 +54,10 @@ marked **Breaking:**.
   full, the root included. `t` still opens or starts a thread on any
   message. `"<CR>" = "message.view"` in `[keymap.timeline]` brings back
   the old `<CR>`.
+- `:mute` and `:unmute` show or remove the `Muted` label at once, not when
+  the next sync brings the new setting back, so `:unmute` right after
+  `:mute` works; if the change fails, the label goes back and the status
+  line shows the error.
 
 ## [0.1.5] - 2026-11-23
 

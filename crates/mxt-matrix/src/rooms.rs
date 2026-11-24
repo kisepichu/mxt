@@ -89,9 +89,11 @@ pub(crate) fn summary(facts: &RoomFacts) -> RoomSummary {
 /// Turns the joined rooms into `Msg::RoomUpserted` and `Msg::RoomRemoved`:
 /// every room at the start, then the rooms of each sync response
 /// (`responses`), room info updates (read receipts and unread counts change
-/// through them), notification settings changes, and changes of parent
-/// spaces. The pending invites go to the core as `Msg::Invites` at the
-/// start and when a sync response changed them.
+/// through them), and changes of parent spaces. Notification settings
+/// changes (the sync's echo of a change, made in mxt or elsewhere) become
+/// `Msg::RoomModeChanged`, see `Rooms::refresh_modes`. The pending invites
+/// go to the core as `Msg::Invites` at the start and when a sync response
+/// changed them.
 pub(crate) async fn run(mut rooms: Rooms, mut responses: broadcast::Receiver<SyncedRooms>) {
     let mut settings_changes = rooms.settings.subscribe_to_changes();
     let mut room_updates = rooms.client.room_info_notable_update_receiver();
@@ -299,12 +301,19 @@ impl Rooms {
         }
     }
 
+    /// After the push rules changed: `Msg::RoomModeChanged` for each listed
+    /// room whose mode differs from its stored facts, which take the new
+    /// mode (design, "Notification modes"). The mode alone: a summary would
+    /// carry the counts of the room's last update, which would undo
+    /// optimistic clearing until the receipt's echo, and place the room
+    /// again.
     async fn refresh_modes(&mut self) {
         for (room, listed) in &mut self.listed {
             let mode = notification_mode(&self.settings, room).await;
             if listed.facts.mode != mode {
                 listed.facts.mode = mode;
-                let _ = self.to_core.send(Msg::RoomUpserted(summary(&listed.facts)));
+                let room = listed.facts.id.clone();
+                let _ = self.to_core.send(Msg::RoomModeChanged { room, mode });
             }
         }
     }
@@ -646,14 +655,18 @@ impl<'a> DmCandidate<'a> {
     }
 }
 
-/// The room's notification rule. Without one (`None` from the SDK) the
-/// account default applies, which is `Default`.
-async fn notification_mode(
+/// The room's own push rule as the SDK reads it, mapped one to one (design,
+/// "Notification modes"): mute, all messages, mentions and keywords only,
+/// or none (`None` from the SDK), which is `Default`, the account default.
+/// For the room list and for the effect task, which puts the SDK's mode
+/// back in the core after a failed change.
+pub(crate) async fn notification_mode(
     settings: &NotificationSettings,
     room: &ruma::RoomId,
 ) -> NotificationMode {
     match settings.get_user_defined_room_notification_mode(room).await {
-        None | Some(RoomNotificationMode::AllMessages) => NotificationMode::Default,
+        None => NotificationMode::Default,
+        Some(RoomNotificationMode::AllMessages) => NotificationMode::AllMessages,
         Some(RoomNotificationMode::MentionsAndKeywordsOnly) => {
             NotificationMode::MentionsAndKeywords
         }
@@ -715,6 +728,8 @@ async fn joined_space_name(client: &Client, space: &ruma::RoomId) -> Result<Opti
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::Arc, time::Duration};
+
     use matrix_sdk::{
         ruma::{
             MilliSecondsSinceUnixEpoch, event_id, owned_device_id, owned_event_id, owned_room_id,
@@ -723,9 +738,27 @@ mod tests {
         test_utils::mocks::MatrixMockServer,
     };
     use matrix_sdk_test::{JoinedRoomBuilder, event_factory::EventFactory};
+    use serde_json::{Value, json};
+    use tokio::{
+        sync::mpsc::{self, UnboundedReceiver},
+        task::JoinSet,
+        time::timeout,
+    };
 
     use super::*;
     use crate::bridges::RoomType;
+
+    /// The user's client of `server`, `@alice:example.org`.
+    async fn logged_in(server: &MatrixMockServer) -> Client {
+        let me = user_id!("@alice:example.org");
+        server
+            .client_builder()
+            .logged_in_with_token("1234".to_owned(), me.to_owned(), owned_device_id!("DEVICE"))
+            // Plain HTTP; see the adapter's tests.
+            .on_builder(|builder| builder.disable_ssl_verification())
+            .build()
+            .await
+    }
 
     fn facts(display_name: &str) -> RoomFacts {
         RoomFacts {
@@ -969,13 +1002,7 @@ mod tests {
     async fn the_read_time_is_the_latest_of_the_users_receipts_outside_threads() {
         let server = MatrixMockServer::new().await;
         let me = user_id!("@alice:example.org");
-        let client = server
-            .client_builder()
-            .logged_in_with_token("1234".to_owned(), me.to_owned(), owned_device_id!("DEVICE"))
-            // Plain HTTP; see the adapter's tests.
-            .on_builder(|builder| builder.disable_ssl_verification())
-            .build()
-            .await;
+        let client = logged_in(&server).await;
         let settings = client.notification_settings().await;
         let at = |millis: u32| Some(MilliSecondsSinceUnixEpoch(millis.into()));
         let receipts = EventFactory::new()
@@ -1042,6 +1069,125 @@ mod tests {
         let never = server.sync_room(&client, never).await;
         let (facts, _) = room_facts(&client, &settings, &never).await.unwrap();
         assert_eq!(facts.last_read, None);
+    }
+
+    /// The room rule of `room`, notifying or not.
+    fn room_rule(room: &ruma::RoomId, notify: bool) -> Value {
+        let actions = if notify {
+            json!(["notify", { "set_tweak": "sound", "value": "default" }])
+        } else {
+            json!([])
+        };
+        json!({ "rule_id": room, "default": false, "enabled": true, "actions": actions })
+    }
+
+    /// The account's push rules with `room` and `overrides`, as global
+    /// account data.
+    fn push_rules(room: Vec<Value>, overrides: Vec<Value>) -> Value {
+        json!({
+            "type": "m.push_rules",
+            "content": { "global": { "room": room, "override": overrides } },
+        })
+    }
+
+    #[tokio::test]
+    async fn each_rule_of_a_room_maps_to_its_mode() {
+        let server = MatrixMockServer::new().await;
+        let client = logged_in(&server).await;
+        let settings = client.notification_settings().await;
+        let all = room_id!("!all:example.org");
+        let mentions = room_id!("!mentions:example.org");
+        let muted = room_id!("!muted:example.org");
+        let mute = json!({
+            "rule_id": muted,
+            "default": false,
+            "enabled": true,
+            "conditions": [{ "kind": "event_match", "key": "room_id", "pattern": muted }],
+            "actions": [],
+        });
+        let rules = push_rules(
+            vec![room_rule(all, true), room_rule(mentions, false)],
+            vec![mute],
+        );
+        server
+            .mock_sync()
+            .ok_and_run(&client, |builder| {
+                builder.add_custom_global_account_data(rules);
+            })
+            .await;
+        let cases = [
+            (all, NotificationMode::AllMessages),
+            (mentions, NotificationMode::MentionsAndKeywords),
+            (muted, NotificationMode::Mute),
+            (room_id!("!none:example.org"), NotificationMode::Default),
+        ];
+        for (room, mode) in cases {
+            assert_eq!(notification_mode(&settings, room).await, mode, "{room}");
+        }
+    }
+
+    /// The next message of the room list task.
+    async fn next(from_rooms: &mut UnboundedReceiver<Msg>) -> Msg {
+        let next = timeout(Duration::from_secs(10), from_rooms.recv()).await;
+        next.expect("waited for the room list").unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_change_of_the_push_rules_sends_the_changed_rooms_mode_alone() {
+        let server = MatrixMockServer::new().await;
+        let client = logged_in(&server).await;
+        let settings = client.notification_settings().await;
+        let (a, b) = (room_id!("!a:example.org"), room_id!("!b:example.org"));
+        // Both set to mentions and keywords only, as the bridge sets them.
+        let rules = push_rules(vec![room_rule(a, false), room_rule(b, false)], vec![]);
+        server
+            .mock_sync()
+            .ok_and_run(&client, |builder| {
+                builder.add_joined_room(JoinedRoomBuilder::new(a));
+                builder.add_joined_room(JoinedRoomBuilder::new(b));
+                builder.add_custom_global_account_data(rules);
+            })
+            .await;
+        let (to_core, mut from_rooms) = mpsc::unbounded_channel();
+        let (responses, synced) = broadcast::channel(4);
+        let mut tasks = JoinSet::new();
+        tasks.spawn(run(Rooms::new(client.clone(), settings, to_core), synced));
+        // The rooms and the invites at the start.
+        let mut started = HashSet::new();
+        let mut invites = false;
+        while started.len() < 2 || !invites {
+            match next(&mut from_rooms).await {
+                Msg::RoomUpserted(summary) => {
+                    assert_eq!(summary.mode, NotificationMode::MentionsAndKeywords);
+                    started.insert(summary.id);
+                }
+                Msg::Invites(_) => invites = true,
+                other => panic!("{other:?}"),
+            }
+        }
+
+        // `!a` set to all messages, in another client or by mxt.
+        let rules = push_rules(vec![room_rule(a, true), room_rule(b, false)], vec![]);
+        server
+            .mock_sync()
+            .ok_and_run(&client, |builder| {
+                builder.add_custom_global_account_data(rules);
+            })
+            .await;
+        let changed = Msg::RoomModeChanged {
+            room: RoomId::new(a.as_str()),
+            mode: NotificationMode::AllMessages,
+        };
+        assert_eq!(next(&mut from_rooms).await, changed);
+        // A room joined afterwards comes next: nothing else came for `!a`
+        // or `!b`.
+        let c = room_id!("!c:example.org");
+        server.sync_joined_room(&client, c).await;
+        responses.send(Arc::from([c.to_owned()])).unwrap();
+        match next(&mut from_rooms).await {
+            Msg::RoomUpserted(summary) => assert_eq!(summary.id, RoomId::new(c.as_str())),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

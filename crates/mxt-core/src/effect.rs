@@ -9,6 +9,7 @@ use crate::ids::{EventId, RoomId, SendId, TimelineId, TxnId, UserId};
 use crate::keys::Key;
 use crate::mention::RenderedBody;
 use crate::resolver::TimerId;
+use crate::room::NotificationMode;
 use crate::timeline::{ItemRef, MediaBytes};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -166,11 +167,16 @@ pub enum MatrixEffect {
         room: RoomId,
         txn: TxnId,
     },
-    /// Mute the room, or remove its room rule so the account default applies
-    /// again (design, "Mute"). The room's mode changes when the SDK reports it.
-    SetMute {
+    /// Set the room's notification mode to `mode` (design, "Notification
+    /// modes"): `Mute`, `AllMessages` and `MentionsAndKeywords` become the
+    /// room's own push rule, and `Default` removes the room's rules, so the
+    /// account default applies. The changes run in the order they were
+    /// sent. The core has set the room's mode already; a change that fails
+    /// is answered with `Msg::RoomModeChanged` with the mode the SDK reads,
+    /// which a failed change leaves as it was, then `Msg::EffectFailed`.
+    SetMode {
         room: RoomId,
-        muted: bool,
+        mode: NotificationMode,
     },
     /// Save the item's image or file in the download directory; answered with
     /// `Msg::Downloaded`.

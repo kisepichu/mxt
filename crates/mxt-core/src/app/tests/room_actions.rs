@@ -1,5 +1,5 @@
-use super::threads::at;
-use super::timeline::{event, msg, status};
+use super::threads::{at, in_the_thread};
+use super::timeline::{event, msg, opened, status};
 use super::*;
 use crate::action::ArgValue;
 use crate::room::Badge;
@@ -48,11 +48,22 @@ fn subscribe(room: &str) -> Effect {
 fn unsubscribe(room: &str) -> Effect {
     Effect::Matrix(MatrixEffect::UnsubscribeTimeline(id(room)))
 }
-fn set_mute(room: &str, muted: bool) -> Effect {
-    Effect::Matrix(MatrixEffect::SetMute {
+fn set_mode(room: &str, mode: NotificationMode) -> Effect {
+    Effect::Matrix(MatrixEffect::SetMode {
         room: id(room),
-        muted,
+        mode,
     })
+}
+fn mode_of(app: &App, room: &str) -> NotificationMode {
+    app.rooms().get(&id(room)).unwrap().mode
+}
+/// `app()` with `!b`, read, in `mode` and the room list's cursor on it.
+fn on_b(mode: NotificationMode) -> App {
+    let mut app = app();
+    app.update(Msg::RoomUpserted(with_mode(room(B, 20, 0), mode)));
+    keys(&mut app, "j");
+    assert_eq!(cursor_id(&app), B);
+    app
 }
 /// The rooms of `app()` under `sort = "unread"`: `!a` and `!c`, which are
 /// unread, by name, then `!b`.
@@ -271,21 +282,36 @@ fn mute_and_unmute_act_on_the_room_under_the_cursor_or_the_open_room() {
     keys(&mut app, "<CR><C-w>hj"); // open !c, the cursor on !b in the room list
     assert_eq!(
         no_timers(keys(&mut app, ":mute<CR>")),
-        vec![set_mute(B, true)]
+        vec![set_mode(B, NotificationMode::Mute)]
     );
     assert_eq!(app.status().unwrap().kind, StatusKind::Info);
     assert_eq!(status(&app), Some("Muted b:example.org"));
-    // The label changes when the SDK reports the new mode.
-    assert_eq!(
-        app.rooms().get(&id(B)).unwrap().mode,
-        NotificationMode::Default
-    );
+    // The label changes at once, before the sync brings the new rules.
+    assert_eq!(mode_of(&app, B).label(), Some("Muted"));
     keys(&mut app, "<C-w>l");
     assert_eq!(
         no_timers(keys(&mut app, ":unmute<CR>")),
-        vec![set_mute(C, false)]
+        vec![set_mode(C, NotificationMode::Default)]
     );
     assert_eq!(status(&app), Some("Unmuted c:example.org"));
+    assert_eq!(mode_of(&app, C), NotificationMode::Default);
+}
+
+#[test]
+fn mute_then_unmute_before_the_echo_sends_both() {
+    let mut app = app();
+    // The cursor on !c, which has no rule of its own.
+    assert_eq!(
+        no_timers(keys(&mut app, ":mute<CR>")),
+        vec![set_mode(C, NotificationMode::Mute)]
+    );
+    assert_eq!(mode_of(&app, C).label(), Some("Muted"));
+    assert_eq!(
+        no_timers(keys(&mut app, ":unmute<CR>")),
+        vec![set_mode(C, NotificationMode::Default)]
+    );
+    assert_eq!(status(&app), Some("Unmuted c:example.org"));
+    assert_eq!(mode_of(&app, C).label(), None);
 }
 
 #[test]
@@ -300,6 +326,17 @@ fn unmute_leaves_a_room_that_is_not_muted_alone() {
     keys(&mut app, "j");
     assert_eq!(no_timers(keys(&mut app, ":unmute<CR>")), vec![]);
     assert_eq!(status(&app), Some("b:example.org is not muted"));
+
+    // Set with `:notify all` a moment ago: refused at once, before the echo.
+    let mut app = on_b(NotificationMode::Default);
+    assert_eq!(
+        no_timers(keys(&mut app, ":notify all<CR>")),
+        vec![set_mode(B, NotificationMode::AllMessages)]
+    );
+    assert_eq!(no_timers(keys(&mut app, ":unmute<CR>")), vec![]);
+    assert_eq!(app.status().unwrap().kind, StatusKind::Error);
+    assert_eq!(status(&app), Some("b:example.org is not muted"));
+    assert_eq!(mode_of(&app, B), NotificationMode::AllMessages);
 }
 
 #[test]
@@ -309,6 +346,237 @@ fn mute_without_a_room_reports_it() {
     assert_eq!(no_timers(keys(&mut app, ":mute<CR>")), vec![]);
     assert_eq!(app.status().unwrap().kind, StatusKind::Error);
     assert_eq!(status(&app), Some("No room"));
+}
+
+#[test]
+fn notify_all_sets_the_room_under_the_cursor_at_once_and_moves_nothing() {
+    let mut app = on_b(NotificationMode::MentionsAndKeywords);
+    assert_eq!(
+        no_timers(keys(&mut app, ":notify all<CR>")),
+        vec![set_mode(B, NotificationMode::AllMessages)]
+    );
+    assert_eq!(app.status().unwrap().kind, StatusKind::Info);
+    assert_eq!(
+        status(&app),
+        Some("b:example.org now notifies for every message")
+    );
+    assert_eq!(mode_of(&app, B), NotificationMode::AllMessages);
+    assert_eq!(order(&app), [C, B, A]);
+    assert_eq!(cursor_id(&app), B);
+
+    let mut app = on_b(NotificationMode::AllMessages);
+    assert_eq!(
+        no_timers(keys(&mut app, ":notify mentions<CR>")),
+        vec![set_mode(B, NotificationMode::MentionsAndKeywords)]
+    );
+    assert_eq!(
+        status(&app),
+        Some("b:example.org now notifies for mentions and keywords only")
+    );
+    assert_eq!(mode_of(&app, B), NotificationMode::MentionsAndKeywords);
+}
+
+#[test]
+fn notify_acts_on_the_open_room_from_the_timeline_and_from_a_thread() {
+    let mut app = opened();
+    let mentions_only = with_mode(room(C, 30, 2), NotificationMode::MentionsAndKeywords);
+    app.update(Msg::RoomUpserted(mentions_only));
+    assert_eq!(
+        no_timers(keys(&mut app, ":notify all<CR>")),
+        vec![set_mode(C, NotificationMode::AllMessages)]
+    );
+    assert_eq!(
+        status(&app),
+        Some("c:example.org now notifies for every message")
+    );
+
+    let mut app = in_the_thread();
+    assert_eq!(
+        no_timers(keys(&mut app, ":notify mentions<CR>")),
+        vec![set_mode(C, NotificationMode::MentionsAndKeywords)]
+    );
+    assert_eq!(
+        status(&app),
+        Some("c:example.org now notifies for mentions and keywords only")
+    );
+    assert_eq!(mode_of(&app, C), NotificationMode::MentionsAndKeywords);
+}
+
+#[test]
+fn notify_with_the_rooms_own_mode_sends_nothing() {
+    let mut app = on_b(NotificationMode::AllMessages);
+    assert_eq!(no_timers(keys(&mut app, ":notify all<CR>")), vec![]);
+    assert_eq!(app.status().unwrap().kind, StatusKind::Info);
+    assert_eq!(
+        status(&app),
+        Some("b:example.org already notifies for every message")
+    );
+
+    let mut app = on_b(NotificationMode::MentionsAndKeywords);
+    assert_eq!(no_timers(keys(&mut app, ":notify mentions<CR>")), vec![]);
+    assert_eq!(
+        status(&app),
+        Some("b:example.org already notifies for mentions and keywords only")
+    );
+}
+
+#[test]
+fn notify_twice_before_the_echo_sends_one_change() {
+    let mut app = on_b(NotificationMode::MentionsAndKeywords);
+    let all = set_mode(B, NotificationMode::AllMessages);
+    assert_eq!(no_timers(keys(&mut app, ":notify all<CR>")), vec![all]);
+    assert_eq!(no_timers(keys(&mut app, ":notify all<CR>")), vec![]);
+    assert_eq!(
+        status(&app),
+        Some("b:example.org already notifies for every message")
+    );
+}
+
+#[test]
+fn notify_all_then_mentions_before_the_echo_sends_both() {
+    let mut app = on_b(NotificationMode::MentionsAndKeywords);
+    assert_eq!(
+        no_timers(keys(&mut app, ":notify all<CR>")),
+        vec![set_mode(B, NotificationMode::AllMessages)]
+    );
+    assert_eq!(
+        no_timers(keys(&mut app, ":notify mentions<CR>")),
+        vec![set_mode(B, NotificationMode::MentionsAndKeywords)]
+    );
+    assert_eq!(
+        status(&app),
+        Some("b:example.org now notifies for mentions and keywords only")
+    );
+    assert_eq!(mode_of(&app, B), NotificationMode::MentionsAndKeywords);
+}
+
+#[test]
+fn a_failed_change_puts_the_sdks_mode_back() {
+    let mut app = on_b(NotificationMode::MentionsAndKeywords);
+    let all = set_mode(B, NotificationMode::AllMessages);
+    assert_eq!(
+        no_timers(keys(&mut app, ":notify all<CR>")),
+        vec![all.clone()]
+    );
+    // As the effect task answers a refused change.
+    app.update(Msg::RoomModeChanged {
+        room: id(B),
+        mode: NotificationMode::MentionsAndKeywords,
+    });
+    let error = "Changing the room's notifications failed: forbidden";
+    app.update(Msg::EffectFailed {
+        error: error.into(),
+    });
+    assert_eq!(mode_of(&app, B), NotificationMode::MentionsAndKeywords);
+    assert_eq!(app.status().unwrap().kind, StatusKind::Error);
+    assert_eq!(status(&app), Some(error));
+    assert_eq!(no_timers(keys(&mut app, ":notify all<CR>")), vec![all]);
+}
+
+#[test]
+fn notify_all_on_a_muted_room_sends_the_change_and_drops_the_label() {
+    let mut app = on_b(NotificationMode::Mute);
+    assert_eq!(
+        no_timers(keys(&mut app, ":notify all<CR>")),
+        vec![set_mode(B, NotificationMode::AllMessages)]
+    );
+    assert_eq!(mode_of(&app, B).label(), None);
+}
+
+#[test]
+fn notify_alone_shows_the_rooms_setting() {
+    let settings = [
+        (
+            NotificationMode::AllMessages,
+            "b:example.org notifies for every message",
+        ),
+        (
+            NotificationMode::MentionsAndKeywords,
+            "b:example.org notifies for mentions and keywords only",
+        ),
+        (NotificationMode::Mute, "b:example.org is muted"),
+        (
+            NotificationMode::Default,
+            "b:example.org follows the account's default",
+        ),
+    ];
+    for (mode, text) in settings {
+        let mut app = on_b(mode);
+        assert_eq!(no_timers(keys(&mut app, ":notify<CR>")), vec![], "{mode:?}");
+        assert_eq!(app.status().unwrap().kind, StatusKind::Info);
+        assert_eq!(status(&app), Some(text));
+        assert_eq!(mode_of(&app, B), mode);
+    }
+}
+
+#[test]
+fn notify_without_a_room_reports_it() {
+    let mut app = app();
+    keys(&mut app, "<C-w>l");
+    for command in [":notify all<CR>", ":notify<CR>"] {
+        assert_eq!(no_timers(keys(&mut app, command)), vec![]);
+        assert_eq!(app.status().unwrap().kind, StatusKind::Error);
+        assert_eq!(status(&app), Some("No room"));
+    }
+}
+
+#[test]
+fn notify_with_an_unknown_mode_sends_nothing() {
+    let mut app = on_b(NotificationMode::MentionsAndKeywords);
+    for mode in ["x", "All"] {
+        let command = format!(":notify {mode}<CR>");
+        assert_eq!(no_timers(keys(&mut app, &command)), vec![]);
+        assert_eq!(app.status().unwrap().kind, StatusKind::Error);
+        let error = format!("unknown mode \"{mode}\"; expected \"all\" or \"mentions\"");
+        assert_eq!(status(&app), Some(error.as_str()));
+    }
+    assert_eq!(mode_of(&app, B), NotificationMode::MentionsAndKeywords);
+}
+
+#[test]
+fn a_room_notify_binding_with_a_mode_sets_it() {
+    let all = [("mode".into(), ArgValue::String("all".into()))];
+    let notify = Binding::single(Action::from_spec("room.notify", &all).unwrap());
+    let mut app = app_with(vec![(TableId::Normal, seq("<Space>n"), notify)]);
+    assert_eq!(
+        no_timers(keys(&mut app, "<Space>n")),
+        vec![set_mode(C, NotificationMode::AllMessages)]
+    );
+    assert_eq!(
+        status(&app),
+        Some("c:example.org now notifies for every message")
+    );
+}
+
+#[test]
+fn a_mode_change_from_the_sdk_keeps_the_counts_and_the_place() {
+    let mark = Binding::single(Action::RoomMarkRead);
+    let mut app = unread_first(vec![(TableId::Normal, seq("<Space>r"), mark)]);
+    assert_eq!(order(&app), [A, C, B]);
+    // The cursor on !a, unread.
+    keys(&mut app, "gg<Space>r");
+    assert_eq!(order(&app), [C, A, B]);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (A, Some(1)));
+    // Muted in another client, before the receipt's echo.
+    app.update(Msg::RoomModeChanged {
+        room: id(A),
+        mode: NotificationMode::Mute,
+    });
+    assert_eq!(order(&app), [C, A, B]);
+    assert_eq!((cursor_id(&app), app.room_cursor()), (A, Some(1)));
+    let a = app.rooms().get(&id(A)).unwrap();
+    assert_eq!(a.unread, UnreadCounts::default());
+    assert_eq!(a.mode.label(), Some("Muted"));
+    assert_eq!(
+        no_timers(keys(&mut app, ":unmute<CR>")),
+        vec![set_mode(A, NotificationMode::Default)]
+    );
+    // A room the list does not have is ignored.
+    app.update(Msg::RoomModeChanged {
+        room: id(D),
+        mode: NotificationMode::Mute,
+    });
+    assert_eq!(order(&app), [C, A, B]);
 }
 
 #[test]

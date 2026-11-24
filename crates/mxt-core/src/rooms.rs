@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 
 use crate::fuzzy;
 use crate::ids::{RoomId, Timestamp};
-use crate::room::{RoomName, RoomSummary, UnreadCounts};
+use crate::room::{NotificationMode, RoomName, RoomSummary, UnreadCounts};
 
 /// One key of the room list's order (design, "Room list"). Each decides
 /// only between the rooms that the keys before it leave tied.
@@ -323,6 +323,15 @@ impl RoomList {
 
     pub fn is_empty(&self) -> bool {
         self.rooms.is_empty()
+    }
+
+    /// Sets the room's notification mode in place (design, "Notification
+    /// modes"): no sort key reads it, so every room keeps its place. A room
+    /// not in the list is ignored.
+    pub fn set_mode(&mut self, id: &RoomId, mode: NotificationMode) {
+        if let Some(room) = self.rooms.iter_mut().find(|room| room.id == *id) {
+            room.mode = mode;
+        }
     }
 
     /// Optimistic clearing (design, "Optimistic clearing"): sets the room's

@@ -1,7 +1,8 @@
-//! The send queue paths, `:join` and the timeline previews against a mock
-//! homeserver (matrix-sdk's `MatrixMockServer` on 127.0.0.1): the effects
-//! run as `Matrix::start` runs them, without the sync loop and the room
-//! list, and the tests read what reaches the core.
+//! The send queue paths, `:join`, the timeline previews and the
+//! notification modes against a mock homeserver (matrix-sdk's
+//! `MatrixMockServer` on 127.0.0.1): the effects run as `Matrix::start`
+//! runs them, without the sync loop and the room list, and the tests read
+//! what reaches the core.
 
 use std::{
     collections::{HashSet, VecDeque},
@@ -39,6 +40,7 @@ use super::*;
 use crate::test_dir::TestDir;
 
 mod join;
+mod modes;
 mod previews;
 mod threads;
 
@@ -225,8 +227,8 @@ impl Core {
     /// `:join`, of `FindThread` or of `FetchPreview`, or report of a
     /// failure (`SendQueued`, `SendFailed`, `PaginationDone`,
     /// `PaginationFailed`, `Recovered`, `Joined`, `NoDirectMessage`,
-    /// `ThreadFound`, `PreviewFetched`, `PreviewFailed`, `EffectFailed`);
-    /// other messages are skipped.
+    /// `ThreadFound`, `PreviewFetched`, `PreviewFailed`, `RoomModeChanged`,
+    /// `EffectFailed`); other messages are skipped.
     async fn report(&mut self) -> Msg {
         loop {
             if let Some(report) = self.reports.pop_front() {
@@ -255,6 +257,7 @@ impl Core {
                 | Msg::ThreadFound { .. }
                 | Msg::PreviewFetched { .. }
                 | Msg::PreviewFailed { .. }
+                | Msg::RoomModeChanged { .. }
                 | Msg::EffectFailed { .. }),
             )) => self.reports.push_back(report),
             Ok(Some(_)) => {}

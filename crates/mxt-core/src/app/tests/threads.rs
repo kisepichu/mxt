@@ -223,7 +223,7 @@ fn on_the_root() -> App {
 }
 /// [`on_the_root`], then `t` and the thread's entries; the cursor follows
 /// the newest reply.
-fn in_the_thread() -> App {
+pub(super) fn in_the_thread() -> App {
     let mut app = on_the_root();
     keys(&mut app, "t");
     thread_reset(&mut app, 2, thread_entries());

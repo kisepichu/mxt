@@ -44,23 +44,31 @@ pub enum RoomKind {
     Group,
 }
 
-/// The user-defined notification mode of a room.
+/// The room's own push rule as the SDK reads it (design, "Notification
+/// modes"); `Default` means none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum NotificationMode {
-    /// No room rule: the account default applies.
+    /// No rule of its own: the account default applies.
     #[default]
     Default,
+    /// The room's own rule notifies for every message.
+    AllMessages,
+    /// The room's own rule notifies for mentions and keywords only.
     MentionsAndKeywords,
+    /// An override rule that matches the room and does not notify.
     Mute,
 }
 
 impl NotificationMode {
-    /// The room list's label: "Muted" for `Mute`, else None. Rooms that
-    /// notify only for mentions and keywords have no label.
+    /// The room list's label: "Muted" for `Mute`, else None. Rooms set to
+    /// all messages or to mentions and keywords only have no label (design,
+    /// "Unread badges").
     pub fn label(self) -> Option<&'static str> {
         match self {
             NotificationMode::Mute => Some("Muted"),
-            NotificationMode::Default | NotificationMode::MentionsAndKeywords => None,
+            NotificationMode::Default
+            | NotificationMode::AllMessages
+            | NotificationMode::MentionsAndKeywords => None,
         }
     }
 }
@@ -237,6 +245,7 @@ mod tests {
     fn mode_labels() {
         assert_eq!(NotificationMode::Mute.label(), Some("Muted"));
         assert_eq!(NotificationMode::MentionsAndKeywords.label(), None);
+        assert_eq!(NotificationMode::AllMessages.label(), None);
         assert_eq!(NotificationMode::Default.label(), None);
     }
 
