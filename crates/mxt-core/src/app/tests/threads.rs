@@ -10,15 +10,29 @@ use super::timeline::{
 use super::*;
 use crate::action::FocusMode;
 use crate::effect::{Outgoing, OutgoingKind, ViewContent};
-use crate::ids::{EventId, SendId};
+use crate::ids::{EventId, SendId, UserId};
 use crate::mention::render_mentions;
 use crate::timeline::{
-    Draft, ItemRef, MessageContent, ReactionGroup, ReplyPreview, ThreadSummary, TimelineDiff,
-    TimelineEntry, TimelineItem,
+    Draft, ItemRef, MessageContent, ReactionGroup, ReactionSender, ReplyPreview, ThreadSummary,
+    TimelineDiff, TimelineEntry, TimelineItem,
 };
 
 const A: &str = "!a:example.org";
 const C: &str = "!c:example.org";
+const BOB: &str = "@bob:example.org";
+
+/// The reactions with `key` from `senders`, oldest first, without names.
+fn group(key: &str, senders: &[&str], mine: bool) -> ReactionGroup {
+    let senders = senders.iter().map(|user| ReactionSender {
+        user: UserId::new(*user),
+        name: None,
+    });
+    ReactionGroup {
+        key: key.into(),
+        senders: senders.collect(),
+        mine,
+    }
+}
 
 /// The thread of `room` whose root is `$<root>`.
 fn thread_of(room: &str, root: u32) -> TimelineId {
@@ -364,16 +378,9 @@ fn enter_bound_to_message_view_in_the_timeline_shows_a_root_as_before() {
 #[test]
 fn react_with_an_index_in_a_thread_counts_the_reactions_of_the_threads_message() {
     let mut app = opened();
-    let reacted = |mut entry: TimelineEntry, reactions: &[(&str, bool)]| {
+    let reacted = |mut entry: TimelineEntry, reactions: &[ReactionGroup]| {
         if let TimelineEntry::Item(item) = &mut entry {
-            item.reactions = reactions
-                .iter()
-                .map(|&(key, mine)| ReactionGroup {
-                    key: key.into(),
-                    count: 1,
-                    mine,
-                })
-                .collect();
+            item.reactions = reactions.to_vec();
         }
         entry
     };
@@ -384,14 +391,21 @@ fn react_with_an_index_in_a_thread_counts_the_reactions_of_the_threads_message()
             key: key.into(),
         })]
     };
-    let root = || with_replies(2, reacted(msg(2), &[("👀", false)]));
+    let root = || with_replies(2, reacted(msg(2), &[group("👀", &[BOB], false)]));
     reset(
         &mut app,
-        vec![msg(1), root(), reacted(msg(3), &[("😂", false)])],
+        vec![
+            msg(1),
+            root(),
+            reacted(msg(3), &[group("😂", &[BOB], false)]),
+        ],
     );
     keys(&mut app, "kt");
     // The user's ❤ without the variation selector, another user's ❤️.
-    let hearts = [("\u{2764}", true), ("\u{2764}\u{fe0f}", false)];
+    let hearts = [
+        group("\u{2764}", &[ME], true),
+        group("\u{2764}\u{fe0f}", &[BOB], false),
+    ];
     thread_reset(
         &mut app,
         2,
@@ -410,14 +424,9 @@ fn react_with_an_index_in_a_thread_counts_the_reactions_of_the_threads_message()
 fn the_emoji_picker_in_a_thread_lists_the_reactions_shown_under_the_message_first() {
     let mut app = on_the_root();
     keys(&mut app, "t");
-    let reacted = |key: &str, mine: bool| ReactionGroup {
-        key: key.into(),
-        count: 1,
-        mine,
-    };
     let mut newest = msg(12);
     if let TimelineEntry::Item(item) = &mut newest {
-        item.reactions = vec![reacted("👀", false), reacted("👍", true)];
+        item.reactions = vec![group("👀", &[BOB], false), group("👍", &[ME], true)];
     }
     thread_reset(&mut app, 2, vec![msg(2), msg(10), msg(11), newest]);
     keys(&mut app, "+");

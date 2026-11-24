@@ -28,7 +28,8 @@ use mxt_core::{
     ids::TimelineId,
     mention::RenderedBody,
     timeline::{
-        ItemRef, MessageContent, SendState, TimelineDiff, TimelineEntry, TimelineItem, apply_diff,
+        ItemRef, MessageContent, ReactionGroup, ReactionSender, SendState, TimelineDiff,
+        TimelineEntry, TimelineItem, apply_diff,
     },
 };
 use tokio::time::timeout;
@@ -436,6 +437,87 @@ async fn a_refused_reaction_is_dropped_from_the_timeline_and_reported() {
         })
         .await;
     assert!(adapter.queued().await.is_empty());
+}
+
+/// Applies the diffs up to the first state in which `n` reactions to
+/// `SENT` are shown, and returns them.
+async fn reacted_by(core: &mut Core, n: usize) -> Vec<ReactionGroup> {
+    let what = format!("{n} reactions");
+    let shown = |entries: &[TimelineEntry]| {
+        item(entries, &sent()).is_some_and(|item| {
+            item.reactions
+                .iter()
+                .map(ReactionGroup::count)
+                .sum::<usize>()
+                == n
+        })
+    };
+    core.until(&what, shown).await;
+    item(&core.entries, &sent()).unwrap().reactions.clone()
+}
+
+/// The senders of a message's reactions, oldest first, with the display
+/// names their member events in the store give, read before the batch that
+/// carries the reactions is converted: a member event synced with the
+/// reaction names its sender from the first diff on, and one that reaches
+/// the store later names them in the item's next diff. The user's own
+/// reaction has no name, since the core shows it as the user's.
+#[tokio::test]
+async fn reactions_carry_the_names_the_store_has_when_their_diff_comes() {
+    let mut adapter = Adapter::start().await;
+    let f = EventFactory::new();
+    let me = ruma::UserId::parse(ME).unwrap();
+    let bob = ruma::UserId::parse("@bob:example.org").unwrap();
+    let carol = ruma::UserId::parse("@carol:example.org").unwrap();
+    let room_id = ruma::RoomId::parse(ROOM).unwrap();
+    let event = ruma::EventId::parse(SENT).unwrap();
+    let sender = |user: &ruma::UserId, name: Option<&str>| ReactionSender {
+        user: UserId::new(user.as_str()),
+        name: name.map(Into::into),
+    };
+    let thumbs_up = |senders, mine| ReactionGroup {
+        key: "👍".into(),
+        senders,
+        mine,
+    };
+
+    // The store has a sync's member events before the timeline gets its
+    // reactions.
+    let bob_reacts = JoinedRoomBuilder::new(&room_id)
+        .add_state_event(f.member(&me).display_name("Alice"))
+        .add_state_event(f.member(&bob).display_name("Bob"))
+        .add_timeline_event(f.reaction(&event, "👍").sender(&bob));
+    adapter.server.sync_room(&adapter.client, bob_reacts).await;
+    let bob_named = sender(&bob, Some("Bob"));
+    assert_eq!(
+        reacted_by(&mut adapter.core, 1).await,
+        [thumbs_up(vec![bob_named.clone()], false)]
+    );
+
+    let carol_reacts = JoinedRoomBuilder::new(&room_id)
+        .add_timeline_event(f.reaction(&event, "👍").sender(&carol));
+    adapter
+        .server
+        .sync_room(&adapter.client, carol_reacts)
+        .await;
+    assert_eq!(
+        reacted_by(&mut adapter.core, 2).await,
+        [thumbs_up(
+            vec![bob_named.clone(), sender(&carol, None)],
+            false
+        )]
+    );
+
+    // Carol's member event, with the next change to the item.
+    let carol_joins = JoinedRoomBuilder::new(&room_id)
+        .add_state_event(f.member(&carol).display_name("Carol"))
+        .add_timeline_event(f.reaction(&event, "👍").sender(&me));
+    adapter.server.sync_room(&adapter.client, carol_joins).await;
+    let all = vec![bob_named, sender(&carol, Some("Carol")), sender(&me, None)];
+    assert_eq!(
+        reacted_by(&mut adapter.core, 3).await,
+        [thumbs_up(all, true)]
+    );
 }
 
 /// The adapter, and secret storage with the key description of
