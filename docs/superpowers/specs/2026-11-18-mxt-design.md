@@ -228,24 +228,32 @@ Rules:
 The main types in `mxt-core`:
 
 - `RoomSummary`: id, `RoomName { network: Option<String>, room: String }`,
-  kind (direct message or group), `UnreadCounts`, `NotificationMode`
-  (default, mentions and keywords only, mute), time of the latest activity,
+  kind (direct message or group), `UnreadCounts`, `NotificationMode` (the
+  room's own push rule: `Default`, none, so the account default applies;
+  `AllMessages`, added after 0.1.5; `MentionsAndKeywords`; `Mute`; see
+  "Notification modes" in "Matrix adapter"), time of the latest activity,
   and the time of the user's own latest read receipt (`last_read`, for the
   `read` sort key; see "Room list").
   Spaces are not room summaries; their names only feed `RoomName.network`.
 - `UnreadCounts { messages, notifications, mentions, marked }`. `messages`
   counts unread messages even in muted rooms. `notifications` counts unread
-  events that notify according to the user's push rules. `mentions` counts
-  unread highlights. `marked` is the manual unread mark. All counts are
-  computed client-side by the SDK (see "Risks").
+  events that notify according to the user's push rules as they were when
+  each event arrived (see "Counts after a mode change" in "Matrix
+  adapter"). `mentions` counts unread highlights. `marked` is the manual
+  unread mark. All counts are computed client-side by the SDK (see
+  "Risks").
 - `Badge`, derived from `UnreadCounts` (see "Unread badges").
 - `RoomTarget`, `RoomFilter` and `Pick` (see "Action registry").
 - `TimelineItem`: `id: ItemRef`, sender, timestamp, `MessageContent`,
-  optional reply preview, reaction groups (key, count, whether the user
-  reacted; in the SDK's order, which the timeline shows), an edited flag,
-  the local send state (sending, sent, failed), and for a thread root its
-  `ThreadSummary` (the number of replies, above zero, and the latest
-  reply's time; see "Threads").
+  optional reply preview, reaction groups (key, its senders, whether the
+  user is among them; in the SDK's order, which the timeline shows; the
+  senders replaced a bare count after 0.1.5: each is a `ReactionSender {
+  user, name }` with the display name the SDK's store has for them,
+  oldest reaction first, and the count is their number; see "Reactions"
+  in "Matrix adapter"),
+  an edited flag, the local send state (sending, sent, failed), and for a
+  thread root its `ThreadSummary` (the number of replies, above zero, and
+  the latest reply's time; see "Threads").
   The timeline also contains date dividers and the read marker, which the SDK
   provides as virtual items.
 - `TimelineId { room: RoomId, thread: Option<EventId> }`: a room's main
@@ -346,7 +354,9 @@ covered by unit tests.
   `is_marked_unread`, the user-defined notification mode and the latest event
   time, and from the state store the time of the user's own latest read
   receipt (see "Room list"). The core filters and sorts them itself, so the
-  meaning of every filter and sort key is defined in one place.
+  meaning of every filter and sort key is defined in one place. A change of
+  the notification mode alone reaches the core as `Msg::RoomModeChanged`
+  (added after 0.1.5; see "Notification modes").
 - Bridge state: classic sync delivers each room's full state (members are
   lazy-loaded), so `m.bridge` and `uk.half-shot.bridge` are read from the
   stored room state. `mxt-matrix` parses them itself and keeps, per room,
@@ -384,12 +394,136 @@ covered by unit tests.
   which is heavy for accounts with many rooms. `auto_enable_backups` and
   `auto_enable_cross_signing` stay off, because creating them is out of
   scope.
-- Mute: the SDK notification settings. Muting sets the room mode to mute.
-  Unmuting a muted room removes the user-defined room rule, so the account
-  default applies again. `room.unmute` on a room that is not muted sends
-  nothing and shows the error "<room> is not muted", so a "mentions and
-  keywords only" rule set in another client stays. Muting and unmuting show
-  "Muted <room>" and "Unmuted <room>".
+- Notification modes: the SDK's `NotificationSettings`, one instance that
+  the effects and the room list task share. A room's mode is its own push
+  rule as the SDK reads it (`get_user_defined_room_notification_mode`,
+  matrix-sdk `notification_settings/rules.rs:66-97`): an enabled override
+  rule matching the room without a notify action is mute; otherwise a
+  room rule (its ID the room ID) is all messages when it notifies and
+  mentions and keywords only when it does not; otherwise there is none.
+  `mxt-matrix` maps these one to one to `NotificationMode::Mute`,
+  `AllMessages`, `MentionsAndKeywords` and `Default` (none: the account
+  default applies). Up to 0.1.5 it mapped a room rule that notifies to
+  `Default` as well, so nothing could tell the two apart; `room.notify`
+  needs to (below). Bridges set such rules: mautrix-discord puts a room
+  rule without a notify action on a guild channel when it creates the
+  portal (`mute_channels_on_create`, `mutePortal` in its `user.go`, called
+  only for a portal just created), which reads as mentions and keywords
+  only, and it does not set it again later, so a change made in mxt stays.
+  The mode is a label and what `room.notify` compares with, nothing more:
+  no sort key, no `filter` and no badge reads it, so what the room list
+  counts is the SDK's counts alone (see "Counts after a mode change"
+  below).
+  - Muting (`room.mute`) sets the mode to mute
+    (`set_room_notification_mode`, matrix-sdk
+    `notification_settings/mod.rs:305-355`, which puts the new rule and
+    then deletes the room's other rules, so a room rule goes). Unmuting
+    (`room.unmute`) a muted room removes the room's rules
+    (`delete_user_defined_room_rules`, `mod.rs:358-380`), so the account
+    default applies again. `room.unmute` on a room that is not muted sends
+    nothing and shows the error "<room> is not muted", so a "mentions and
+    keywords only" or "all messages" rule set in another client or with
+    `room.notify` stays. Muting and unmuting show "Muted <room>" and
+    "Unmuted <room>". `room.mute` and then `room.unmute`, once the
+    `Muted` label shows, bring any room back to the account default.
+  - `room.notify` (`:notify`; added after 0.1.5) with `mode = "all"` sets
+    all messages and with `mode = "mentions"` mentions and keywords only,
+    through the same `set_room_notification_mode`: one `PUT
+    /_matrix/client/v3/pushrules/global/room/<room ID>` whose actions are
+    `notify` and the default sound for `all` and none for `mentions`
+    (`notification_settings/command.rs:32-48`), which replaces the room
+    rule a bridge put there, then a `DELETE` of each other rule of the
+    room, so on a muted room the override rule goes and the room is no
+    longer muted. It acts on the room `room.mark_read` and `room.mute` act
+    on (the room under the cursor while the room list has focus,
+    otherwise the open room), also from a thread. The core compares the
+    target with the room's `NotificationMode`: when they are the same it
+    sends nothing and shows "<room> already notifies for every message"
+    (or "… for mentions and keywords only"); otherwise it sends the
+    change and shows "<room> now notifies for every message" (or "… for
+    mentions and keywords only"), both as info. A room without a rule of
+    its own gets one either way, also when the account default already
+    notifies the same way: the rule keeps the room as chosen when the
+    default changes, and telling what the default gives takes the room's
+    encryption state and member count (`Room::notification_mode`,
+    matrix-sdk `room/mod.rs:3835-3863`), whose `latest_encryption_state`
+    may send a request (`room/mod.rs:1124-1128`). Without `mode`,
+    `room.notify` changes nothing and shows the room's mode: "<room>
+    notifies for every message", "<room> notifies for mentions and
+    keywords only", "<room> is muted" or "<room> follows the account's
+    default".
+  - The rule is the account's, on the homeserver: every client and the
+    push gateway follow it, so the phone (Beeper, Element) notifies for
+    every message of a room set to all messages too. The user
+    documentation says so next to `:notify`.
+  - Every mode change is `MatrixEffect::SetMode { room, change }`, with
+    `ModeChange::Mute`, `Unmute`, `AllMessages` or `MentionsAndKeywords`
+    (it replaced 0.1.5's `SetMute { room, muted }`), run in order by one
+    task, so each change reads the push rules the previous one left. A
+    failure is reported as `EffectFailed`: "Muting the room failed",
+    "Unmuting the room failed", "Changing the room's notifications
+    failed".
+  - The core's mode changes when the new rules come back with the sync,
+    not when the request succeeds, as for muting before. The homeserver
+    puts the changed `m.push_rules` into the next sync response's account
+    data (Synapse, `SyncHandler._generate_sync_entry_for_account_data`),
+    the SDK's event handler replaces the settings' rules and notifies
+    `subscribe_to_changes` (`notification_settings/mod.rs:104-112,
+    124-126`; a change made through the settings updates their rules,
+    `mod.rs:351-352`, but notifies nothing), and the room list task reads
+    every room's mode again and sends `Msg::RoomModeChanged { room, mode
+    }` for each room whose mode changed. Up to 0.1.5 it sent
+    `RoomUpserted` with the room's stored facts instead, whose counts are
+    those of the room's last update: they undid optimistic clearing (see
+    below) until the receipt's echo, and placed the room again.
+    `RoomModeChanged` carries the mode alone, so the counts and the place
+    stay as the core has them; no sort key reads the mode, so nothing
+    moves. Until the echo, `room.notify` and `room.unmute` compare with
+    the mode the core has: a second `:notify all` sends the change again,
+    and the SDK, whose own rules the first request already updated,
+    returns without a request (`mod.rs:312-315`).
+  - Counts after a mode change (matrix-sdk, matrix-sdk-base and
+    matrix-sdk-common 0.19.1). The SDK decides whether an event notifies
+    once, when it takes the event in, and keeps the answer with the event.
+    Sync evaluates each timeline event against the push rules of the
+    response's own account data, else the stored rules (matrix-sdk-base
+    `client.rs:700, 1116-1138`; `response_processors/timeline.rs:137-145`;
+    `response_processors/notification.rs:69`), and stores the actions on
+    the event (`TimelineEvent::push_actions`, matrix-sdk-common
+    `deserialized_responses.rs:514-528`, saved with it in the event
+    cache's store). The event cache counts a room again when events or
+    receipts arrive in it (`post_process_upserted_events` and
+    `update_read_receipts`, matrix-sdk
+    `event_cache/caches/room/state.rs:614-680`; nothing reacts to a change
+    of the push rules), and each count reads the stored actions
+    (`process_event`, `event_cache/caches/read_receipts.rs:205-227`, from
+    `compute_unread_counts`, `:561-641`). So:
+    - After `:notify all`, a message that comes in the sync response that
+      carries the new rules, or in a later one, notifies and counts in
+      `notifications`; the homeserver evaluates it when it arrives too
+      (Synapse's `BulkPushRuleEvaluator`), so the phone notifies. The
+      messages that were unread before keep their actions and stay out of
+      `notifications`: the room keeps its dim count until its next
+      message, then shows a bold count of the messages since the change,
+      which the `notify` sort key and `filter = "notify"` take.
+    - After `:notify mentions`, the unread messages that notified keep
+      counting in `notifications`, a bold count, until they are read; new
+      messages count in `messages` only.
+    - Two exceptions, rare for unread messages: an event that could not
+      be decrypted gets its actions when it decrypts, from the rules
+      stored then (`event_cache/redecryptor.rs:206-207, 702-703`;
+      `Room::push_context_internal`, `room/mod.rs:3709-3720`, reads
+      `Account::push_rules`, the stored rules, `account.rs:1202-1218`), and
+      an event that back pagination loads for the first time after the
+      change gets the new rules' actions (`Room::messages`,
+      `room/mod.rs:612-619`).
+
+    mxt adds nothing to the counts and does not reinterpret them by the
+    mode: the badge and the `notify` key show what notified when it
+    arrived, as the homeserver's own counts and push do. Treating a room
+    set to all messages as if every unread message notified would show
+    counts the phone never notified for, and a room set to mentions would
+    then need the reverse.
 - Sending: the composer text is Markdown. The core's
   `render_mentions(text, mentions)` returns three things:
   - the plain body: the editor text unchanged, so mentions read as
@@ -428,7 +562,40 @@ covered by unit tests.
   its target, but an aborted edit's text stays on it until the next
   matrix-sdk-ui release.
 - Reactions: `Timeline::toggle_reaction`. Choosing a reaction the user already
-  sent removes it.
+  sent removes it. A message's reactions come from the SDK's
+  `ReactionsByKeyBySender` (matrix-sdk-ui `timeline/event_item/mod.rs:828-842`:
+  for each key, an `IndexMap` from each sender to a `ReactionInfo` with the
+  reaction's timestamp), one group per key in the SDK's order. Added after
+  0.1.5, for the message view's list of who reacted (see "Who reacted" in
+  "Terminal adapter and the composer"), a group carries its
+  senders, sorted by the reaction's timestamp, oldest first, the SDK's
+  order breaking ties: within a key the SDK keeps the order in which the
+  timeline applied the reactions (`timeline/controller/aggregations.rs:
+  344-373`), which depends on whether they came live or by back
+  pagination. Each sender has the display name of their member event in
+  the SDK's store (`Room::get_member_no_sync`, matrix-sdk
+  `room/mod.rs:1217-1223`, no request; `RoomMember::display_name`, an
+  empty one counting as none), the source the SDK's timeline takes sender
+  names from (`Profile::load`, matrix-sdk-ui
+  `timeline/event_item/mod.rs:752-770`), or none. The subscription's
+  forwarding task looks the names up before it converts each batch of
+  diffs, and `Subscription::start` before the first `Reset`: for the
+  senders, other than the user, of the reactions on the batch's items. It
+  keeps each name it found for the subscription's life (`ReactorNames`),
+  so a sender costs one store read and then none, and the core never
+  waits: the names come with the items, as the senders' own names do. A
+  sender the store has no member event or no name for is looked up again
+  with each later diff of an item with their reaction, so a member event
+  that arrives later shows with that item's next update; a member renamed
+  meanwhile keeps the old name until the room opens again. The store has
+  a member event for the sender of every event a sync response brought
+  (lazy-loaded members come with the events they sent, reactions
+  included), and for every joined member once the room's members are
+  loaded (in the background for a room of up to 500, see "Members", or
+  for mention completion); the senders of old reactions that only back
+  pagination brought, in a larger room, may have none and show as user
+  IDs. The timeline's chips do not change: `key count`, the count being
+  the number of senders.
 - Redaction: a sent message is redacted with `Room::redact` directly, not
   through the send queue, so a refused redaction is reported at once and
   never blocks the queue. A local echo is aborted instead.
@@ -816,6 +983,48 @@ covered by unit tests.
   `ViewContent::Image`) or a help view (its generated text, sent as
   `ViewContent::Text`), so the image checks stay tied to a message view, and
   the tui adapter draws a help view like a text message.
+- Who reacted (added after 0.1.5): the message view lists the message's
+  reactions with their senders after the message, one line per reaction
+  in the order of `TimelineItem::shown_reactions`, which the chips under
+  the message follow: `<key> <names>`, the names joined by `, `, oldest
+  reaction first, the user's own written `you`, and a sender without a
+  name as their user ID (`👍 Alice, Bob, you`, `🎉 @bob:example.org`).
+  For text the lines follow the text after an empty line; for an image or
+  a sticker they follow its details (the name, then the size and
+  dimensions) after an empty line, so they come under the info line and
+  above the image. A message without reactions shows nothing more.
+  - The core builds the lines (`view_message`, which knows the user's ID
+    for `you`) and sends them as `reactions: Vec<String>` in
+    `ViewContent::Text` and `ViewContent::Image`, empty for the help
+    views; the tui adapter appends them to the editor's text. The names
+    come with the items (see "Reactions" in "Matrix adapter"), so opening
+    the view sends no request and waits for nothing.
+  - They are part of the editor's text, not drawn outside it. The view's
+    text already scrolls, wraps by grapheme cluster and holds an image's
+    details, so the lines scroll with a long message (`G` reaches them),
+    wrap at the view's width like any line, a long list of names taking
+    the rows it needs, and need no layout of their own; and a name can be
+    yanked (to mention someone) or found with edtui's `/`. The cost: a
+    yank of the whole view (`ggyG`) takes them too, so `message.yank`
+    (`yy` in the timeline), which copies the message alone, stays the way
+    to copy a message whole. The search highlight's `matches` are byte
+    ranges in the message's text, which comes first, so they stay valid
+    and the lines never carry a match (the timeline's `/` does not search
+    reactions either). `you` marks the user's reaction in words, not by a
+    style: the view's text is plain (it shows none of the timeline's
+    styles, and its highlights are the search's), and the word survives a
+    yank.
+  - The view is a snapshot, as its text already is: the core sends the
+    content once, when the view opens (`View::Message` keeps the item's ID
+    only to route its image), so a reaction added or removed while the
+    view is open, or a name that arrives meanwhile, shows when the view
+    opens again.
+  - An image's details take the rows their text needs, at most half of
+    the view's height but at least two rows (`min(rows, max(2, height /
+    2))`); the editor scrolls within them, and the image gets the rest
+    below the gap row, so a long list of reactions never leaves the image
+    without room. Before, the details were one or two rows and took what
+    they needed.
 - Replacing edtui later (with another editor widget or an in-house vim engine)
   only touches `mxt-tui`.
 
@@ -927,7 +1136,20 @@ A room shows at most one badge, chosen by the first rule that matches:
 | `marked` | `U` | marked style |
 
 Counts above 99 show as `99+`. Muted rooms also show a `Muted` label. Rooms
-set to mentions and keywords only show no label.
+set to mentions and keywords only show no label, and neither do rooms set
+to all messages (added after 0.1.5, with `:notify`): the owner chose labels
+for muted rooms only, a room that notifies already shows bold counts, and
+a label would take columns from the name in a 30-column list while a room
+without a rule of its own, whose account default may notify the same way,
+would look different. `:notify` without an argument shows a room's
+setting (see "Notification modes" in "Matrix adapter").
+
+A badge counts each message by the push rules in force when it arrived:
+after `:notify all`, the messages already unread stay a dim count until
+the room's next message, which brings a bold count of the messages since
+the change, and after `:notify mentions` the unread messages that
+notified stay a bold count until read (see "Counts after a mode change" in
+"Matrix adapter"). The user documentation says so.
 
 ### Room list
 
@@ -1059,8 +1281,10 @@ group, and moved the cursor with the room it opened.
   cursor along. A move is a change of the room's index caused by a
   change of the room itself: it sorts as read as it opens, its receipt or
   `room.mark_read` lifts it, or an update of it places it again (new
-  activity, a receipt from another device, a rename under `name`, a new
-  notification mode). A shift of its index caused by another room is not
+  activity, a receipt from another device, a rename under `name`; up to
+  0.1.5 also a new notification mode, which now comes as
+  `Msg::RoomModeChanged` and places nothing, since no sort key reads it).
+  A shift of its index caused by another room is not
   its move: another room's update passing it, a room added or removed
   above it, the previously open room going back to its place as it
   opens. The cursor then follows the open room, as every cursor follows
@@ -1204,8 +1428,10 @@ instead, and it never takes more than half of the width.
   not involved. It reads "newer", not "new": after the cursor moved up, the
   count includes messages the pane showed before.
 - Messages taller than the pane show `[+N lines]`, and `message.view` shows
-  them in full. A thread root keeps its `💬` row as its last row: the body
-  is cut above it, with the marker where the body is cut.
+  them in full (`<CR>`, or on a thread root with replies `<CR>` in its
+  thread, since `<CR>` on it in the timeline opens the thread; see
+  "Default keymap"). A thread root keeps its `💬` row as its last row: the
+  body is cut above it, with the marker where the body is cut.
 
 ### Default keymap
 
@@ -1227,7 +1453,7 @@ instead, and it never takes more than half of the width.
 | `room_list`, `timeline` | `/` / `n` / `N` | `search.start` / `search.next` / `search.prev` | same |
 | `room_list` | `<CR>` | `room.open_selected` | |
 | `timeline` | `i` / `a` | `composer.focus` (enters insert mode) | insert |
-| `timeline` | `<CR>` | `message.view` | |
+| `timeline` | `<CR>` | `message.enter`: the thread of a thread root with replies, as `t`; otherwise `message.view` (changed after 0.1.5, below) | |
 | `timeline` | `r` | `message.reply` | |
 | `timeline` | `e` | `message.edit` (own text messages only) | |
 | `timeline` | `dd` | `message.delete` (own messages only, after confirmation) | delete line |
@@ -1239,6 +1465,7 @@ instead, and it never takes more than half of the width.
 | `timeline` | `R` | `message.resend` (a failed message) | |
 | `timeline` | `t` | `thread.open` (the message's thread; see "Threads") | |
 | `thread` | `q` / `<Esc>` | `thread.close` (back to the main timeline) | close window |
+| `thread` | `<CR>` | `message.view`, on every message of the thread, the root included (added after 0.1.5) | |
 | `composer.insert` | `<CR>` | `composer.send` | |
 | `composer.insert` | `<C-j>` | `composer.newline` | |
 | `composer.insert` | `<C-c>` | `composer.normal`: normal mode | `i_CTRL-C` |
@@ -1297,6 +1524,33 @@ thread gets them through `thread`'s fallback to `timeline`. No table of
 the editors falls back to `timeline` (see "Tables and resolution"), so in
 the composer's and the message view's normal mode `g` still goes to
 edtui, which takes the digit as the key after its `g` and drops both.
+
+`<CR>` in `timeline` runs `message.enter` (changed after 0.1.5; it was
+`message.view`): on a message that is a thread root with replies (its
+`ThreadSummary` is set, so it has the `💬` row) it opens the thread as
+`thread.open` does, a deleted root included, and records the jump; on any
+other message it opens the message view as `message.view` does, with that
+action's refusal of an image that is still a local echo. While a thread
+is shown, `message.enter` opens the message view on every message, the
+root included, so wherever it is bound it never runs `thread.open` in a
+thread, which only keeps the focus there. `thread` binds `<CR>` to
+`message.view` (the owner's decision), so in a thread `<CR>` shows the
+message under the cursor, the root too. `t` is unchanged: it opens the
+thread of any message and starts one on a message without replies, which
+`<CR>` never does. `message.view` and `thread.open` keep their names and
+stay bindable, and `"<CR>" = "message.view"` in `[keymap.timeline]`
+brings back the old `<CR>`, in threads too.
+
+What the new defaults hide: `timeline` has bound `<CR>` since the first
+release, so a binding of `<CR>` in `normal` never applied while the
+timeline had focus, and that does not change. `thread`'s `<CR>` is new
+and comes before `timeline` (see "Threads"), so a binding of `<CR>` in
+`[keymap.timeline]` no longer applies while a thread is shown unless it
+is also written in `[keymap.thread]`, as `t` and `g1` … `g9` hid bindings
+of `normal`. Existing configurations load as before and every name keeps
+its meaning, so by "Releasing" (`docs/releasing.md`) this is a change of
+defaults and behaviour, a `### Changed` line that says how to get the old
+`<CR>` back, not a breaking one.
 
 `<Esc>` in `message_view` was `view.close` up to 0.1.4, in normal and
 visual mode alike, so `V` then `<Esc>` closed the view where vim leaves
@@ -1396,7 +1650,9 @@ next unread room.
     match, since it draws prefixes differently (`│ `). The headers, reply
     previews, reactions and `💬` rows hold no matches, since the search
     does not look there, and matches in the cut-off part of a tall message
-    (`[+N lines]`) are not drawn: `<CR>` opens the message.
+    (`[+N lines]`) are not drawn: `<CR>` opens the message (on a thread
+    root with replies, `<CR>` on it inside its thread; see "Default
+    keymap").
   - The styles. mxt sets no background colour anywhere and leaves colours
     to the terminal's theme, so a match is marked with reverse video, the
     attribute vim's default `Search` highlight uses on a terminal without
@@ -1469,7 +1725,8 @@ rooms, as nvim's jump list does.
 - A jump records the position before it: opening another room by any path
   (`room.open_selected`, the room picker, `room.open` from `]u`, `[u` or
   `:open`, and `:join` once its room is listed); opening a thread
-  (`thread.open`, the position in the main timeline) and closing it
+  (`thread.open`, and `message.enter` when it opens one, the position in
+  the main timeline) and closing it
   (`thread.close`, the position in the thread; see "Threads");
   `cursor.first` and
   `cursor.last` in the timeline (`gg`, `G`); a search that moves the
@@ -1650,6 +1907,12 @@ Opening:
   With no item under the cursor nothing happens, and in a thread, whose
   items all belong to it, the action only keeps the focus on the timeline.
   Opening a thread records a jump (see "Jump list").
+- `message.enter` (`<CR>` in `timeline`; added after 0.1.5) opens the
+  thread as `thread.open` does when the item under the cursor is a thread
+  root with replies (it has a `ThreadSummary`) and no thread is shown,
+  and otherwise opens the message view (`message.view`); see "Default
+  keymap". So `<CR>` on a message with a `💬` row goes into its thread,
+  and `t` stays the way to start a thread on a message without replies.
 - Opening closes what belongs to the pane it replaces, as opening another
   room does: a message view (a help view stays), the mention menu and the
   composer's focus; the timeline gets the focus.
@@ -1681,11 +1944,12 @@ Opening:
   under the rules of "Timeline"; the root's `💬` row shows there too,
   without the unread mark.
 - Every key of the timeline works on the thread's items as on the main
-  timeline's: the cursor moves and their counts, `/`, `n`, `N`, `<CR>`,
-  `r`, `e`, `dd`, `yy`, `+` and `:react`, `g1` … `g9`, `gx`, `gd` (see
-  "Going to the replied-to message" below), `R`, `i` and `a`, and back
-  pagination near the oldest item. `room.mark_read`, `room.mute` and
-  `room.unmute` act on the room.
+  timeline's: the cursor moves and their counts, `/`, `n`, `N`, `r`, `e`,
+  `dd`, `yy`, `+` and `:react`, `g1` … `g9`, `gx`, `gd` (see "Going to
+  the replied-to message" below), `R`, `i` and `a`, and back pagination
+  near the oldest item. `<CR>` is `thread`'s own (added after 0.1.5):
+  `message.view` on every message, the root included. `room.mark_read`,
+  `room.mute`, `room.unmute` and `room.notify` act on the room.
 
 Closing:
 
@@ -1707,8 +1971,11 @@ Closing:
 - The keymap table `thread` applies while the timeline has focus and a
   thread is shown (`InputContext::Thread`): its bindings come first, then
   `timeline`'s, then `normal`'s. Its defaults are `q` and `<Esc>`
-  (`thread.close`). The main timeline binds neither, so a binding of `q`
-  or `<Esc>` in `normal` (`"q" = "app.quit"`) still applies there.
+  (`thread.close`), and `<CR>` (`message.view`; added after 0.1.5, see
+  "Default keymap"). The main timeline binds neither `q` nor `<Esc>`, so a
+  binding of them in `normal` (`"q" = "app.quit"`) still applies there; a
+  binding of `<CR>` in `timeline` no longer applies in a thread unless it
+  is also written in `thread`.
 
 Going to the replied-to message:
 
@@ -1906,6 +2173,7 @@ the registry, so a new command needs only its entry.
 | `:open <room>` | `room.open` with a fuzzy query, with completion over room names |
 | `:join <target>` | `room.join` with `target`, with completion over the names of pending invites (see "Joining rooms and direct messages") |
 | `:mute` / `:unmute` | `room.mute` / `room.unmute` |
+| `:notify [<mode>]` | `room.notify` with `mode`, `all` or `mentions`: every message of the room notifies, or mentions and keywords only; without an argument it shows the room's setting (see "Notification modes" in "Matrix adapter"); added after 0.1.5 |
 | `:upload <path>` | `file.upload` |
 | `:react [<emoji>]` | `message.react` with `emoji`, with completion over shortcodes; without an argument the emoji picker |
 | `:recover` | `account.recover` (asks for the recovery key in `SECRET` mode) |
@@ -1918,11 +2186,12 @@ the registry, so a new command needs only its entry.
 `:mute`, `:unmute`, `:recover`, `:help`, `:map`, `:messages`, `:noh`,
 `:nohlsearch` and `:q` reject an argument, and `:open`, `:join` and
 `:upload` without one show their usage (`usage: :open <room>`). `:react`
-takes an optional argument. Command names match exactly: `:q` and `:noh`
-are the only short names (`:noh` and `:nohlsearch` are two registry
-entries for one action, the two spellings vim users type), and `:h` and
-`:nohl` are unknown commands. The command line, the `/` search line and
-picker queries are edited with the line editor (see "Line editing").
+and `:notify` take an optional argument. Command names match exactly: `:q`
+and `:noh` are the only short names (`:noh` and `:nohlsearch` are two
+registry entries for one action, the two spellings vim users type), and
+`:h` and `:nohl` are unknown commands. The command line, the `/` search
+line and picker queries are edited with the line editor (see "Line
+editing").
 
 `:react` runs `message.react`, with `emoji` when an argument is given, on the
 open room's timeline cursor, whichever pane has focus (unlike `:mute`, which
@@ -1936,6 +2205,18 @@ completes shortcodes: those that start with the typed text (a leading `:` is
 ignored; shortcodes are lower case, so matching is case-sensitive), written
 without colons, in alphabetical order, cycling like `:open`'s completion.
 What `message.react` then does is in "Action registry".
+
+`:notify` (added after 0.1.5) acts on the room `:mute` acts on: the room
+under the room list's cursor while the room list has focus, otherwise the
+open room. Its argument is `all` or `mentions`, lowercase and exactly, as
+the values of `room.notify`'s `mode`; anything else is an error in the
+status line, `unknown mode "<argument as typed>"; expected "all" or
+"mentions"`, and nothing is sent. Completing the name `notify` adds a
+space, and `<Tab>` after `:notify ` completes `all` and `mentions`, those
+that start with the typed text, in that order. Its registry entry comes
+after `:unmute`, with the usage `:notify [<mode>]` (as long as `:react
+[<emoji>]`, so `:help`'s column does not move) and the description "Set
+the room's notifications to all messages or mentions only, or show them".
 
 ### Line editing
 
@@ -2269,8 +2550,8 @@ first line says what it is.
   ```
 
   then an empty line, then one line per registry entry in the order of the
-  Commands table above (`:open`, `:join`, `:mute`, `:unmute`, `:upload`,
-  `:react`, `:recover`, `:help`, `:map`, `:messages`, `:noh`,
+  Commands table above (`:open`, `:join`, `:mute`, `:unmute`, `:notify`,
+  `:upload`, `:react`, `:recover`, `:help`, `:map`, `:messages`, `:noh`,
   `:nohlsearch`, `:q`): the usage,
   padded with spaces to the longest usage plus two, then the description
   (`:open <room>      Open a room by its name`). No other usage text.
@@ -2871,10 +3152,13 @@ resolver"). Movement actions accept a count prefix (`5j`).
 Actions are named `<target>.<verb>`. The first release has:
 
 - rooms: `room.open`, `room.open_selected`, `room.mark_read`, `room.mute`,
-  `room.unmute`, `room.join` (`target`; added after the first release)
+  `room.unmute`, `room.join` (`target`; added after the first release),
+  `room.notify` (`mode = "all" | "mentions"`, optional; added after
+  0.1.5)
 - messages: `message.reply`, `message.edit`, `message.delete`,
   `message.yank`, `message.react`, `message.open`, `message.goto_reply`,
-  `message.resend`, `message.view`
+  `message.resend`, `message.view`, `message.enter` (added after 0.1.5;
+  see "Default keymap")
 - composer: `composer.focus` (`mode = "insert" | "keep"`, default
   `"insert"`), `composer.send`, `composer.newline`, `composer.cancel`,
   `composer.leave` (added after the first release),
@@ -2969,6 +3253,23 @@ default keys for `index = 1` … `9` (see "Default keymap").
 string, required: a room alias, a room ID, a user ID, a matrix.to link or
 the name of a pending invite, read as `:join` reads its argument when the
 action runs (see "Joining rooms and direct messages").
+
+`room.notify` (added after 0.1.5) takes `mode`, `"all"` or `"mentions"`,
+which sets the room's mode to all messages or to mentions and keywords
+only; without `mode` it shows the room's mode and changes nothing (see
+"Notification modes" in "Matrix adapter"), as `message.react` without
+`emoji` opens the picker. Its values are fixed, as `composer.focus`'s
+`mode` is: an unknown one (`mode = "mute"`) is a warning that ignores the
+binding, so a value a later version adds never stops this one, and a
+value of another type (`mode = 1`) is an error. The action acts on the
+room `room.mute` acts on. `room.mute` and `room.unmute` stay as they are;
+`mode` takes neither `"mute"` nor a value for the account default, which
+`room.mute` then `room.unmute` reach.
+
+`message.enter` (added after 0.1.5), without arguments, opens the thread
+of the message under the cursor when it is a thread root with replies
+and no thread is shown, and otherwise opens the message view (see
+"Threads" and "Default keymap").
 
 ### Layers
 
@@ -3317,6 +3618,26 @@ at `debug` by the worker (see "Error handling").
     lowercase forms of another length), the matches per plain line after
     the line's prefix, and the highlight turned on by every search and
     off by `:noh` and by opening another room, kept across threads
+  - owner work I: `room.notify` (`:notify all` and `:notify mentions` on
+    the room under the room list's cursor and on the open room, from a
+    thread too, each sending `SetMode` with the change and saying "now";
+    the same mode saying "already" and sending nothing; a muted room set
+    to all messages; without `mode` the four texts and no effect; the
+    command's argument errors and completion; the binding's `mode` values,
+    an unknown one a warning and one of another type an error);
+    `RoomModeChanged` changing the mode alone (the counts after
+    optimistic clearing and the place kept, the `Muted` label following,
+    `room.unmute` then allowed), and `room.mute`/`room.unmute` sending
+    `SetMode`; the message view's reaction lines (the chips' order, the
+    oldest sender first, `you`, user IDs without a name, the image's
+    lines, none without reactions and for the help views, the search
+    matches unchanged); `message.enter` (a root with replies opening its
+    thread and recording the jump, a deleted root with replies too, any
+    other message opening the view, every message of a shown thread
+    opening the view, the root included, also when `message.enter` is
+    bound in `thread`), `<CR>` in `timeline` and in `thread`, and
+    `"<CR>" = "message.view"` in `[keymap.timeline]` bringing back the
+    view on a root
 - `mxt-matrix`: tests with constructed inputs for converting SDK values into
   domain types, HTML rendering, download file names, the dimensions of
   uploaded images and the session file. The send queue paths are tested
@@ -3367,6 +3688,21 @@ at `debug` by the worker (see "Error handling").
   thumbnail: encrypted, it answers `PreviewFailed` without a request;
   plain, it makes one thumbnail request, and when that answers 404 it
   answers `PreviewFailed` without downloading the file.
+  For owner work I, the same harness covers the notification modes:
+  `SetMode` with each change on a room with a mautrix-style room rule
+  without actions, on a muted room and on a room without a rule
+  (`mock_set_push_rules` and `mock_delete_push_rules`, matrix-sdk
+  `test_utils/mocks/mod.rs:1658-1679`: the `PUT` of the room rule with
+  `notify` and the sound for `AllMessages` and no action for
+  `MentionsAndKeywords`, the `DELETE` of the override rule of a muted
+  room, none when the room already has the mode), a refused request
+  reported as `EffectFailed`; the mapping of each rule to a
+  `NotificationMode`, a room rule that notifies to `AllMessages`; a sync
+  with changed `m.push_rules` making the room list task send
+  `RoomModeChanged` for the changed room only, and no `RoomUpserted`;
+  and the reaction senders: sorted by timestamp, the names from member
+  events in the store, none for a sender without one, and a name that
+  reaches the store later showing in the item's next diff.
 - `mxt-tui`: unit tests, for example of key conversion, the editor keys
   `mxt-tui` handles itself, wrapping and the cursor by grapheme cluster, the
   composers' reports to the core, and the layout; some assert rendered rows
@@ -3413,6 +3749,10 @@ at `debug` by the worker (see "Error handling").
   `iW` and `y` yanking the WORD in the composer and the message view, and
   `v` and `V` switching a selection between characters and lines from the
   same anchor.
+  Owner work I adds: the message view's editor text with the reaction
+  lines after an empty line (text and image details), a long line of
+  names wrapping into rows, and the image's details limited to half of
+  the view with the image below them.
 - `mxt`: configuration loading from strings: each error and each warning
   with its position and text (the `<C-i>` and `<Tab>` duplicate in either
   order among them, and the `ui.room_list.sort` lists: each key alone,
@@ -3800,6 +4140,24 @@ asking for the recovery key ("Startup").
   `"_p` pastes mxt's register where vim's black hole register is empty,
   and `.` repeats a change made after `"_` with a write to the register
   (see "Input routing").
+- **Counts after a notification mode change** (owner work I). The SDK
+  keeps whether each event notified from when it arrived and does not
+  evaluate stored events again, but for the two exceptions there (see
+  "Counts after a mode change" in "Matrix adapter"), so after `:notify
+  all` a room with dim counts joins the rooms that notify only with its
+  next message, and its bold count then counts the messages since the
+  change, not all its unread ones. The SDK takes the new rules from the
+  sync response that carries them, so a message that reached the
+  homeserver before the rule counts by the old rules, as the homeserver
+  evaluated it. Checked in the sources only: the account check (see the
+  plan) covers the requests, the status lines and the label, not the
+  counts, which need a message from another user.
+- **Who reacted** (owner work I). Names come from the member events the
+  SDK's store has; in a room above 500 members whose members were never
+  loaded, the senders of old reactions that back pagination brought may
+  show as user IDs until mention completion loads the members and the
+  item changes. Display names are not made unique: two members named
+  `Alice` read the same, as senders in the timeline do.
 
 ## Third-party licenses
 
