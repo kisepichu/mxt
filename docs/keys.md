@@ -234,7 +234,7 @@ only the current match, while you type it.
 | Key | Action | |
 |---|---|---|
 | `i`, `a` | `composer.focus` | write in insert mode |
-| `<CR>` | `message.enter` | show the thread of a message with replies, as `t` does; any other message in full, or the image (of a sticker too) |
+| `<CR>` | `message.enter` | show the thread of a message with replies, as `t` does; any other message in full, or the image (of a sticker too), with who reacted |
 | `r` | `message.reply` | reply |
 | `e` | `message.edit` | edit your own text message (the composer must be empty) |
 | `dd` | `message.delete` | delete your own message, after `y` |
@@ -249,6 +249,13 @@ only the current match, while you type it.
 Up to mxt 0.1.5, `<CR>` showed every message in full, a thread root too;
 `"<CR>" = "message.view"` in `[keymap.timeline]` keeps that, in threads
 too. In a thread, `<CR>` shows every message in full, the root included.
+
+The view lists each reaction shown under the message, in that order, with
+who reacted, oldest first (`👍 Alice, Bob, you`; a user ID where mxt has
+no name), under the text or under an image's size line, after an empty
+line. The lines are part of the view's text, so `y` and the view's `/` see
+them, while the timeline's `yy` copies the message alone. The view shows
+the reactions as they were when it opened; open it again for newer ones.
 
 A message that failed for a passing reason, such as a lost connection, also
 goes out by itself once the sync is back; `R` is for the others.

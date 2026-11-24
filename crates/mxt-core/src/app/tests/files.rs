@@ -97,6 +97,7 @@ fn image_view(n: u32) -> Effect {
         name: "cat.png".into(),
         size: Some(2048),
         dimensions: Some((640, 480)),
+        reactions: Vec::new(),
     }))
 }
 fn fetch(n: u32) -> Effect {

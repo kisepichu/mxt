@@ -242,6 +242,7 @@ fn enter_on_a_sticker_shows_its_image_in_the_message_view() {
                 name: "a happy cat".into(),
                 size: None,
                 dimensions: Some((256, 256)),
+                reactions: Vec::new(),
             })),
             Effect::Matrix(MatrixEffect::FetchImage {
                 room: id(C),
